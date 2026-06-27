@@ -11,6 +11,14 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
+        // 1. Intentar ~/.config/letterboxd-cli/.env (instalación global)
+        if let Some(config_dir) = dirs::config_dir() {
+            let global_env = config_dir.join("letterboxd-cli").join(".env");
+            if global_env.exists() {
+                dotenvy::from_path(&global_env).ok();
+            }
+        }
+        // 2. Intentar .env en el directorio actual (desarrollo)
         dotenvy::dotenv().ok();
 
         let client_id = std::env::var("LETTERBOXD_CLIENT_ID")
