@@ -1,8 +1,10 @@
 mod auth;
 mod config;
 mod letterboxd;
+mod progress;
 mod recommend;
 mod tmdb;
+mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -10,11 +12,15 @@ use colored::Colorize;
 
 use config::Config;
 use letterboxd::LetterboxdClient;
+use progress::CliProgress;
 use recommend::build_recommendations;
 use tmdb::TmdbClient;
 
 #[derive(Parser)]
-#[command(name = "letterboxd-cli", about = "Recomendaciones de películas desde Letterboxd")]
+#[command(
+    name = "letterboxd-cli",
+    about = "Recomendaciones de películas desde Letterboxd"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -24,6 +30,21 @@ struct Cli {
 enum Commands {
     /// Genera recomendaciones de películas basadas en tu historial de Letterboxd
     Recommend {
+        /// Número de recomendaciones a mostrar
+        #[arg(short, long, default_value_t = 10)]
+        count: usize,
+
+        /// Rating mínimo propio para semillas (escala 0.5–5.0)
+        #[arg(short = 'r', long, default_value_t = 4.0)]
+        min_rating: f32,
+
+        /// Imprime las recomendaciones como JSON en lugar de texto formateado
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Abre una interfaz interactiva (TUI) para explorar recomendaciones
+    Tui {
         /// Número de recomendaciones a mostrar
         #[arg(short, long, default_value_t = 10)]
         count: usize,
@@ -44,13 +65,23 @@ async fn main() -> Result<()> {
         .build()?;
 
     match cli.command {
-        Commands::Recommend { count, min_rating } => {
+        Commands::Recommend {
+            count,
+            min_rating,
+            json,
+        } => {
             let token = auth::get_access_token(&http, &config).await?;
 
             let lb = LetterboxdClient::new(&http, &token);
             let tmdb = TmdbClient::new(&http, &config.tmdb_bearer_token);
 
-            let recs = build_recommendations(&lb, &tmdb, count, min_rating).await?;
+            let recs =
+                build_recommendations(&lb, &tmdb, count, min_rating, &CliProgress::new()).await?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&recs)?);
+                return Ok(());
+            }
 
             println!(
                 "\n  {}\n",
@@ -77,6 +108,9 @@ async fn main() -> Result<()> {
             }
 
             println!();
+        }
+        Commands::Tui { count, min_rating } => {
+            tui::run(config, http, count, min_rating).await?;
         }
     }
 

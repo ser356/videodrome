@@ -1,23 +1,28 @@
 # letterboxd-cli
 
 CLI en Rust para obtener recomendaciones de películas basadas en el historial y ratings de Letterboxd,
-usando la API no oficial de Letterboxd y la API de TMDB.
+usando la API no oficial de Letterboxd y la API de TMDB. Incluye una interfaz interactiva (TUI) además
+del modo de texto plano.
 
 ---
 
 ## Credenciales
 
-Todas las credenciales van en `.env` en la raíz del proyecto (nunca en el repositorio):
+Todas las credenciales van en `.env`, en la raíz del proyecto (desarrollo) o en
+`~/.config/letterboxd-cli/.env` (uso global — tiene prioridad si existe). Nunca se commitean.
 
 ```env
 LETTERBOXD_CLIENT_ID=<tu_client_id>
 LETTERBOXD_CLIENT_SECRET=<tu_client_secret>
 LETTERBOXD_REFRESH_TOKEN=<tu_refresh_token>
 LETTERBOXD_USERNAME=<tu_username>
-TMDB_API_KEY=<tu_tmdb_api_key>
+TMDB_BEARER_TOKEN=<tu_tmdb_bearer_token>
 ```
 
-El `.env` está en `.gitignore`. El binario lee las variables con `dotenvy`.
+`.env` está en `.gitignore`. El binario lee las variables con `dotenvy` (ver `config.rs`).
+
+> Nota: TMDB se usa con **Bearer token** (`Authorization: Bearer <token>`, el "API Read Access Token"
+> de TMDB v4), no con el `api_key` de query string de la v3.
 
 ---
 
@@ -26,12 +31,15 @@ El `.env` está en `.gitignore`. El binario lee las variables con `dotenvy`.
 ```
 letterboxd-cli/
 ├── src/
-│   ├── main.rs          # Punto de entrada, CLI (clap)
+│   ├── main.rs          # Punto de entrada, CLI (clap): subcomandos `recommend` y `tui`
 │   ├── auth.rs          # OAuth2: refresh_token → access_token, caché en disco
-│   ├── letterboxd.rs    # Cliente HTTP para la API de Letterboxd
-│   ├── tmdb.rs          # Cliente HTTP para la API de TMDB
-│   ├── recommend.rs     # Lógica de recomendación
+│   ├── letterboxd.rs    # Cliente HTTP para la API de Letterboxd (log-entries, watchlist, ratings)
+│   ├── tmdb.rs          # Cliente HTTP para la API de TMDB (recomendaciones, con caché)
+│   ├── recommend.rs     # Lógica de recomendación (funciones puras + orquestación async)
+│   ├── progress.rs      # Trait `Progress` + implementación indicatif para la CLI
+│   ├── tui.rs            # Interfaz interactiva (ratatui + crossterm)
 │   └── config.rs        # Carga de variables de entorno
+├── .github/workflows/ci.yml  # fmt, clippy, test, build
 ├── .env                 # Credenciales (no commitear)
 ├── .gitignore
 ├── Cargo.toml
@@ -52,6 +60,11 @@ serde_json = "1"
 dotenvy = "0.15"
 anyhow = "1"
 dirs = "5"
+indicatif = "0.17"
+colored = "2"
+ratatui = "0.29"
+crossterm = "0.28"
+futures = "0.3"
 ```
 
 ---
@@ -97,14 +110,11 @@ Base URL: `https://api.letterboxd.com/api/v0`
 GET /me
 Authorization: Bearer <access_token>
 ```
-Devuelve `{ "id": "<member_lid>", ... }`. Guardar el LID para las siguientes llamadas.
+Devuelve `{ "member": { "id": "<member_lid>", ... } }`. Guardar el LID para las siguientes llamadas.
 
-### Obtener log entries (películas vistas con rating)
+### Obtener log entries (películas vistas, con o sin rating)
 ```
-GET /members/<member_lid>/log-entries
-  ?perPage=100
-  &cursor=<cursor>        # paginación
-  &sort=WhenRated
+GET /log-entries?member=<member_lid>&perPage=100&cursor=<cursor>
 Authorization: Bearer <access_token>
 ```
 
@@ -120,79 +130,140 @@ Iterar con cursor hasta agotar todas las páginas. Cada entrada tiene:
 }
 ```
 
-Solo nos interesan entradas con `rating` presente. Filtrar las que no tienen rating.
+Todas las entradas cuentan como "ya vistas" (se excluyen de las recomendaciones). Solo las que
+tienen `rating >= min_rating` se usan como semillas.
+
+### Obtener la watchlist del usuario
+```
+GET /members/<member_lid>/watchlist?perPage=100&cursor=<cursor>
+Authorization: Bearer <access_token>
+```
+
+Paginado igual que log-entries. Las películas de la watchlist también se excluyen de las
+recomendaciones (ya las conoces, aunque no las hayas visto).
 
 ---
 
 ## API de TMDB (`tmdb.rs`)
 
 Base URL: `https://api.themoviedb.org/3`
-Auth: query param `api_key=<TMDB_API_KEY>`
+Auth: header `Authorization: Bearer <TMDB_BEARER_TOKEN>`
 
 ### Obtener recomendaciones por película
 ```
-GET /movie/<tmdb_id>/recommendations?api_key=...&language=es-ES
+GET /movie/<tmdb_id>/recommendations?language=es-ES&page=1
+Authorization: Bearer <TMDB_BEARER_TOKEN>
 ```
 
-Devuelve lista de películas similares con `id`, `title`, `vote_average`, `popularity`.
+Devuelve lista de películas similares con `id`, `title`, `vote_average`, `popularity`. Los
+resultados se cachean en disco por `tmdb_id` (TTL 24h) para no repetir la misma consulta en
+ejecuciones sucesivas.
 
 ---
 
 ## Lógica de recomendación (`recommend.rs`)
 
-1. Cargar todos los log entries del usuario → lista de `(tmdb_id, rating)`.
-2. Construir un set de `tmdb_id` vistos (para excluir después).
-3. Tomar las películas con rating ≥ 4.0 (en escala Letterboxd de 0.5 a 5.0).
-4. Para cada una, llamar a TMDB `/recommendations` → acumular películas candidatas.
-5. Excluir candidatas que estén en el set de vistas.
-6. Puntuar candidatas: frecuencia de aparición × `vote_average` de TMDB.
-7. Ordenar por puntuación descendente y devolver las top N (configurable, por defecto 10).
+1. Cargar en paralelo los log entries y la watchlist del usuario.
+2. Construir un set de `tmdb_id` "vistos o en watchlist" (para excluir después).
+3. Tomar las películas con rating ≥ `min_rating` (en escala Letterboxd de 0.5 a 5.0) como semillas.
+4. Para cada semilla, llamar a TMDB `/recommendations` (en paralelo, con límite de concurrencia y
+   caché) → acumular películas candidatas y su frecuencia de aparición.
+5. Excluir candidatas que estén en el set de vistas/watchlist.
+6. Pre-seleccionar `count * 3` candidatas por `frecuencia × vote_average` de TMDB.
+7. Para esa preselección, obtener el rating comunitario de Letterboxd (en paralelo) y recalcular
+   el score final: `frecuencia × rating_LB` (o `frecuencia × vote_average/2` si Letterboxd no
+   tiene el film).
+8. Ordenar por score descendente y devolver las top N (configurable, por defecto 10).
+
+La lógica pura (extracción de semillas/vistos, pre-scoring, score final) está separada de la
+orquestación async y cubierta por tests unitarios (`#[cfg(test)]` en `recommend.rs`).
+
+El progreso de estas etapas se reporta a través del trait `Progress` (`progress.rs`), implementado
+con barras `indicatif` en la CLI y con un canal `tokio::mpsc` en la TUI — la lógica de negocio no
+sabe ni le importa cuál de los dos consume los eventos.
 
 ---
 
 ## Comandos CLI
 
 ```
-letterboxd-cli recommend [--count <N>] [--min-rating <R>]
+letterboxd-cli recommend [--count <N>] [--min-rating <R>] [--json]
+letterboxd-cli tui [--count <N>] [--min-rating <R>]
 ```
+
+### `recommend`
 
 - `--count`: número de recomendaciones a mostrar (por defecto 10)
 - `--min-rating`: rating mínimo propio para considerar una película como semilla (por defecto 4.0)
+- `--json`: imprime las recomendaciones como JSON en stdout en lugar de texto formateado (para
+  scripting; las barras de progreso van a stderr y no interfieren)
 
-Salida esperada (stdout):
+Salida esperada (stdout, modo texto):
 ```
 🎬 Recomendaciones para <username>
 
- 1. Título de la película (TMDB: 8.2)
- 2. Otro título (TMDB: 7.9)
+ 1. Título de la película ★ 4.29
+ 2. Otro título            ★ 3.88
 ...
 ```
+
+### `tui`
+
+Abre una interfaz interactiva de terminal (ratatui) que carga las recomendaciones en segundo plano
+sin bloquear el redibujado. Atajos:
+
+- `↑/↓` o `j/k`: mover selección
+- `r`: (re)cargar recomendaciones con los parámetros actuales
+- `+`/`-`: subir/bajar `min_rating` en 0.5
+- `[`/`]`: bajar/subir `count` en 5
+- `q` / `Esc`: salir
+
+Cambiar `min_rating` o `count` no vuelve a consultar automáticamente — hay que pulsar `r`
+(se muestra un aviso de "parámetros modificados" mientras tanto).
 
 ---
 
 ## Caché
 
-- Token OAuth: `~/.config/letterboxd-cli/token.json`
-- Log entries: `~/.config/letterboxd-cli/log_entries.json` con TTL de 1 hora (evitar llamadas repetidas durante desarrollo)
+- Token OAuth: `~/.config/letterboxd-cli/token.json` — se renueva automáticamente al expirar.
+- Log entries: `~/.config/letterboxd-cli/log_entries.json` — TTL 1 hora.
+- Watchlist: `~/.config/letterboxd-cli/watchlist.json` — TTL 1 hora.
+- Recomendaciones TMDB por película: `~/.config/letterboxd-cli/tmdb_recs_cache.json` — TTL 24 horas.
 
 ---
 
 ## Notas de implementación
 
-- Usar `reqwest` en modo async con `tokio`.
-- Todos los errores con `anyhow::Result` — no usar `unwrap` fuera de `main`.
-- La paginación de Letterboxd usa cursor opaco: el campo `next` del response. Parar cuando `next` sea null.
-- TMDB puede devolver películas sin `tmdb_id` en el link de Letterboxd (algunos títulos oscuros). Saltarlas silenciosamente.
-- Rate limiting: añadir `tokio::time::sleep(Duration::from_millis(100))` entre llamadas a TMDB para no saturar.
+- `reqwest` en modo async con `tokio`.
+- Todos los errores con `anyhow::Result` — no usar `unwrap` fuera de `main` (excepto en tests y en
+  bloqueos de `Mutex`/aritmética de tiempo que no pueden fallar en la práctica).
+- La paginación de Letterboxd usa cursor opaco: el campo `next` del response. Parar cuando `next`
+  sea null.
+- TMDB puede devolver películas sin `tmdb_id` en el link de Letterboxd (algunos títulos oscuros).
+  Saltarlas silenciosamente.
+- Las llamadas a TMDB (`/recommendations`) y a Letterboxd (`get_lb_rating`) se hacen en paralelo con
+  `futures::stream::buffer_unordered`, limitando la concurrencia (8 y 6 respectivamente) en lugar de
+  serializar con `sleep` — más rápido sin saturar las APIs.
+- La TUI nunca debe usar directamente las barras `indicatif` (escriben ANSI fuera de la pantalla
+  alternativa de ratatui); usa siempre el trait `Progress` para que la lógica de negocio sea
+  agnóstica del frontend.
 
 ---
 
 ## Estado actual
 
-- [ ] Estructura del proyecto inicializada
-- [ ] Auth con refresh_token funcionando
-- [ ] Paginación de log entries completa
-- [ ] Integración TMDB
-- [ ] Lógica de scoring
-- [ ] CLI con clap
-- [ ] Caché de log entries
+- [x] Estructura del proyecto inicializada
+- [x] Auth con refresh_token funcionando
+- [x] Paginación de log entries completa
+- [x] Integración TMDB
+- [x] Lógica de scoring
+- [x] CLI con clap
+- [x] Caché de log entries
+- [x] Exclusión de watchlist
+- [x] Caché de recomendaciones TMDB
+- [x] Llamadas concurrentes (TMDB / ratings de Letterboxd)
+- [x] Interfaz TUI (ratatui)
+- [x] Salida `--json`
+- [x] Tests unitarios de la lógica de scoring
+- [x] CI (fmt, clippy, test, build)
+- [ ] Tests de integración de los clientes HTTP (mocking)
