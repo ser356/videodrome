@@ -142,7 +142,7 @@ pub async fn build_recommendations<P: Progress>(
     // ── 3. Ratings de Letterboxd (en paralelo) → re-score final ─────────────
     progress.stage("Obteniendo ratings de Letterboxd…", fetch_count as u64);
 
-    let mut lb_stream = stream::iter(candidates.into_iter())
+    let mut lb_stream = stream::iter(candidates)
         .map(|(movie, f)| async move {
             let lb_rating = lb_client.get_lb_rating(movie.id).await;
             progress.inc();
