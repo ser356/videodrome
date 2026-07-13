@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BASE_URL: &str = "https://api.letterboxd.com/api/v0";
 const LOG_ENTRIES_CACHE: &str = "log_entries.json";
+const WATCHLIST_CACHE: &str = "watchlist.json";
 const CACHE_TTL_SECS: u64 = 3600;
 
 // ── Estructuras de respuesta ────────────────────────────────────────────────
@@ -33,6 +34,17 @@ pub struct LogEntry {
 struct LogEntriesResponse {
     items: Vec<LogEntry>,
     next: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WatchlistResponse {
+    items: Vec<WatchlistItem>,
+    next: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WatchlistItem {
+    film: Film,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +112,44 @@ fn save_entries_cache(entries: &[LogEntry]) -> Result<()> {
     Ok(())
 }
 
+// ── Caché de watchlist ──────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct CachedWatchlist {
+    timestamp: u64,
+    films: Vec<Film>,
+}
+
+fn watchlist_cache_path() -> Result<PathBuf> {
+    let dir = dirs::config_dir()
+        .context("No se puede obtener el directorio de configuración")?
+        .join("letterboxd-cli");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(WATCHLIST_CACHE))
+}
+
+fn load_cached_watchlist() -> Option<Vec<Film>> {
+    let path = watchlist_cache_path().ok()?;
+    let data = std::fs::read_to_string(path).ok()?;
+    let cached: CachedWatchlist = serde_json::from_str(&data).ok()?;
+    if now_unix() - cached.timestamp < CACHE_TTL_SECS {
+        Some(cached.films)
+    } else {
+        None
+    }
+}
+
+fn save_watchlist_cache(films: &[Film]) -> Result<()> {
+    let cached = CachedWatchlist {
+        timestamp: now_unix(),
+        films: films.to_vec(),
+    };
+    let path = watchlist_cache_path()?;
+    let json = serde_json::to_string(&cached)?;
+    std::fs::write(path, json).context("No se puede guardar la caché de watchlist")?;
+    Ok(())
+}
+
 // ── Cliente de Letterboxd ───────────────────────────────────────────────────
 
 pub struct LetterboxdClient<'a> {
@@ -143,9 +193,7 @@ impl<'a> LetterboxdClient<'a> {
         let mut cursor: Option<String> = None;
 
         loop {
-            let mut url = format!(
-                "{BASE_URL}/log-entries?member={member_id}&perPage=100"
-            );
+            let mut url = format!("{BASE_URL}/log-entries?member={member_id}&perPage=100");
             if let Some(ref c) = cursor {
                 url.push_str(&format!("&cursor={c}"));
             }
@@ -179,6 +227,54 @@ impl<'a> LetterboxdClient<'a> {
 
         save_entries_cache(&all_entries).ok();
         Ok(all_entries)
+    }
+
+    /// Obtiene las películas en la watchlist del usuario (paginado, cacheado).
+    pub async fn get_watchlist(&self) -> Result<Vec<Film>> {
+        if let Some(films) = load_cached_watchlist() {
+            return Ok(films);
+        }
+
+        let member_id = self.get_member_id().await?;
+
+        let mut all_films: Vec<Film> = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let mut url = format!("{BASE_URL}/members/{member_id}/watchlist?perPage=100");
+            if let Some(ref c) = cursor {
+                url.push_str(&format!("&cursor={c}"));
+            }
+
+            let resp = self
+                .http
+                .get(&url)
+                .bearer_auth(self.token)
+                .send()
+                .await
+                .context("Error al obtener watchlist")?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Error en watchlist ({status}): {body}");
+            }
+
+            let page: WatchlistResponse =
+                resp.json().await.context("Error al parsear watchlist")?;
+
+            all_films.extend(page.items.into_iter().map(|i| i.film));
+
+            match page.next {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        save_watchlist_cache(&all_films).ok();
+        Ok(all_films)
     }
 
     /// Obtiene el rating comunitario de Letterboxd para un film dado su TMDB ID.

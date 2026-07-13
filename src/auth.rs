@@ -24,8 +24,7 @@ fn cache_path() -> Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("No se puede obtener el directorio de configuración")?
         .join("letterboxd-cli");
-    std::fs::create_dir_all(&dir)
-        .context("No se puede crear el directorio de caché")?;
+    std::fs::create_dir_all(&dir).context("No se puede crear el directorio de caché")?;
     Ok(dir.join(TOKEN_CACHE_FILE))
 }
 
