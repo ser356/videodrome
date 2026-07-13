@@ -23,7 +23,9 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session};
+use librqbit::{
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, SessionOptions,
+};
 use tempfile::TempDir;
 use tokio::io::{AsyncSeekExt, SeekFrom};
 use tokio::net::TcpListener;
@@ -35,7 +37,6 @@ use tokio_util::sync::CancellationToken;
 pub struct StreamHandle {
     pub url: String,
     pub file_name: String,
-    pub file_size: u64,
     handle: Arc<ManagedTorrent>,
     cancel: CancellationToken,
     _session: Arc<Session>,
@@ -120,9 +121,27 @@ pub async fn start(magnet: String) -> Result<StreamHandle> {
         .tempdir()
         .context("No se pudo crear directorio temporal")?;
 
-    let session = Session::new(tempdir.path().to_path_buf())
-        .await
-        .context("Error inicializando la sesión de librqbit")?;
+    // Un solo cancellation token para toda la sesión: se propaga al motor
+    // librqbit (DHT, listeners TCP/UDP, tareas de fondo) y al servidor axum.
+    // Sin esto, al hacer Drop del StreamHandle el DHT persistía en un
+    // puerto UDP fijo y el siguiente `Session::new` fallaba con "address
+    // already in use" hasta que el proceso se reiniciaba.
+    let cancel = CancellationToken::new();
+
+    let session = Session::new_with_opts(
+        tempdir.path().to_path_buf(),
+        SessionOptions {
+            // No queremos que la sesión reutilice puertos DHT/estado entre
+            // arranques — cada stream es efímero.
+            disable_dht_persistence: true,
+            // Tampoco queremos que persista la lista de torrents.
+            persistence: None,
+            cancellation_token: Some(cancel.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .context("Error inicializando la sesión de librqbit")?;
 
     let response = session
         .add_torrent(
@@ -189,7 +208,6 @@ pub async fn start(magnet: String) -> Result<StreamHandle> {
     };
     let app = Router::new().route("/video", get(serve_video)).with_state(state);
 
-    let cancel = CancellationToken::new();
     let cancel_task = cancel.clone();
     let server_task = tokio::spawn(async move {
         let _ = axum::serve(listener, app)
@@ -202,7 +220,6 @@ pub async fn start(magnet: String) -> Result<StreamHandle> {
     Ok(StreamHandle {
         url,
         file_name,
-        file_size: file_len,
         handle,
         cancel,
         _session: session,

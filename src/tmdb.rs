@@ -189,12 +189,6 @@ impl<'a> TmdbClient<'a> {
         }))
     }
 
-    /// Devuelve el IMDb ID (`tt...`) de una película dado su TMDB ID.
-    /// `None` si TMDB no lo tiene registrado.
-    pub async fn get_imdb_id(&self, tmdb_id: u64) -> Result<Option<String>> {
-        Ok(self.get_movie_details(tmdb_id).await?.and_then(|d| d.imdb_id))
-    }
-
     /// Consulta `/movie/{tmdb_id}?append_to_response=external_ids,translations`
     /// para obtener en una sola llamada:
     /// * `imdb_id` — imprescindible para providers Torznab que lo aceptan.

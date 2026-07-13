@@ -578,14 +578,10 @@ async fn run_app(
                                 }
                             }
                         }
-                        KeyCode::Char(c) => {
-                            if !app.login_busy {
-                                match app.login_focus {
-                                    LoginField::Username => app.login_user.push(c),
-                                    LoginField::Password => app.login_pass.push(c),
-                                }
-                            }
-                        }
+                        KeyCode::Char(c) if !app.login_busy => match app.login_focus {
+                            LoginField::Username => app.login_user.push(c),
+                            LoginField::Password => app.login_pass.push(c),
+                        },
                         _ => {}
                     },
                     View::Search => match key.code {
@@ -665,6 +661,14 @@ async fn run_app(
                         KeyCode::Char('s') => {
                             if let Some(i) = app.tor_state.selected() {
                                 if let Some(t) = app.tor_results.get(i).cloned() {
+                                    // Si había un stream anterior (por
+                                    // ejemplo, VLC ya cerrado pero handle
+                                    // aún en memoria), lo tiramos ahora
+                                    // para que su Drop libere puertos y
+                                    // borre el tempdir ANTES de arrancar
+                                    // la nueva sesión librqbit.
+                                    app.stream = None;
+                                    app.stream_player_alive = None;
                                     // Inicializa el canal de stream la primera
                                     // vez que se usa.
                                     if stream_tx.is_none() {

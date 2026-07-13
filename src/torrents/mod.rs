@@ -81,13 +81,12 @@ pub async fn search_all(
 
     let mut all: Vec<Torrent> = Vec::new();
     while let Some((_name, res)) = futs.next().await {
-        match res {
-            Ok(items) => all.extend(items),
-            // Silenciamos errores individuales: si un provider está caído
-            // (YTS a menudo, un Torznab local mal configurado, etc.) el
-            // resto sigue funcionando. En la TUI no podemos hacer eprintln
-            // porque corromperíamos la pantalla alternativa.
-            Err(_) => {}
+        // Silenciamos errores individuales: si un provider está caído
+        // (YTS a menudo, un Torznab local mal configurado, etc.) el
+        // resto sigue funcionando. En la TUI no podemos hacer eprintln
+        // porque corromperíamos la pantalla alternativa.
+        if let Ok(items) = res {
+            all.extend(items);
         }
     }
 

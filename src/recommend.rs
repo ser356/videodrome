@@ -202,6 +202,7 @@ mod tests {
             title: format!("Movie {id}"),
             vote_average,
             popularity: 0.0,
+            release_date: None,
         }
     }
 

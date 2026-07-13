@@ -106,7 +106,7 @@ impl Config {
 
         let username = resolve("LETTERBOXD_USERNAME", keychain::USERNAME)
             .or_else(|| creds.username.clone())
-            .unwrap_or_else(String::new);
+            .unwrap_or_default();
         let username = std::env::var("LETTERBOXD_DISPLAY_USERNAME")
             .ok()
             .filter(|s| !s.is_empty())
