@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,13 +17,30 @@ jobs:
       - name: Instalar toolchain de Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - name: Cachear dependencias de cargo
-        uses: Swatinem/rust-cache@v2
+          components: rustfmt
 
       - name: cargo fmt --check
         run: cargo fmt --all --check
+
+  check:
+    # Matrix con macos-latest para que el código gateado a
+    # `target_os = "macos"` (Keychain) se compile y se lintee de verdad,
+    # no solo en Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar toolchain de Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cachear dependencias de cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings

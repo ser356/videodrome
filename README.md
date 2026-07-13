@@ -42,6 +42,31 @@ TMDB_BEARER_TOKEN=<tu_tmdb_bearer_token>
 
 También se puede poner un `.env` en el directorio de trabajo actual (útil durante el desarrollo). Si existen los dos, el global tiene prioridad.
 
+### Credenciales en el Keychain de macOS (opcional)
+
+En macOS, en vez de (o además de) `.env`, las credenciales sensibles se pueden guardar en el
+Keychain del propio Mac:
+
+```bash
+letterboxd-cli keychain import   # lee el .env actual y guarda cada credencial en el Keychain
+letterboxd-cli keychain clear    # elimina esas credenciales del Keychain
+```
+
+En cada arranque, cada credencial se busca primero en el Keychain y, si no está ahí, se cae a
+`.env` — así que puedes borrar el `.env` una vez importado, si prefieres no tener el secreto en un
+fichero de texto plano.
+
+`LETTERBOXD_USERNAME` no es sensible y siempre se lee de `.env`/entorno.
+
+> **Nota:** esto usa el Keychain local de ese Mac (login keychain), no el Keychain de iCloud. Un
+> item de Keychain solo se sincroniza por iCloud si se marca explícitamente como
+> `kSecAttrSynchronizable`, y eso requiere que el binario esté firmado con un perfil de
+> aprovisionamiento de Apple — algo que un CLI sin firmar (`cargo install`) no tiene. Si usas
+> `letterboxd-cli` en varios Macs, hay que ejecutar `keychain import` en cada uno.
+>
+> Este comando solo funciona compilado para macOS; en Linux/Windows devuelve un error explicando
+> que el Keychain no está disponible.
+
 ---
 
 ## Uso
@@ -114,6 +139,16 @@ Atajos de teclado:
 | `q` / `Esc` | Salir |
 
 Al cambiar `count` o `min_rating` con las teclas, hay que pulsar `r` para recargar — la barra de estado avisa cuando los parámetros mostrados están desactualizados.
+
+### keychain (solo macOS)
+
+Gestiona las credenciales guardadas en el Keychain de macOS. Ver [Credenciales en el Keychain de
+macOS](#credenciales-en-el-keychain-de-macos-opcional) arriba.
+
+```bash
+letterboxd-cli keychain import
+letterboxd-cli keychain clear
+```
 
 ---
 

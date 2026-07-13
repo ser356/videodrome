@@ -24,6 +24,28 @@ TMDB_BEARER_TOKEN=<tu_tmdb_bearer_token>
 > Nota: TMDB se usa con **Bearer token** (`Authorization: Bearer <token>`, el "API Read Access Token"
 > de TMDB v4), no con el `api_key` de query string de la v3.
 
+### Keychain de macOS (opcional, `keychain.rs`)
+
+En macOS, cada credencial sensible (`client_id`, `client_secret`, `refresh_token`,
+`tmdb_bearer_token` — `username` no) se busca primero en el Keychain local del Mac
+(`Config::from_env()` en `config.rs`) y, si no está, se cae a `.env`. Se gestiona con:
+
+```
+letterboxd-cli keychain import   # lee .env y lo guarda en el Keychain
+letterboxd-cli keychain clear    # borra esas entradas del Keychain
+```
+
+Implementado con el crate `keyring` (feature `apple-native`), como dependencia
+`[target.'cfg(target_os = "macos")'.dependencies]` — no se compila en otros sistemas operativos.
+`keychain.rs` expone `get`/`set`/`delete` con la misma firma en todas las plataformas: en
+Linux/Windows `get` devuelve `None` (fallback silencioso a `.env`) y `set`/`delete` devuelven
+error explicando que el Keychain no está disponible.
+
+Es el Keychain **local** de ese Mac (login keychain), no el Keychain de iCloud: un item solo se
+sincroniza por iCloud si se marca `kSecAttrSynchronizable`, y eso requiere que el binario esté
+firmado con un perfil de aprovisionamiento — algo que un CLI sin firmar no tiene. En un Mac nuevo
+hay que volver a ejecutar `keychain import`.
+
 ---
 
 ## Arquitectura
@@ -38,8 +60,9 @@ letterboxd-cli/
 │   ├── recommend.rs     # Lógica de recomendación (funciones puras + orquestación async)
 │   ├── progress.rs      # Trait `Progress` + implementación indicatif para la CLI
 │   ├── tui.rs            # Interfaz interactiva (ratatui + crossterm)
-│   └── config.rs        # Carga de variables de entorno
-├── .github/workflows/ci.yml  # fmt, clippy, test, build
+│   ├── keychain.rs      # Acceso al Keychain de macOS (get/set/delete, no-op en otros SO)
+│   └── config.rs        # Carga de variables de entorno (Keychain → .env)
+├── .github/workflows/ci.yml  # fmt, clippy, test, build (matrix ubuntu/macos)
 ├── .env                 # Credenciales (no commitear)
 ├── .gitignore
 ├── Cargo.toml
@@ -65,6 +88,9 @@ colored = "2"
 ratatui = "0.29"
 crossterm = "0.28"
 futures = "0.3"
+
+# Solo en macOS:
+keyring = { version = "3", features = ["apple-native"] }
 ```
 
 ---
@@ -189,6 +215,7 @@ sabe ni le importa cuál de los dos consume los eventos.
 ```
 letterboxd-cli recommend [--count <N>] [--min-rating <R>] [--json]
 letterboxd-cli tui [--count <N>] [--min-rating <R>]
+letterboxd-cli keychain <import|clear>
 ```
 
 ### `recommend`
@@ -265,5 +292,6 @@ Cambiar `min_rating` o `count` no vuelve a consultar automáticamente — hay qu
 - [x] Interfaz TUI (ratatui)
 - [x] Salida `--json`
 - [x] Tests unitarios de la lógica de scoring
-- [x] CI (fmt, clippy, test, build)
+- [x] CI (fmt, clippy, test, build; matrix ubuntu/macos)
+- [x] Credenciales desde el Keychain de macOS (`keychain import`/`clear`)
 - [ ] Tests de integración de los clientes HTTP (mocking)
