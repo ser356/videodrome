@@ -1,0 +1,114 @@
+name: Release
+
+# Se dispara al pushear un tag `v*` (ej. `v0.1.0`, `v0.2.0-rc1`).
+# También lanzable a mano desde la pestaña Actions.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag/versión a publicar (ej. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write # necesario para crear/actualizar la Release
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            name: linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+            name: macos-arm64
+          - os: macos-13 # Intel Mac runner
+            target: x86_64-apple-darwin
+            archive: tar.gz
+            name: macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            name: windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar toolchain de Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cachear dependencias de cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Build en release con las credenciales de app inyectadas como env
+      # vars — `option_env!` en config.rs las hornea al binario.
+      - name: cargo build --release
+        env:
+          LB_APP_CLIENT_ID: ${{ secrets.LB_APP_CLIENT_ID }}
+          LB_APP_CLIENT_SECRET: ${{ secrets.LB_APP_CLIENT_SECRET }}
+          LB_APP_TMDB_BEARER: ${{ secrets.LB_APP_TMDB_BEARER }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Empaqueta el binario + README + LICENSE (si existe).
+      - name: Empaquetar (tar.gz, Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/letterboxd-cli dist/
+          cp README.md dist/ 2>/dev/null || true
+          cp LICENSE dist/ 2>/dev/null || true
+          cd dist
+          tar czf ../letterboxd-cli-${{ matrix.name }}.tar.gz *
+
+      - name: Empaquetar (zip, Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/letterboxd-cli.exe dist/
+          if (Test-Path README.md) { Copy-Item README.md dist/ }
+          if (Test-Path LICENSE)   { Copy-Item LICENSE dist/ }
+          Compress-Archive -Path dist/* -DestinationPath letterboxd-cli-${{ matrix.name }}.zip
+
+      - name: Subir artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: letterboxd-cli-${{ matrix.name }}
+          path: letterboxd-cli-${{ matrix.name }}.*
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descargar artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publicar Release en GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          # Si vino de push de tag, usa el tag; si vino de workflow_dispatch,
+          # usa el input.
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true

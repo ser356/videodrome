@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -63,6 +65,13 @@ enum StreamEvent {
     Failed(String),
 }
 
+/// Eventos del worker de login.
+enum LoginEvent {
+    /// Login OK: refresh_token + username que hay que persistir.
+    Ok { refresh_token: String, username: String },
+    Failed(String),
+}
+
 struct ChannelProgress {
     tx: mpsc::UnboundedSender<WorkerEvent>,
 }
@@ -84,12 +93,22 @@ impl Progress for ChannelProgress {
 enum View {
     /// Menú de bienvenida: recomendaciones vs búsqueda directa.
     Menu,
+    /// Login de Letterboxd (usuario/contraseña) — solo si aún no hay
+    /// refresh_token guardado.
+    Login,
     /// Lista de recomendaciones desde Letterboxd.
     Recs,
     /// Formulario para escribir un título y buscar torrents directamente.
     Search,
     /// Resultados de torrents (venido de Recs o de Search).
     Torrents,
+}
+
+/// Campo enfocado en la vista de login.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoginField {
+    Username,
+    Password,
 }
 
 /// De dónde venimos al entrar a la vista de torrents. Determina a qué vista
@@ -132,6 +151,13 @@ struct App {
 
     // Búsqueda directa
     search_input: String,
+
+    // Login de Letterboxd
+    login_user: String,
+    login_pass: String,
+    login_focus: LoginField,
+    login_busy: bool,
+    login_error: Option<String>,
 
     // Estado de streaming (vive mientras la TUI está abierta)
     stream: Option<crate::stream::StreamHandle>,
@@ -177,6 +203,11 @@ impl App {
             tor_source: TorrentsSource::FromRecs,
             menu_state,
             search_input: String::new(),
+            login_user: String::new(),
+            login_pass: String::new(),
+            login_focus: LoginField::Username,
+            login_busy: false,
+            login_error: None,
             stream: None,
             stream_msg: None,
             stream_player_alive: None,
@@ -194,7 +225,7 @@ impl App {
             View::Menu => (&mut self.menu_state, MENU_ITEMS.len()),
             View::Recs => (&mut self.list_state, self.recs.len()),
             View::Torrents => (&mut self.tor_state, self.tor_results.len()),
-            View::Search => return,
+            View::Search | View::Login => return,
         };
         if len == 0 {
             return;
@@ -212,7 +243,7 @@ impl App {
             View::Menu => (&mut self.menu_state, MENU_ITEMS.len()),
             View::Recs => (&mut self.list_state, self.recs.len()),
             View::Torrents => (&mut self.tor_state, self.tor_results.len()),
-            View::Search => return,
+            View::Search | View::Login => return,
         };
         if len == 0 {
             return;
@@ -246,14 +277,21 @@ pub async fn run(
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // EnableBracketedPaste hace que Cmd+V / Ctrl+Shift+V en el terminal
+    // emita un `Event::Paste(String)` en vez de un chorro de Char events
+    // — necesario para pegar contraseñas largas en el login.
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_app(&mut terminal, config, http, count, min_rating).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -266,10 +304,12 @@ async fn run_app(
     count: usize,
     min_rating: f32,
 ) -> Result<()> {
+    let mut config = config;
     let mut app = App::new(config.username.clone(), count, min_rating);
     let mut rx: Option<mpsc::UnboundedReceiver<WorkerEvent>> = None;
     let mut tor_rx: Option<mpsc::UnboundedReceiver<TorrentEvent>> = None;
     let mut stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>> = None;
+    let mut login_rx: Option<mpsc::UnboundedReceiver<LoginEvent>> = None;
 
     // Sender del canal de streaming, compartido: cada spawn_stream lo clona.
     // Lo mantenemos en un slot que se rellena en el primer uso.
@@ -359,6 +399,44 @@ async fn run_app(
             }
         }
 
+        if let Some(r) = login_rx.as_mut() {
+            while let Ok(evt) = r.try_recv() {
+                match evt {
+                    LoginEvent::Ok {
+                        refresh_token,
+                        username,
+                    } => {
+                        // Persiste en disco para futuras ejecuciones.
+                        let creds = crate::credentials::Credentials {
+                            refresh_token: Some(refresh_token.clone()),
+                            username: Some(username.clone()),
+                        };
+                        if let Err(e) = crate::credentials::save(&creds) {
+                            app.login_error =
+                                Some(format!("Guardado local falló: {e}"));
+                            app.login_busy = false;
+                            continue;
+                        }
+                        // Actualiza config en memoria y salta a recs.
+                        config.refresh_token = Some(refresh_token);
+                        config.username = username.clone();
+                        app.username = username;
+                        app.login_busy = false;
+                        app.login_error = None;
+                        app.login_pass.clear();
+                        app.view = View::Recs;
+                        if app.recs.is_empty() && !app.loading {
+                            spawn_fetch(&config, &http, &mut app, &mut rx);
+                        }
+                    }
+                    LoginEvent::Failed(e) => {
+                        app.login_busy = false;
+                        app.login_error = Some(e);
+                    }
+                }
+            }
+        }
+
         // Detección de VLC cerrado: si el proceso del reproductor terminó,
         // liberamos el StreamHandle (su Drop apaga axum + libr qbit + borra
         // el tempdir) y actualizamos el mensaje para que el user sepa que
@@ -373,14 +451,41 @@ async fn run_app(
         }
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+            let evt = event::read()?;
+            // Pegar (Cmd+V / Ctrl+Shift+V) llega como Event::Paste gracias a
+            // EnableBracketedPaste. Lo aceptamos solo en vistas con input
+            // de texto.
+            if let Event::Paste(s) = &evt {
+                match app.view {
+                    View::Login => {
+                        if !app.login_busy {
+                            let target = match app.login_focus {
+                                LoginField::Username => &mut app.login_user,
+                                LoginField::Password => &mut app.login_pass,
+                            };
+                            target.push_str(s.trim_end_matches(['\n', '\r']));
+                        }
+                    }
+                    View::Search => {
+                        app.search_input
+                            .push_str(s.trim_end_matches(['\n', '\r']));
+                    }
+                    _ => {}
                 }
-                // 'q' cierra la app desde cualquier vista *excepto* Search
-                // (donde 'q' es una tecla válida para escribir en el input).
-                if matches!(key.code, KeyCode::Char('q')) && app.view != View::Search {
-                    break;
+                continue;
+            }
+            let Event::Key(key) = evt else { continue };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            // 'q' cierra la app desde cualquier vista *excepto* Search
+            // y Login (donde 'q' es una tecla válida para escribir en
+            // el input).
+            if matches!(key.code, KeyCode::Char('q'))
+                && app.view != View::Search
+                && app.view != View::Login
+            {
+                break;
                 }
 
                 match app.view {
@@ -390,20 +495,97 @@ async fn run_app(
                         KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
                         KeyCode::Enter => match app.menu_state.selected().unwrap_or(0) {
                             0 => {
-                                // Recomendaciones — arranca la carga si aún
-                                // no se ha hecho.
-                                app.view = View::Recs;
-                                if app.recs.is_empty() && !app.loading {
-                                    spawn_fetch(&config, &http, &mut app, &mut rx);
+                                // Recomendaciones — si aún no hay
+                                // refresh_token, primero login.
+                                if config.refresh_token.is_none() {
+                                    app.view = View::Login;
+                                    app.login_focus = LoginField::Username;
+                                    app.login_error = None;
+                                    app.login_busy = false;
+                                } else {
+                                    app.view = View::Recs;
+                                    if app.recs.is_empty() && !app.loading {
+                                        spawn_fetch(&config, &http, &mut app, &mut rx);
+                                    }
                                 }
                             }
                             1 => {
-                                // Búsqueda directa.
+                                // Búsqueda directa (no requiere login de LB).
                                 app.view = View::Search;
                                 app.search_input.clear();
                             }
                             _ => break,
                         },
+                        _ => {}
+                    },
+                    View::Login => match key.code {
+                        KeyCode::Esc => {
+                            if !app.login_busy {
+                                app.view = View::Menu;
+                                app.login_error = None;
+                            }
+                        }
+                        KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
+                            app.login_focus = match app.login_focus {
+                                LoginField::Username => LoginField::Password,
+                                LoginField::Password => LoginField::Username,
+                            };
+                        }
+                        KeyCode::Enter => {
+                            if app.login_busy {
+                                // ignorar
+                            } else if app.login_focus == LoginField::Username
+                                && app.login_pass.is_empty()
+                            {
+                                // Enter en username salta a password.
+                                app.login_focus = LoginField::Password;
+                            } else if !app.login_user.trim().is_empty()
+                                && !app.login_pass.is_empty()
+                            {
+                                // Submit
+                                if login_rx.is_none() {
+                                    let (tx, rx_new) = mpsc::unbounded_channel();
+                                    login_rx = Some(rx_new);
+                                    spawn_login(
+                                        &http,
+                                        &config,
+                                        &mut app,
+                                        tx,
+                                    );
+                                } else {
+                                    // Ya hay canal — creamos uno nuevo (por
+                                    // si el user reintenta tras error).
+                                    let (tx, rx_new) = mpsc::unbounded_channel();
+                                    login_rx = Some(rx_new);
+                                    spawn_login(
+                                        &http,
+                                        &config,
+                                        &mut app,
+                                        tx,
+                                    );
+                                }
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if !app.login_busy {
+                                match app.login_focus {
+                                    LoginField::Username => {
+                                        app.login_user.pop();
+                                    }
+                                    LoginField::Password => {
+                                        app.login_pass.pop();
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            if !app.login_busy {
+                                match app.login_focus {
+                                    LoginField::Username => app.login_user.push(c),
+                                    LoginField::Password => app.login_pass.push(c),
+                                }
+                            }
+                        }
                         _ => {}
                     },
                     View::Search => match key.code {
@@ -521,7 +703,6 @@ async fn run_app(
                 }
             }
         }
-    }
 
     Ok(())
 }
@@ -769,6 +950,47 @@ fn split_trailing_year(s: &str) -> (String, Option<u16>) {
     (s.to_string(), None)
 }
 
+/// Lanza en tokio el intento de login con usuario/contraseña. Los datos se
+/// leen del `App` (los inputs de la vista Login) y el resultado se emite
+/// por el canal `tx`.
+fn spawn_login(
+    http: &reqwest::Client,
+    config: &Config,
+    app: &mut App,
+    tx: mpsc::UnboundedSender<LoginEvent>,
+) {
+    app.login_busy = true;
+    app.login_error = None;
+
+    let http = http.clone();
+    let client_id = config.client_id.clone();
+    let client_secret = config.client_secret.clone();
+    let user = app.login_user.trim().to_string();
+    let pass = app.login_pass.clone();
+
+    tokio::spawn(async move {
+        match crate::auth::login_with_password(
+            &http,
+            &client_id,
+            &client_secret,
+            &user,
+            &pass,
+        )
+        .await
+        {
+            Ok(result) => {
+                let _ = tx.send(LoginEvent::Ok {
+                    refresh_token: result.refresh_token,
+                    username: user,
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(LoginEvent::Failed(e.to_string()));
+            }
+        }
+    });
+}
+
 /// Comprueba si el título de un release EMPIEZA con `needle` (ambos en
 /// minúsculas). Ignora caracteres no-alfanuméricos al principio (comillas,
 /// corchetes, guiones, etc). Usado por el fallback ruso para descartar
@@ -784,10 +1006,119 @@ fn release_starts_with(release: &str, needle: &str) -> bool {
 fn draw(f: &mut Frame, app: &mut App) {
     match app.view {
         View::Menu => draw_menu(f, app),
+        View::Login => draw_login(f, app),
         View::Search => draw_search(f, app),
         View::Recs => draw_recs(f, app),
         View::Torrents => draw_torrents(f, app),
     }
+}
+
+fn draw_login(f: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4), // título
+            Constraint::Length(3), // usuario
+            Constraint::Length(3), // contraseña
+            Constraint::Length(3), // status/error
+            Constraint::Min(1),    // spacer
+            Constraint::Length(4), // footer
+        ])
+        .split(f.area());
+
+    let title = Paragraph::new(vec![
+        Line::from(vec![Span::styled(
+            "🔐  Login en Letterboxd",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(Span::styled(
+            "Necesario una sola vez — el refresh_token se guardará en ~/.config/letterboxd-cli/credentials.json",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ])
+    .block(Block::default().borders(Borders::ALL));
+    f.render_widget(title, chunks[0]);
+
+    let user_focused = app.login_focus == LoginField::Username;
+    let pass_focused = app.login_focus == LoginField::Password;
+
+    // Cursor sólo en el campo enfocado.
+    let user_text = if user_focused {
+        format!("{}▏", app.login_user)
+    } else {
+        app.login_user.clone()
+    };
+    let user_style = if user_focused {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let user_border = if user_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let user_panel = Paragraph::new(user_text).style(user_style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(user_border)
+            .title(" Usuario "),
+    );
+    f.render_widget(user_panel, chunks[1]);
+
+    let pass_masked = "*".repeat(app.login_pass.chars().count());
+    let pass_text = if pass_focused {
+        format!("{pass_masked}▏")
+    } else {
+        pass_masked
+    };
+    let pass_style = if pass_focused {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let pass_border = if pass_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let pass_panel = Paragraph::new(pass_text).style(pass_style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(pass_border)
+            .title(" Contraseña "),
+    );
+    f.render_widget(pass_panel, chunks[2]);
+
+    let status = if app.login_busy {
+        Line::from(Span::styled(
+            format!("{}  Autenticando…", app.spinner()),
+            Style::default().fg(Color::Cyan),
+        ))
+    } else if let Some(err) = &app.login_error {
+        Line::from(Span::styled(
+            format!("❌  {err}"),
+            Style::default().fg(Color::Red),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "Introduce tu usuario y contraseña de Letterboxd.",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    let status_panel = Paragraph::new(status)
+        .wrap(Wrap { trim: true })
+        .block(Block::default().borders(Borders::ALL).title(" Estado "));
+    f.render_widget(status_panel, chunks[3]);
+
+    let footer = Paragraph::new(
+        "Tab/↓↑ cambiar campo · Enter enviar · Esc volver al menú",
+    )
+    .wrap(Wrap { trim: true })
+    .block(Block::default().borders(Borders::ALL));
+    f.render_widget(footer, chunks[5]);
 }
 
 fn draw_menu(f: &mut Frame, app: &mut App) {

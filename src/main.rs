@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod credentials;
 mod keychain;
 mod letterboxd;
 mod progress;

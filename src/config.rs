@@ -1,49 +1,64 @@
 use anyhow::{Context, Result};
 
+use crate::credentials;
 use crate::keychain;
+
+/// Credenciales de "app" baked-in en el binario al compilar. Se inyectan
+/// vía `cargo install` con:
+///
+/// ```sh
+/// LB_APP_CLIENT_ID=xxx \
+/// LB_APP_CLIENT_SECRET=yyy \
+/// LB_APP_TMDB_BEARER=zzz \
+/// cargo install --path .
+/// ```
+///
+/// Si no están definidas al compilar, valen `None` y hay que resolverlas
+/// en runtime desde env/Keychain — útil en desarrollo.
+const BAKED_CLIENT_ID: Option<&str> = option_env!("LB_APP_CLIENT_ID");
+const BAKED_CLIENT_SECRET: Option<&str> = option_env!("LB_APP_CLIENT_SECRET");
+const BAKED_TMDB_BEARER: Option<&str> = option_env!("LB_APP_TMDB_BEARER");
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub client_id: String,
     pub client_secret: String,
-    pub refresh_token: String,
+    /// Refresh token del usuario. `None` cuando el usuario aún no ha hecho
+    /// login desde la TUI — la vista de recomendaciones desencadena el
+    /// flujo de login y rellena este campo antes de seguir.
+    pub refresh_token: Option<String>,
     pub username: String,
     pub tmdb_bearer_token: String,
 }
 
 fn load_dotenv() {
-    // Buscar .env en ~/.config/letterboxd-cli/ (funciona en macOS y Linux)
     if let Some(home) = dirs::home_dir() {
         let env_path = home.join(".config").join("letterboxd-cli").join(".env");
         if env_path.exists() {
             dotenvy::from_path(&env_path).ok();
         }
     }
-    // Fallback: .env en el directorio de trabajo actual (desarrollo)
     dotenvy::dotenv().ok();
 }
 
-/// Carga las variables desde `.env` (global y local). Exporta esta función
-/// para que `keychain import` pueda leer del entorno tras poblarlo.
+/// Carga las variables desde `.env` (global y local).
 pub fn load_env_files() {
     load_dotenv();
 }
 
-/// Devuelve el bearer de TMDB usando la misma política que `Config::from_env`
-/// pero sin exigir el resto de credenciales de Letterboxd. Útil para
-/// subcomandos que solo necesitan TMDB (por ejemplo `torrents --imdb`).
+/// Devuelve el bearer de TMDB usando la política habitual + baked-in.
+#[allow(dead_code)]
 pub fn tmdb_bearer() -> Option<String> {
     resolve("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN)
+        .or_else(|| BAKED_TMDB_BEARER.map(|s| s.to_string()))
 }
 
-/// Busca una credencial sensible.
+/// Búsqueda de credenciales sensibles.
 ///
-/// * En macOS: primero variables de entorno / `.env`, y como fallback el
-///   Keychain. Esto evita el diálogo de aprobación del Keychain cada vez
-///   que se ejecuta el CLI si ya hay un `.env` cacheado (típicamente creado
-///   por `letterboxd-cli keychain export`). El Keychain sigue siendo la
-///   fuente de verdad original.
-/// * En otros sistemas: solo variables de entorno / `.env`.
+/// * macOS: primero variables de entorno / `.env`, y como fallback el
+///   Keychain. Evita el diálogo de aprobación cada vez si hay `.env`
+///   cacheado.
+/// * Otros: solo variables de entorno / `.env`.
 #[cfg(target_os = "macos")]
 fn resolve(env_key: &str, keychain_service: &str) -> Option<String> {
     std::env::var(env_key)
@@ -54,48 +69,56 @@ fn resolve(env_key: &str, keychain_service: &str) -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn resolve(env_key: &str, _keychain_service: &str) -> Option<String> {
-    std::env::var(env_key).ok()
-}
-
-#[cfg(target_os = "macos")]
-fn missing(env_key: &str, keychain_service: &str) -> String {
-    format!(
-        "{env_key} no está definida (ni en .env ni en el Keychain como `{keychain_service}`). \
-         Ejecuta `letterboxd-cli keychain import` para importarla desde .env, \
-         o `letterboxd-cli keychain export` para volcar el Keychain a .env."
-    )
-}
-
-#[cfg(not(target_os = "macos"))]
-fn missing(env_key: &str, _keychain_service: &str) -> String {
-    format!("{env_key} no está definida")
+    std::env::var(env_key).ok().filter(|s| !s.is_empty())
 }
 
 impl Config {
-    /// Carga la configuración para uso normal de la app. En macOS las
-    /// credenciales sensibles se leen **solo** del Keychain; en otros
-    /// sistemas se leen de `.env`/entorno.
+    /// Carga la configuración con esta prioridad para cada campo:
+    ///
+    /// 1. Variables de entorno / `.env` (override en desarrollo).
+    /// 2. Keychain de macOS (solo macOS, si estaba populado).
+    /// 3. Baked-in en el binario (para builds distribuidos a usuarios).
+    /// 4. `credentials.json` en `~/.config/letterboxd-cli/` (guardado tras
+    ///    el login en la TUI). Solo para `refresh_token` y `username`.
+    ///
+    /// Los campos de app (client_id/secret, tmdb) deben estar por 1, 2 o
+    /// 3 — si faltan, `from_env` devuelve error.
+    ///
+    /// `refresh_token` puede ser `None`; en ese caso la TUI mostrará
+    /// login antes de las recomendaciones.
     pub fn from_env() -> Result<Self> {
         load_dotenv();
+        let creds = credentials::load();
 
         let client_id = resolve("LETTERBOXD_CLIENT_ID", keychain::CLIENT_ID)
-            .with_context(|| missing("LETTERBOXD_CLIENT_ID", keychain::CLIENT_ID))?;
-        let client_secret =
-            resolve("LETTERBOXD_CLIENT_SECRET", keychain::CLIENT_SECRET).unwrap_or_default();
+            .or_else(|| BAKED_CLIENT_ID.map(|s| s.to_string()))
+            .context(
+                "LETTERBOXD_CLIENT_ID no está definida. Recompila con \
+                 `LB_APP_CLIENT_ID=xxx cargo install --path .`, o define \
+                 LETTERBOXD_CLIENT_ID en el entorno.",
+            )?;
+        let client_secret = resolve("LETTERBOXD_CLIENT_SECRET", keychain::CLIENT_SECRET)
+            .or_else(|| BAKED_CLIENT_SECRET.map(|s| s.to_string()))
+            .unwrap_or_default();
+
         let refresh_token = resolve("LETTERBOXD_REFRESH_TOKEN", keychain::REFRESH_TOKEN)
-            .with_context(|| missing("LETTERBOXD_REFRESH_TOKEN", keychain::REFRESH_TOKEN))?;
+            .or_else(|| creds.refresh_token.clone());
+
         let username = resolve("LETTERBOXD_USERNAME", keychain::USERNAME)
-            .with_context(|| missing("LETTERBOXD_USERNAME", keychain::USERNAME))?;
-        // Override cosmético: si LETTERBOXD_DISPLAY_USERNAME está definido,
-        // reemplaza el nombre mostrado en la TUI/CLI. No afecta a
-        // autenticación ni llamadas a APIs (que usan token OAuth, no el
-        // username). Útil para grabar demos con un alias.
+            .or_else(|| creds.username.clone())
+            .unwrap_or_else(String::new);
         let username = std::env::var("LETTERBOXD_DISPLAY_USERNAME")
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or(username);
+
         let tmdb_bearer_token = resolve("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN)
-            .with_context(|| missing("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN))?;
+            .or_else(|| BAKED_TMDB_BEARER.map(|s| s.to_string()))
+            .context(
+                "TMDB_BEARER_TOKEN no está definida. Recompila con \
+                 `LB_APP_TMDB_BEARER=xxx cargo install --path .`, o define \
+                 TMDB_BEARER_TOKEN en el entorno.",
+            )?;
 
         Ok(Self {
             client_id,
@@ -106,24 +129,17 @@ impl Config {
         })
     }
 
-    /// Carga la configuración solo desde `.env`/variables de entorno,
-    /// ignorando el Keychain. Ya no se usa (la importación al Keychain es
-    /// tolerante y no requiere que todas las variables estén presentes),
-    /// pero se mantiene por retrocompatibilidad de la API interna.
+    /// Carga la configuración solo desde `.env`/variables de entorno.
     #[allow(dead_code)]
     pub fn from_env_file_only() -> Result<Self> {
         load_dotenv();
-
         let client_id = std::env::var("LETTERBOXD_CLIENT_ID")
             .context("LETTERBOXD_CLIENT_ID no está definida")?;
         let client_secret = std::env::var("LETTERBOXD_CLIENT_SECRET").unwrap_or_default();
-        let refresh_token = std::env::var("LETTERBOXD_REFRESH_TOKEN")
-            .context("LETTERBOXD_REFRESH_TOKEN no está definida")?;
-        let username =
-            std::env::var("LETTERBOXD_USERNAME").context("LETTERBOXD_USERNAME no está definida")?;
+        let refresh_token = std::env::var("LETTERBOXD_REFRESH_TOKEN").ok();
+        let username = std::env::var("LETTERBOXD_USERNAME").unwrap_or_default();
         let tmdb_bearer_token =
             std::env::var("TMDB_BEARER_TOKEN").context("TMDB_BEARER_TOKEN no está definida")?;
-
         Ok(Self {
             client_id,
             client_secret,
