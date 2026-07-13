@@ -85,8 +85,11 @@ En el Keychain aparecen como items de contraseña genérica con `Cuenta = letter
 ## Uso
 
 ```
-letterboxd-cli <COMANDO> [OPCIONES]
+letterboxd-cli [COMANDO] [OPCIONES]
 ```
+
+Si se omite el comando, arranca la **TUI** con los valores por defecto
+(`count=10`, `min_rating=4.0`). Es decir, `letterboxd-cli` ≡ `letterboxd-cli tui`.
 
 ### recommend
 
@@ -141,17 +144,67 @@ letterboxd-cli tui
 letterboxd-cli tui --count 20 --min-rating 3.5
 ```
 
-Atajos de teclado:
+Atajos de teclado (vista de recomendaciones):
 
 | Tecla | Acción |
 |---|---|
 | `↑`/`↓` o `j`/`k` | Mover selección |
+| `t` | Buscar torrents para la película seleccionada |
 | `r` | (Re)cargar recomendaciones con los parámetros actuales |
 | `+`/`-` | Subir/bajar el rating mínimo en 0.5 |
 | `[`/`]` | Bajar/subir el número de resultados en 5 |
 | `q` / `Esc` | Salir |
 
+Atajos en la vista de torrents:
+
+| Tecla | Acción |
+|---|---|
+| `↑`/`↓` o `j`/`k` | Mover selección |
+| `Enter` | Abrir el magnet con el handler del sistema (Transmission, qBittorrent…) |
+| `s` | **Stream en VLC**: arranca un cliente BitTorrent embebido (librqbit), descarga secuencialmente el fichero más grande y lo sirve por HTTP local; abre VLC apuntando a esa URL para previsualizarlo mientras baja. |
+| `b` / `Esc` | Volver a la lista de recomendaciones |
+| `q` | Salir (para el streaming y borra el temporal) |
+
 Al cambiar `count` o `min_rating` con las teclas, hay que pulsar `r` para recargar — la barra de estado avisa cuando los parámetros mostrados están desactualizados.
+
+### torrents
+
+Busca torrents para una película concreta en varios providers a la vez.
+
+```bash
+letterboxd-cli torrents "the green mile" --year 1999
+letterboxd-cli torrents --imdb tt0120689     # resuelve título vía TMDB
+letterboxd-cli torrents "dune" --min-seeders 20 -n 15 --json
+```
+
+Opciones:
+
+| Opción | Descripción | Por defecto |
+|---|---|---|
+| `<TITLE>` (posicional) | Título (obligatorio salvo que se pase `--imdb`) | — |
+| `--imdb <ID>` | IMDb ID (con o sin `tt`). Si no se pasa título, se resuelve vía TMDB | — |
+| `--year <YYYY>` | Año (ayuda a desambiguar remakes) | — |
+| `--tmdb-id <N>` | TMDB ID (informativo por ahora) | — |
+| `--min-seeders <N>` | Filtro mínimo de seeders | `3` |
+| `-n, --limit <N>` | Número máximo de resultados | `20` |
+| `--json` | Salida JSON en lugar de texto | `false` |
+
+**Providers** (activados por defecto):
+
+- **YTS** (`yts.mx`) — API JSON pública, solo cine. Puede fallar si tu red bloquea el dominio.
+- **Knaben** (`api.knaben.org`) — agregador que consulta 1337x, TPB, TorrentGalaxy (cuando funciona), YTS, Nyaa, RuTracker, etc. Es el que da más cobertura.
+- **Torznab** (Jackett/Prowlarr) — **opt-in**: se activa si defines las variables:
+
+  ```bash
+  export TORZNAB_URL="http://localhost:9117/api/v2.0/indexers/all/results/torznab/api"
+  export TORZNAB_APIKEY="tu_apikey_de_jackett"
+  ```
+
+  Con eso puedes usar cualquier indexer que tengas configurado en tu Jackett o Prowlarr.
+
+Los resultados se dedupean por infohash y se ordenan por `seeders × calidad`
+(2160p pesa más que 1080p, etc.). Cada torrent muestra tamaño, seeders,
+leechers, calidad detectada, provider y magnet completo.
 
 ### keychain (solo macOS)
 

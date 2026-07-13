@@ -17,11 +17,47 @@ pub struct TmdbMovie {
     pub vote_average: f32,
     #[allow(dead_code)]
     pub popularity: f32,
+    #[serde(default)]
+    pub release_date: Option<String>, // "YYYY-MM-DD"
+}
+
+impl TmdbMovie {
+    /// Año extraído de `release_date`, si está presente y es parseable.
+    pub fn year(&self) -> Option<u16> {
+        self.release_date
+            .as_deref()
+            .and_then(|s| s.get(..4))
+            .and_then(|s| s.parse().ok())
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct RecommendationsResponse {
     results: Vec<TmdbMovie>,
+}
+
+// ── Búsqueda por IMDb ID ────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct FindResponse {
+    #[serde(default)]
+    movie_results: Vec<FindMovie>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FindMovie {
+    #[allow(dead_code)]
+    id: u64,
+    title: String,
+    #[serde(default)]
+    release_date: String, // "YYYY-MM-DD"
+}
+
+/// Título y año resueltos desde un IMDb ID.
+#[derive(Debug, Clone)]
+pub struct ImdbLookup {
+    pub title: String,
+    pub year: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -121,4 +157,159 @@ impl<'a> TmdbClient<'a> {
     pub fn save_cache(&self) {
         save_cache(&self.cache.lock().unwrap());
     }
+
+    /// Resuelve un IMDb ID a título + año usando el endpoint `/find`.
+    /// Devuelve `None` si TMDB no conoce ese ID.
+    pub async fn find_by_imdb(&self, imdb_id: &str) -> Result<Option<ImdbLookup>> {
+        let clean = imdb_id.trim();
+        let url = format!("{BASE_URL}/find/{clean}?external_source=imdb_id&language=en-US");
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.bearer_token)
+            .send()
+            .await
+            .context("Error al llamar a TMDB /find")?;
+
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+
+        let body: FindResponse = resp
+            .json()
+            .await
+            .context("Error al parsear respuesta de TMDB /find")?;
+
+        Ok(body.movie_results.into_iter().next().map(|m| ImdbLookup {
+            year: m
+                .release_date
+                .get(..4)
+                .and_then(|s| s.parse::<u16>().ok()),
+            title: m.title,
+        }))
+    }
+
+    /// Devuelve el IMDb ID (`tt...`) de una película dado su TMDB ID.
+    /// `None` si TMDB no lo tiene registrado.
+    pub async fn get_imdb_id(&self, tmdb_id: u64) -> Result<Option<String>> {
+        Ok(self.get_movie_details(tmdb_id).await?.and_then(|d| d.imdb_id))
+    }
+
+    /// Consulta `/movie/{tmdb_id}?append_to_response=external_ids,translations`
+    /// para obtener en una sola llamada:
+    /// * `imdb_id` — imprescindible para providers Torznab que lo aceptan.
+    /// * `original_title` — para buscar torrents en el idioma original (el
+    ///   que suelen usar las releases scene/P2P internacionales).
+    /// * `russian_title` — usado como fallback: si Knaben no da hits con el
+    ///   título original, muchos torrents rusos (RuTracker, rutor...) están
+    ///   indexados con el título en cirílico.
+    /// * `original_language` — código ISO 639-1 (`"en"`, `"es"`, `"ru"`...).
+    ///   Se usa para heurística de detección de audio original vs doblaje.
+    /// * `release_date` — para extraer el año.
+    pub async fn get_movie_details(&self, tmdb_id: u64) -> Result<Option<MovieDetails>> {
+        #[derive(Deserialize)]
+        struct DetailsResponse {
+            #[serde(default)]
+            imdb_id: Option<String>,
+            #[serde(default)]
+            original_title: Option<String>,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            release_date: Option<String>,
+            #[serde(default)]
+            original_language: Option<String>,
+            #[serde(default)]
+            external_ids: Option<ExternalIdsNested>,
+            #[serde(default)]
+            translations: Option<TranslationsNested>,
+        }
+        #[derive(Deserialize)]
+        struct ExternalIdsNested {
+            #[serde(default)]
+            imdb_id: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct TranslationsNested {
+            #[serde(default)]
+            translations: Vec<Translation>,
+        }
+        #[derive(Deserialize)]
+        struct Translation {
+            #[serde(default)]
+            iso_639_1: String,
+            #[serde(default)]
+            data: TranslationData,
+        }
+        #[derive(Deserialize, Default)]
+        struct TranslationData {
+            #[serde(default)]
+            title: String,
+        }
+
+        let url = format!(
+            "{BASE_URL}/movie/{tmdb_id}?append_to_response=external_ids,translations&language=en-US"
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.bearer_token)
+            .send()
+            .await
+            .with_context(|| format!("Error al llamar a TMDB /movie/{tmdb_id}"))?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let body: DetailsResponse = resp
+            .json()
+            .await
+            .context("Error al parsear TMDB /movie details")?;
+
+        let imdb_id = body
+            .imdb_id
+            .or_else(|| body.external_ids.and_then(|e| e.imdb_id))
+            .filter(|s| !s.is_empty() && s.starts_with("tt"));
+        let original_title = body.original_title.filter(|s| !s.is_empty());
+        let year = body
+            .release_date
+            .as_deref()
+            .and_then(|s| s.get(..4))
+            .and_then(|s| s.parse::<u16>().ok());
+        let russian_title = body
+            .translations
+            .and_then(|t| {
+                t.translations
+                    .into_iter()
+                    .find(|tr| tr.iso_639_1 == "ru")
+                    .map(|tr| tr.data.title)
+                    .filter(|s| !s.is_empty())
+            });
+
+        Ok(Some(MovieDetails {
+            imdb_id,
+            original_title,
+            fallback_title: body.title,
+            russian_title,
+            original_language: body
+                .original_language
+                .filter(|s| !s.is_empty()),
+            year,
+        }))
+    }
+}
+
+/// Detalles útiles de una película para búsquedas en providers de torrents.
+pub struct MovieDetails {
+    pub imdb_id: Option<String>,
+    /// Título en el idioma original (típicamente inglés) — el que aparece en
+    /// releases de scene/P2P. Puede faltar en pelis muy oscuras.
+    pub original_title: Option<String>,
+    /// Título en el idioma de la petición (fallback si `original_title` es
+    /// None).
+    pub fallback_title: Option<String>,
+    /// Título en ruso (cirílico), útil como fallback para torrents rusos.
+    pub russian_title: Option<String>,
+    /// Idioma original de la película (ISO 639-1: `"en"`, `"es"`, ...).
+    pub original_language: Option<String>,
+    pub year: Option<u16>,
 }

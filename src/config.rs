@@ -29,14 +29,27 @@ pub fn load_env_files() {
     load_dotenv();
 }
 
+/// Devuelve el bearer de TMDB usando la misma política que `Config::from_env`
+/// pero sin exigir el resto de credenciales de Letterboxd. Útil para
+/// subcomandos que solo necesitan TMDB (por ejemplo `torrents --imdb`).
+pub fn tmdb_bearer() -> Option<String> {
+    resolve("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN)
+}
+
 /// Busca una credencial sensible.
 ///
-/// * En macOS: **solo** el Keychain. No hay fallback a `.env` — para importar
-///   las credenciales al Keychain, usa `letterboxd-cli keychain import`.
-/// * En otros sistemas: variables de entorno / `.env`.
+/// * En macOS: primero variables de entorno / `.env`, y como fallback el
+///   Keychain. Esto evita el diálogo de aprobación del Keychain cada vez
+///   que se ejecuta el CLI si ya hay un `.env` cacheado (típicamente creado
+///   por `letterboxd-cli keychain export`). El Keychain sigue siendo la
+///   fuente de verdad original.
+/// * En otros sistemas: solo variables de entorno / `.env`.
 #[cfg(target_os = "macos")]
-fn resolve(_env_key: &str, keychain_service: &str) -> Option<String> {
-    keychain::get(keychain_service)
+fn resolve(env_key: &str, keychain_service: &str) -> Option<String> {
+    std::env::var(env_key)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| keychain::get(keychain_service))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -47,8 +60,9 @@ fn resolve(env_key: &str, _keychain_service: &str) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn missing(env_key: &str, keychain_service: &str) -> String {
     format!(
-        "{env_key} no está en el Keychain (item `{keychain_service}`). \
-         Ejecuta `letterboxd-cli keychain import` para importarla desde .env."
+        "{env_key} no está definida (ni en .env ni en el Keychain como `{keychain_service}`). \
+         Ejecuta `letterboxd-cli keychain import` para importarla desde .env, \
+         o `letterboxd-cli keychain export` para volcar el Keychain a .env."
     )
 }
 

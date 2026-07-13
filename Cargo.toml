@@ -11,7 +11,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json", "gzip"] }
 tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 dotenvy = "0.15"
 anyhow = "1"
@@ -21,6 +21,15 @@ colored = "2"
 ratatui = "0.29"
 crossterm = "0.28"
 futures = "0.3"
+async-trait = "0.1"
+urlencoding = "2"
+quick-xml = { version = "0.37", features = ["serialize"] }
+librqbit = "8"
+tempfile = "3"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+tokio-util = { version = "0.7", features = ["io"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

@@ -11,7 +11,7 @@ use crate::tmdb::{TmdbClient, TmdbMovie};
 const TMDB_CONCURRENCY: usize = 8;
 const LB_CONCURRENCY: usize = 6;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Recommendation {
     pub movie: TmdbMovie,
     pub lb_rating: Option<f32>,
