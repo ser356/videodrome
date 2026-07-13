@@ -86,6 +86,14 @@ impl Config {
             .with_context(|| missing("LETTERBOXD_REFRESH_TOKEN", keychain::REFRESH_TOKEN))?;
         let username = resolve("LETTERBOXD_USERNAME", keychain::USERNAME)
             .with_context(|| missing("LETTERBOXD_USERNAME", keychain::USERNAME))?;
+        // Override cosmético: si LETTERBOXD_DISPLAY_USERNAME está definido,
+        // reemplaza el nombre mostrado en la TUI/CLI. No afecta a
+        // autenticación ni llamadas a APIs (que usan token OAuth, no el
+        // username). Útil para grabar demos con un alias.
+        let username = std::env::var("LETTERBOXD_DISPLAY_USERNAME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(username);
         let tmdb_bearer_token = resolve("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN)
             .with_context(|| missing("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN))?;
 

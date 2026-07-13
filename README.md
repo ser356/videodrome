@@ -2,6 +2,8 @@
 
 CLI en Rust que genera recomendaciones de películas a partir de tu historial, watchlist y ratings en Letterboxd, cruzando con la API de TMDB. Incluye salida de texto/JSON y una interfaz interactiva de terminal (TUI).
 
+![demo](resources/demo.gif)
+
 ---
 
 ## Requisitos
