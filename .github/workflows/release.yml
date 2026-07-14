@@ -62,6 +62,8 @@ jobs:
   # ─── macOS: Videodrome.app zippeado (GUI + CLI dual) ───────────────
   build-macos-gui:
     runs-on: macos-latest
+    outputs:
+      sha256: ${{ steps.sha.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -109,6 +111,18 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP"
           echo "✅ Generado $ZIP ($(du -h "$ZIP" | cut -f1))"
 
+      # SHA256 del artefacto EXACTO que se sube. Se propaga como job output
+      # y lo consume `publish-packages` sin volver a descargar el zip (un
+      # re-run del job de macOS regenera el .app con distinto timestamp/
+      # firma ad-hoc → distinto SHA → checksum mismatch en el tap).
+      - name: SHA256 del zip macOS
+        id: sha
+        run: |
+          ZIP="videodrome-${{ github.ref_name }}-macos-arm64.zip"
+          SHA=$(shasum -a 256 "$ZIP" | awk '{print $1}')
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "SHA256: $SHA"
+
       - uses: actions/upload-artifact@v4
         with:
           name: videodrome-macos-arm64
@@ -118,6 +132,8 @@ jobs:
   # ─── Windows: .exe zippeado (GUI + CLI dual) ───────────────────────
   build-windows-gui:
     runs-on: windows-latest
+    outputs:
+      sha256: ${{ steps.sha.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -163,6 +179,15 @@ jobs:
           Copy-Item $exe pkg/videodrome.exe
           Compress-Archive -Path pkg/videodrome.exe -DestinationPath "videodrome-${{ github.ref_name }}-windows-x86_64.zip"
 
+      - name: SHA256 del zip Windows
+        id: sha
+        shell: pwsh
+        run: |
+          $zip = "videodrome-${{ github.ref_name }}-windows-x86_64.zip"
+          $sha = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "SHA256: $sha"
+
       - uses: actions/upload-artifact@v4
         with:
           name: videodrome-windows-x86_64
@@ -195,25 +220,24 @@ jobs:
           generate_release_notes: true
 
   # ─── Cask (mac) + scoop (win) ──────────────────────────────────────
+  # Consume los SHA256 calculados en los jobs de build (misma ejecución
+  # que produjo el zip). No re-descarga por URL pública: si algún job de
+  # build se re-ejecuta y regenera el zip con distinto contenido (Rust
+  # no es determinista + firma ad-hoc de tauri), el SHA del cask ya no
+  # cuadraría con lo que hay publicado. Con este esquema, el SHA es
+  # siempre del bit-a-bit que se subió a la release.
   publish-packages:
-    needs: release
+    needs: [release, build-macos-gui, build-windows-gui]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: SHA256 del zip macOS
-        id: sha_mac
+      - name: Verificar SHAs recibidos
         run: |
-          URL="https://github.com/${{ github.repository }}/releases/download/${{ needs.release.outputs.tag }}/videodrome-${{ needs.release.outputs.tag }}-macos-arm64.zip"
-          curl -sL "$URL" -o mac.zip
-          echo "sha=$(sha256sum mac.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-
-      - name: SHA256 del zip Windows
-        id: sha_win
-        run: |
-          URL="https://github.com/${{ github.repository }}/releases/download/${{ needs.release.outputs.tag }}/videodrome-${{ needs.release.outputs.tag }}-windows-x86_64.zip"
-          curl -sL "$URL" -o win.zip
-          echo "sha=$(sha256sum win.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "SHA macOS:   ${{ needs.build-macos-gui.outputs.sha256 }}"
+          echo "SHA Windows: ${{ needs.build-windows-gui.outputs.sha256 }}"
+          test -n "${{ needs.build-macos-gui.outputs.sha256 }}"   || { echo "❌ SHA macOS vacío";   exit 1; }
+          test -n "${{ needs.build-windows-gui.outputs.sha256 }}" || { echo "❌ SHA Windows vacío"; exit 1; }
 
       # ── HOMEBREW CASK (mac) ──
       - name: Render cask
@@ -222,7 +246,7 @@ jobs:
           sed \
             -e "s|{{VERSION}}|${{ needs.release.outputs.version }}|g" \
             -e "s|{{TAG}}|${{ needs.release.outputs.tag }}|g" \
-            -e "s|{{SHA_MAC}}|${{ steps.sha_mac.outputs.sha }}|g" \
+            -e "s|{{SHA_MAC}}|${{ needs.build-macos-gui.outputs.sha256 }}|g" \
             -e "s|{{REPO}}|${{ github.repository }}|g" \
             packaging/homebrew-cask/videodrome.rb.tmpl > out/videodrome.rb
           cat out/videodrome.rb
@@ -251,7 +275,7 @@ jobs:
           sed \
             -e "s|{{VERSION}}|${{ needs.release.outputs.version }}|g" \
             -e "s|{{TAG}}|${{ needs.release.outputs.tag }}|g" \
-            -e "s|{{SHA_WIN}}|${{ steps.sha_win.outputs.sha }}|g" \
+            -e "s|{{SHA_WIN}}|${{ needs.build-windows-gui.outputs.sha256 }}|g" \
             -e "s|{{REPO}}|${{ github.repository }}|g" \
             packaging/scoop/videodrome.json.tmpl > out/videodrome.json
           cat out/videodrome.json

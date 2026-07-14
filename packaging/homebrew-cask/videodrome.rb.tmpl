@@ -27,7 +27,9 @@ cask "videodrome" do
 
   # arm64 only — los runners macos-13 Intel de Actions están deprecated.
   # Los Macs Intel con Rosetta 2 pueden ejecutar el binario arm64.
-  depends_on macos: ">= :catalina"
+  # Homebrew acepta un símbolo suelto como versión mínima; el formato
+  # string ">= :catalina" quedó deprecated en 2025+.
+  depends_on macos: :catalina
   depends_on cask: "vlc"
 
   app "Videodrome.app"
