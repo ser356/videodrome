@@ -224,6 +224,7 @@ async fn search_torrents_by_tmdb(
         year,
         imdb_id: imdb_id.clone(),
         tmdb_id: Some(tmdb_id),
+        original_language: original_language.clone(),
     };
     let mut list = torrents::search_all(&state.http, &providers, &primary, 1, 40).await;
 
@@ -235,6 +236,7 @@ async fn search_torrents_by_tmdb(
                 year,
                 imdb_id: imdb_id.clone(),
                 tmdb_id: Some(tmdb_id),
+                original_language: original_language.clone(),
             };
             let raw = torrents::search_all(&state.http, &providers, &ru_q, 1, 40).await;
             list = raw
@@ -271,6 +273,7 @@ async fn search_torrents_direct(
         year,
         imdb_id: None,
         tmdb_id: None,
+        original_language: None,
     };
     let list = torrents::search_all(&state.http, &providers, &q, 1, 40).await;
     Ok(TorrentSearchResult {

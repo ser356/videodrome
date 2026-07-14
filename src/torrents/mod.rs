@@ -39,6 +39,10 @@ pub struct MovieQuery {
     /// keywords), pero se acepta en la CLI para futuros providers.
     #[allow(dead_code)]
     pub tmdb_id: Option<u64>,
+    /// Idioma original de la película (ISO 639-1: `"en"`, `"es"`, `"ru"`…).
+    /// Se usa para rankear los torrents: los que llevan audio en este
+    /// idioma (o "Original"/"Multi") suben en el score frente a doblajes.
+    pub original_language: Option<String>,
 }
 
 impl MovieQuery {
@@ -106,18 +110,23 @@ pub async fn search_all(
     }
 
     let mut out: Vec<Torrent> = best.into_values().collect();
+    let orig_lang = query.original_language.as_deref();
     out.sort_by(|a, b| {
-        score(b)
-            .partial_cmp(&score(a))
+        score(a, orig_lang)
+            .partial_cmp(&score(b, orig_lang))
+            .map(|o| o.reverse())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     out.truncate(limit);
     out
 }
 
-/// score = seeders * peso_calidad. Prioriza calidad razonable sin descartar
-/// releases con muchos seeders aunque sean 720p/SD.
-fn score(t: &Torrent) -> f64 {
+/// score = seeders * peso_calidad * peso_idioma.
+/// Prioriza calidad razonable sin descartar releases con muchos seeders
+/// aunque sean 720p/SD, y ANTEPONE audio original / multi a los doblajes
+/// (los rusos de RuTracker son numerosos y saturan la lista si no se
+/// castigan).
+fn score(t: &Torrent, original_language: Option<&str>) -> f64 {
     let q_weight = match t.quality.as_deref() {
         Some(q) if q.contains("2160") || q.eq_ignore_ascii_case("4k") => 1.00,
         Some(q) if q.contains("1080") => 0.90,
@@ -125,7 +134,22 @@ fn score(t: &Torrent) -> f64 {
         Some(_) => 0.35,
         None => 0.50,
     };
-    (t.seeders as f64) * q_weight
+    let hint = classify_audio(&t.title, original_language);
+    let lang_weight = language_multiplier(hint);
+    (t.seeders as f64) * q_weight * lang_weight
+}
+
+/// Peso de idioma en el score. `Original` y `Multi` son deseables (audio
+/// original disponible); los doblajes se castigan para que no dominen el
+/// ranking. `Unknown` queda en medio (no penaliza fuerte porque muchos
+/// releases scene no marcan idioma en el título).
+fn language_multiplier(hint: AudioHint) -> f64 {
+    match hint {
+        AudioHint::Original => 1.00,
+        AudioHint::Multi => 0.90,
+        AudioHint::Unknown => 0.55,
+        AudioHint::Dubbed(_) => 0.25,
+    }
 }
 
 /// Devuelve los providers habilitados por defecto. Torznab se activa si están
@@ -251,8 +275,20 @@ pub fn classify_audio(title: &str, original_language: Option<&str>) -> AudioHint
         .chars()
         .any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
 
-    // Multi-audio explícito
-    if t.contains("multi") || t.contains("dual audio") || t.contains("multi-audio") {
+    // Multi-audio explícito. Cubre los tags más frecuentes del scene:
+    //   MULTI, MULTi, MULTI4, MULTi5, MULTI+, dual audio, dual-audio,
+    //   da2, 2audio, DL (release alemán con audio dual), y combos
+    //   entre corchetes tipo [ENG+RUS], [EN.RU], [EN/RU/ES].
+    if t.contains("multi")
+        || t.contains("dual audio")
+        || t.contains("dual-audio")
+        || t.contains("dualaudio")
+        || t.contains(" da2 ")
+        || t.contains(" 2audio")
+        || t.contains(".dl.")
+        || t.contains(" dl ")
+        || multi_language_bracket(&t)
+    {
         return AudioHint::Multi;
     }
 
@@ -314,4 +350,46 @@ pub fn classify_audio(title: &str, original_language: Option<&str>) -> AudioHint
     }
 
     AudioHint::Unknown
+}
+
+/// Detecta patrones tipo `[ENG+RUS]`, `[EN.RU.ES]`, `[EN/FR]` en el título:
+/// dos o más códigos de idioma ISO 639-1/-2 dentro del mismo bracket o
+/// grupo entre puntos. Es un fallback pragmático — el scene marca
+/// multi-audio de mil formas distintas.
+fn multi_language_bracket(t: &str) -> bool {
+    // Escaneamos ventanas cortas y contamos cuántos códigos de idioma
+    // conocidos aparecen juntos (separados por +/./,/-///espacio).
+    const LANG_CODES: &[&str] = &[
+        "eng", "en", "rus", "ru", "esp", "spa", "es", "fre", "fra", "fr", "ita", "it", "ger",
+        "deu", "de", "por", "pt", "jpn", "ja", "chi", "zh", "kor", "ko",
+    ];
+    let mut count_in_group = 0;
+    let mut current_group_start = None;
+    for (i, ch) in t.char_indices() {
+        if ch == '[' || ch == '(' {
+            current_group_start = Some(i + 1);
+            count_in_group = 0;
+        } else if ch == ']' || ch == ')' {
+            if count_in_group >= 2 {
+                return true;
+            }
+            current_group_start = None;
+        } else if let Some(_start) = current_group_start {
+            // Cuando cerramos el grupo miramos si tenía múltiples idiomas.
+            // Aquí solo contamos codes visibles.
+            for code in LANG_CODES {
+                if t[i..].to_ascii_lowercase().starts_with(code) {
+                    // Comprobamos que no sea parte de otra palabra (bordes
+                    // simples: separador antes y después).
+                    let end = i + code.len();
+                    let after = t.as_bytes().get(end).copied().unwrap_or(b']');
+                    if !after.is_ascii_alphabetic() {
+                        count_in_group += 1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    false
 }

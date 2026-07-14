@@ -995,6 +995,7 @@ fn spawn_torrents(
                 year,
                 imdb_id: imdb_id.clone(),
                 tmdb_id: Some(tmdb_id),
+                original_language: original_language.clone(),
             };
             // min_seeders=1 en la TUI: los reportes de seeders de los
             // indexers son aproximados y filtrar por 3 pierde demasiadas
@@ -1014,6 +1015,7 @@ fn spawn_torrents(
                         year,
                         imdb_id,
                         tmdb_id: Some(tmdb_id),
+                        original_language: original_language.clone(),
                     };
                     let raw = torrents::search_all(&http, &providers, &ru_query, 1, 40).await;
                     // Filtro estricto adicional para el fallback ruso: los
@@ -1086,6 +1088,7 @@ fn spawn_direct_search(
             year,
             imdb_id: None,
             tmdb_id: None,
+            original_language: None,
         };
         let _ = tx.send(TorrentEvent::Status(format!("Buscando \"{title}\"…")));
 

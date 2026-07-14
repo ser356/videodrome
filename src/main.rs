@@ -422,6 +422,7 @@ async fn dispatch(command: Commands) -> Result<()> {
                 year: effective_year,
                 imdb_id: imdb_norm,
                 tmdb_id,
+                original_language: None,
             };
 
             let providers = torrents::default_providers();
