@@ -9,9 +9,9 @@
 
 $ErrorActionPreference = 'Stop'
 
-if ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-    [Security.Principal.WindowsBuiltInRole] 'Administrator') {
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal(
+    [Security.Principal.WindowsIdentity]::GetCurrent())
+if ($currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "❌ No ejecutes este script como Administrador." -ForegroundColor Red
     Write-Host "   Scoop se instala en tu perfil de usuario, no en el sistema."
     exit 1
