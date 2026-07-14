@@ -57,10 +57,7 @@ impl TorrentProvider for Yts {
 
     async fn search(&self, http: &reqwest::Client, q: &MovieQuery) -> Result<Vec<Torrent>> {
         // Preferimos IMDb ID (mucho más preciso). Si no, caemos al título.
-        let query_term = q
-            .imdb_id
-            .clone()
-            .unwrap_or_else(|| q.title.clone());
+        let query_term = q.imdb_id.clone().unwrap_or_else(|| q.title.clone());
 
         let url = format!(
             "{BASE}?query_term={}&limit=5&sort_by=seeds&order_by=desc",

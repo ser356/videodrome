@@ -106,7 +106,11 @@ pub async fn search_all(
     }
 
     let mut out: Vec<Torrent> = best.into_values().collect();
-    out.sort_by(|a, b| score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        score(b)
+            .partial_cmp(&score(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out.truncate(limit);
     out
 }
@@ -254,10 +258,7 @@ pub fn classify_audio(title: &str, original_language: Option<&str>) -> AudioHint
 
     // Doblajes rusos (muy comunes en RuTracker): Dub, MVO, DVO, AVO
     let ru_dub_markers = [" dub", " mvo", " dvo", " avo", "duo)", "dub ", "dub]"];
-    if has_cyrillic
-        || ru_dub_markers.iter().any(|m| t.contains(m))
-        || t.contains("dub (")
-    {
+    if has_cyrillic || ru_dub_markers.iter().any(|m| t.contains(m)) || t.contains("dub (") {
         // Ojo: "dub" en un título en inglés sin cirílico suele ser doblaje
         // no-ruso (LATAM/ES/IT). Reservamos ru solo si hay cirílico.
         if has_cyrillic {

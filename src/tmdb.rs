@@ -181,10 +181,7 @@ impl<'a> TmdbClient<'a> {
             .context("Error al parsear respuesta de TMDB /find")?;
 
         Ok(body.movie_results.into_iter().next().map(|m| ImdbLookup {
-            year: m
-                .release_date
-                .get(..4)
-                .and_then(|s| s.parse::<u16>().ok()),
+            year: m.release_date.get(..4).and_then(|s| s.parse::<u16>().ok()),
             title: m.title,
         }))
     }
@@ -269,24 +266,20 @@ impl<'a> TmdbClient<'a> {
             .as_deref()
             .and_then(|s| s.get(..4))
             .and_then(|s| s.parse::<u16>().ok());
-        let russian_title = body
-            .translations
-            .and_then(|t| {
-                t.translations
-                    .into_iter()
-                    .find(|tr| tr.iso_639_1 == "ru")
-                    .map(|tr| tr.data.title)
-                    .filter(|s| !s.is_empty())
-            });
+        let russian_title = body.translations.and_then(|t| {
+            t.translations
+                .into_iter()
+                .find(|tr| tr.iso_639_1 == "ru")
+                .map(|tr| tr.data.title)
+                .filter(|s| !s.is_empty())
+        });
 
         Ok(Some(MovieDetails {
             imdb_id,
             original_title,
             fallback_title: body.title,
             russian_title,
-            original_language: body
-                .original_language
-                .filter(|s| !s.is_empty()),
+            original_language: body.original_language.filter(|s| !s.is_empty()),
             year,
         }))
     }

@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,9 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
@@ -25,6 +24,7 @@ use crate::config::Config;
 use crate::letterboxd::LetterboxdClient;
 use crate::progress::Progress;
 use crate::recommend::{build_recommendations, Recommendation};
+use crate::subtitles::{self, Subtitle};
 use crate::tmdb::TmdbClient;
 use crate::torrents::{self, MovieQuery, Torrent};
 
@@ -32,12 +32,12 @@ const HELP_MENU: &str = "j/k mover · Enter seleccionar · q salir";
 const HELP_RECS: &str =
     "j/k mover · t torrents · r recargar · -/+ rating · [/] top · b menú · q salir";
 const HELP_TORRENTS: &str =
-    "j/k mover · Enter magnet · s stream · m panel · Esc volver · q salir";
+    "j/k mover · Enter magnet · s stream · x subtítulos · m panel · Esc volver · q salir";
 const HELP_SEARCH: &str = "escribe título · Enter buscar · Esc volver";
+const HELP_SUBS: &str = "j/k mover · Enter descargar · Esc volver · q salir";
 
 /// Frames del spinner braille (10 pasos, ~100 ms cada uno).
-const SPINNER_FRAMES: &[&str] =
-    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 enum WorkerEvent {
     Stage(String, u64),
@@ -54,6 +54,9 @@ enum TorrentEvent {
     /// para que la TUI pueda clasificar el audio de cada release cuando
     /// llegue el Done.
     Language(Option<String>),
+    /// IMDb ID resuelto vía TMDB. Se guarda en `App` para poder usarlo
+    /// luego como filtro al buscar subtítulos en OpenSubtitles.
+    Imdb(Option<String>),
     Done(Vec<Torrent>),
     Failed(String),
 }
@@ -68,7 +71,23 @@ enum StreamEvent {
 /// Eventos del worker de login.
 enum LoginEvent {
     /// Login OK: refresh_token + username que hay que persistir.
-    Ok { refresh_token: String, username: String },
+    Ok {
+        refresh_token: String,
+        username: String,
+    },
+    Failed(String),
+}
+
+/// Eventos del worker de subtítulos.
+enum SubsEvent {
+    /// Resultados de búsqueda listos.
+    Found(Vec<Subtitle>),
+    /// Descarga completada: ruta local del `.srt` + release name para
+    /// mostrar en el status.
+    Downloaded {
+        path: PathBuf,
+        release: String,
+    },
     Failed(String),
 }
 
@@ -102,6 +121,8 @@ enum View {
     Search,
     /// Resultados de torrents (venido de Recs o de Search).
     Torrents,
+    /// Lista de subtítulos de OpenSubtitles para el torrent seleccionado.
+    Subs,
 }
 
 /// Campo enfocado en la vista de login.
@@ -143,6 +164,9 @@ struct App {
     /// Idioma original de la película en curso (ISO 639-1). Se usa para
     /// clasificar el audio de cada release.
     tor_original_language: Option<String>,
+    /// IMDb ID de la película en curso (`ttXXXXXXX`). Se usa para acotar
+    /// la búsqueda de subtítulos en OpenSubtitles.
+    tor_imdb_id: Option<String>,
     /// Desde qué vista se saltó a Torrents (para saber a dónde volver).
     tor_source: TorrentsSource,
 
@@ -158,6 +182,19 @@ struct App {
     login_focus: LoginField,
     login_busy: bool,
     login_error: Option<String>,
+
+    // Subtítulos (OpenSubtitles)
+    subs_results: Vec<Subtitle>,
+    subs_state: TableState,
+    subs_loading: bool,
+    subs_error: Option<String>,
+    /// Ruta al `.srt` ya descargado que se pasará a VLC como `--sub-file`
+    /// al arrancar el próximo stream. Se resetea cuando cambia la
+    /// película (nueva navegación a Torrents).
+    sub_path: Option<PathBuf>,
+    /// Release name del sub actualmente cargado (para mostrarlo en la
+    /// barra de estado).
+    sub_release: Option<String>,
 
     // Estado de streaming (vive mientras la TUI está abierta)
     stream: Option<crate::stream::StreamHandle>,
@@ -200,6 +237,7 @@ impl App {
             tor_results: Vec::new(),
             tor_state: TableState::default(),
             tor_original_language: None,
+            tor_imdb_id: None,
             tor_source: TorrentsSource::FromRecs,
             menu_state,
             search_input: String::new(),
@@ -208,6 +246,12 @@ impl App {
             login_focus: LoginField::Username,
             login_busy: false,
             login_error: None,
+            subs_results: Vec::new(),
+            subs_state: TableState::default(),
+            subs_loading: false,
+            subs_error: None,
+            sub_path: None,
+            sub_release: None,
             stream: None,
             stream_msg: None,
             stream_player_alive: None,
@@ -225,6 +269,7 @@ impl App {
             View::Menu => (&mut self.menu_state, MENU_ITEMS.len()),
             View::Recs => (&mut self.list_state, self.recs.len()),
             View::Torrents => (&mut self.tor_state, self.tor_results.len()),
+            View::Subs => (&mut self.subs_state, self.subs_results.len()),
             View::Search | View::Login => return,
         };
         if len == 0 {
@@ -243,6 +288,7 @@ impl App {
             View::Menu => (&mut self.menu_state, MENU_ITEMS.len()),
             View::Recs => (&mut self.list_state, self.recs.len()),
             View::Torrents => (&mut self.tor_state, self.tor_results.len()),
+            View::Subs => (&mut self.subs_state, self.subs_results.len()),
             View::Search | View::Login => return,
         };
         if len == 0 {
@@ -310,6 +356,7 @@ async fn run_app(
     let mut tor_rx: Option<mpsc::UnboundedReceiver<TorrentEvent>> = None;
     let mut stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>> = None;
     let mut login_rx: Option<mpsc::UnboundedReceiver<LoginEvent>> = None;
+    let mut subs_rx: Option<mpsc::UnboundedReceiver<SubsEvent>> = None;
 
     // Sender del canal de streaming, compartido: cada spawn_stream lo clona.
     // Lo mantenemos en un slot que se rellena en el primer uso.
@@ -354,6 +401,7 @@ async fn run_app(
                 match evt {
                     TorrentEvent::Status(msg) => app.tor_status = msg,
                     TorrentEvent::Language(lang) => app.tor_original_language = lang,
+                    TorrentEvent::Imdb(id) => app.tor_imdb_id = id,
                     TorrentEvent::Done(list) => {
                         app.tor_loading = false;
                         app.tor_error = None;
@@ -381,9 +429,16 @@ async fn run_app(
                         // Arc<AtomicBool> que devuelve se pone false cuando
                         // VLC termina → así detectamos el cierre del
                         // reproductor y liberamos el stream automáticamente.
-                        let alive = crate::stream::open_in_vlc(&handle.url);
+                        // Si hay sub descargado, se pasa como --sub-file.
+                        let alive =
+                            crate::stream::open_in_vlc(&handle.url, app.sub_path.as_deref());
+                        let sub_note = app
+                            .sub_release
+                            .as_deref()
+                            .map(|r| format!(" · sub: {r}"))
+                            .unwrap_or_default();
                         app.stream_msg = Some(format!(
-                            "▶ Streaming {} — {}",
+                            "▶ Streaming {} — {}{sub_note}",
                             handle.file_name, handle.url
                         ));
                         // Mantén el handle vivo mientras la TUI y VLC estén
@@ -412,8 +467,7 @@ async fn run_app(
                             username: Some(username.clone()),
                         };
                         if let Err(e) = crate::credentials::save(&creds) {
-                            app.login_error =
-                                Some(format!("Guardado local falló: {e}"));
+                            app.login_error = Some(format!("Guardado local falló: {e}"));
                             app.login_busy = false;
                             continue;
                         }
@@ -437,6 +491,37 @@ async fn run_app(
             }
         }
 
+        if let Some(r) = subs_rx.as_mut() {
+            while let Ok(evt) = r.try_recv() {
+                match evt {
+                    SubsEvent::Found(list) => {
+                        app.subs_loading = false;
+                        app.subs_results = list;
+                        app.subs_error = None;
+                        if !app.subs_results.is_empty() {
+                            app.subs_state.select(Some(0));
+                        }
+                    }
+                    SubsEvent::Downloaded { path, release } => {
+                        app.subs_loading = false;
+                        app.sub_path = Some(path);
+                        app.sub_release = Some(release.clone());
+                        app.stream_msg = Some(format!(
+                            "🎬 Sub cargado ({release}). Pulsa 's' para stream con subs."
+                        ));
+                        // Vuelve automáticamente a la lista de torrents
+                        // — el user ya ha elegido, no hay más que hacer
+                        // en la vista de subs.
+                        app.view = View::Torrents;
+                    }
+                    SubsEvent::Failed(e) => {
+                        app.subs_loading = false;
+                        app.subs_error = Some(e);
+                    }
+                }
+            }
+        }
+
         // Detección de VLC cerrado: si el proceso del reproductor terminó,
         // liberamos el StreamHandle (su Drop apaga axum + libr qbit + borra
         // el tempdir) y actualizamos el mensaje para que el user sepa que
@@ -445,8 +530,7 @@ async fn run_app(
             if !alive.load(std::sync::atomic::Ordering::Relaxed) {
                 app.stream = None;
                 app.stream_player_alive = None;
-                app.stream_msg =
-                    Some("Reproductor cerrado — stream detenido.".to_string());
+                app.stream_msg = Some("Reproductor cerrado — stream detenido.".to_string());
             }
         }
 
@@ -467,8 +551,7 @@ async fn run_app(
                         }
                     }
                     View::Search => {
-                        app.search_input
-                            .push_str(s.trim_end_matches(['\n', '\r']));
+                        app.search_input.push_str(s.trim_end_matches(['\n', '\r']));
                     }
                     _ => {}
                 }
@@ -486,227 +569,290 @@ async fn run_app(
                 && app.view != View::Login
             {
                 break;
-                }
+            }
 
-                match app.view {
-                    View::Menu => match key.code {
-                        KeyCode::Esc => break,
-                        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
-                        KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
-                        KeyCode::Enter => match app.menu_state.selected().unwrap_or(0) {
-                            0 => {
-                                // Recomendaciones — si aún no hay
-                                // refresh_token, primero login.
-                                if config.refresh_token.is_none() {
-                                    app.view = View::Login;
-                                    app.login_focus = LoginField::Username;
-                                    app.login_error = None;
-                                    app.login_busy = false;
-                                } else {
-                                    app.view = View::Recs;
-                                    if app.recs.is_empty() && !app.loading {
-                                        spawn_fetch(&config, &http, &mut app, &mut rx);
-                                    }
-                                }
-                            }
-                            1 => {
-                                // Búsqueda directa (no requiere login de LB).
-                                app.view = View::Search;
-                                app.search_input.clear();
-                            }
-                            _ => break,
-                        },
-                        _ => {}
-                    },
-                    View::Login => match key.code {
-                        KeyCode::Esc => {
-                            if !app.login_busy {
-                                app.view = View::Menu;
+            match app.view {
+                View::Menu => match key.code {
+                    KeyCode::Esc => break,
+                    KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+                    KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
+                    KeyCode::Enter => match app.menu_state.selected().unwrap_or(0) {
+                        0 => {
+                            // Recomendaciones — si aún no hay
+                            // refresh_token, primero login.
+                            if config.refresh_token.is_none() {
+                                app.view = View::Login;
+                                app.login_focus = LoginField::Username;
                                 app.login_error = None;
-                            }
-                        }
-                        KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
-                            app.login_focus = match app.login_focus {
-                                LoginField::Username => LoginField::Password,
-                                LoginField::Password => LoginField::Username,
-                            };
-                        }
-                        KeyCode::Enter => {
-                            if app.login_busy {
-                                // ignorar
-                            } else if app.login_focus == LoginField::Username
-                                && app.login_pass.is_empty()
-                            {
-                                // Enter en username salta a password.
-                                app.login_focus = LoginField::Password;
-                            } else if !app.login_user.trim().is_empty()
-                                && !app.login_pass.is_empty()
-                            {
-                                // Submit
-                                if login_rx.is_none() {
-                                    let (tx, rx_new) = mpsc::unbounded_channel();
-                                    login_rx = Some(rx_new);
-                                    spawn_login(
-                                        &http,
-                                        &config,
-                                        &mut app,
-                                        tx,
-                                    );
-                                } else {
-                                    // Ya hay canal — creamos uno nuevo (por
-                                    // si el user reintenta tras error).
-                                    let (tx, rx_new) = mpsc::unbounded_channel();
-                                    login_rx = Some(rx_new);
-                                    spawn_login(
-                                        &http,
-                                        &config,
-                                        &mut app,
-                                        tx,
-                                    );
+                                app.login_busy = false;
+                            } else {
+                                app.view = View::Recs;
+                                if app.recs.is_empty() && !app.loading {
+                                    spawn_fetch(&config, &http, &mut app, &mut rx);
                                 }
                             }
                         }
-                        KeyCode::Backspace => {
-                            if !app.login_busy {
-                                match app.login_focus {
-                                    LoginField::Username => {
-                                        app.login_user.pop();
-                                    }
-                                    LoginField::Password => {
-                                        app.login_pass.pop();
-                                    }
-                                }
-                            }
+                        1 => {
+                            // Búsqueda directa (no requiere login de LB).
+                            app.view = View::Search;
+                            app.search_input.clear();
                         }
-                        KeyCode::Char(c) if !app.login_busy => match app.login_focus {
-                            LoginField::Username => app.login_user.push(c),
-                            LoginField::Password => app.login_pass.push(c),
-                        },
-                        _ => {}
+                        _ => break,
                     },
-                    View::Search => match key.code {
-                        KeyCode::Esc => {
+                    _ => {}
+                },
+                View::Login => match key.code {
+                    KeyCode::Esc => {
+                        if !app.login_busy {
                             app.view = View::Menu;
+                            app.login_error = None;
                         }
-                        KeyCode::Enter => {
-                            let q = app.search_input.trim().to_string();
-                            if !q.is_empty() {
-                                spawn_direct_search(&http, &config, &q, &mut app, &mut tor_rx);
+                    }
+                    KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
+                        app.login_focus = match app.login_focus {
+                            LoginField::Username => LoginField::Password,
+                            LoginField::Password => LoginField::Username,
+                        };
+                    }
+                    KeyCode::Enter => {
+                        if app.login_busy {
+                            // ignorar
+                        } else if app.login_focus == LoginField::Username
+                            && app.login_pass.is_empty()
+                        {
+                            // Enter en username salta a password.
+                            app.login_focus = LoginField::Password;
+                        } else if !app.login_user.trim().is_empty() && !app.login_pass.is_empty() {
+                            // Submit
+                            if login_rx.is_none() {
+                                let (tx, rx_new) = mpsc::unbounded_channel();
+                                login_rx = Some(rx_new);
+                                spawn_login(&http, &config, &mut app, tx);
+                            } else {
+                                // Ya hay canal — creamos uno nuevo (por
+                                // si el user reintenta tras error).
+                                let (tx, rx_new) = mpsc::unbounded_channel();
+                                login_rx = Some(rx_new);
+                                spawn_login(&http, &config, &mut app, tx);
                             }
                         }
-                        KeyCode::Backspace => {
-                            app.search_input.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            // Ojo: KeyCode::Char('q') se procesa arriba antes
-                            // que este match, así que no se puede escribir
-                            // 'q' en el input. Trueque razonable — para
-                            // salir se usa Esc en Search.
-                            app.search_input.push(c);
-                        }
-                        _ => {}
-                    },
-                    View::Recs => match key.code {
-                        KeyCode::Esc | KeyCode::Char('b') => {
-                            app.view = View::Menu;
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
-                        KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
-                        KeyCode::Char('r') if !app.loading => {
-                            spawn_fetch(&config, &http, &mut app, &mut rx);
-                        }
-                        KeyCode::Char('+') | KeyCode::Char('=') => {
-                            app.min_rating = (app.min_rating + 0.5).min(5.0);
-                            app.stale = true;
-                        }
-                        KeyCode::Char('-') | KeyCode::Char('_') => {
-                            app.min_rating = (app.min_rating - 0.5).max(0.5);
-                            app.stale = true;
-                        }
-                        KeyCode::Char(']') => {
-                            app.count += 5;
-                            app.stale = true;
-                        }
-                        KeyCode::Char('[') => {
-                            app.count = app.count.saturating_sub(5).max(1);
-                            app.stale = true;
-                        }
-                        KeyCode::Char('t') => {
-                            spawn_torrents(&config, &http, &mut app, &mut tor_rx);
-                        }
-                        _ => {}
-                    },
-                    View::Torrents => match key.code {
-                        KeyCode::Esc | KeyCode::Char('b') => {
-                            app.view = match app.tor_source {
-                                TorrentsSource::FromRecs => View::Recs,
-                                TorrentsSource::FromSearch => View::Search,
-                            };
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
-                        KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
-                        KeyCode::Enter => {
-                            if let Some(i) = app.tor_state.selected() {
-                                if let Some(t) = app.tor_results.get(i) {
-                                    // macOS: `open` con un magnet lo pasa al
-                                    // handler registrado (Transmission,
-                                    // qBittorrent, etc.). En Linux se usa
-                                    // xdg-open; en Windows `start`.
-                                    open_magnet(&t.magnet);
-                                    app.tor_status =
-                                        format!("Magnet abierto: {}", t.title);
+                    }
+                    KeyCode::Backspace => {
+                        if !app.login_busy {
+                            match app.login_focus {
+                                LoginField::Username => {
+                                    app.login_user.pop();
+                                }
+                                LoginField::Password => {
+                                    app.login_pass.pop();
                                 }
                             }
                         }
-                        KeyCode::Char('s') => {
-                            if let Some(i) = app.tor_state.selected() {
-                                if let Some(t) = app.tor_results.get(i).cloned() {
-                                    // Si había un stream anterior (por
-                                    // ejemplo, VLC ya cerrado pero handle
-                                    // aún en memoria), lo tiramos ahora
-                                    // para que su Drop libere puertos y
-                                    // borre el tempdir ANTES de arrancar
-                                    // la nueva sesión librqbit.
-                                    app.stream = None;
-                                    app.stream_player_alive = None;
-                                    // Inicializa el canal de stream la primera
-                                    // vez que se usa.
-                                    if stream_tx.is_none() {
-                                        let (tx, rx) = mpsc::unbounded_channel();
-                                        stream_tx = Some(tx);
-                                        stream_rx = Some(rx);
-                                    }
-                                    let tx = stream_tx.as_ref().unwrap().clone();
-                                    app.stream_msg =
-                                        Some(format!("Iniciando stream: {}…", t.title));
-                                    tokio::spawn(async move {
-                                        let _ = tx.send(StreamEvent::Starting(
-                                            "Resolviendo metadata del torrent (magnet)…"
-                                                .to_string(),
-                                        ));
-                                        match crate::stream::start(t.magnet.clone()).await {
-                                            Ok(h) => {
-                                                let _ =
-                                                    tx.send(StreamEvent::Ready(Box::new(h)));
-                                            }
-                                            Err(e) => {
-                                                let _ = tx.send(StreamEvent::Failed(
-                                                    e.to_string(),
-                                                ));
-                                            }
+                    }
+                    KeyCode::Char(c) if !app.login_busy => match app.login_focus {
+                        LoginField::Username => app.login_user.push(c),
+                        LoginField::Password => app.login_pass.push(c),
+                    },
+                    _ => {}
+                },
+                View::Search => match key.code {
+                    KeyCode::Esc => {
+                        app.view = View::Menu;
+                    }
+                    KeyCode::Enter => {
+                        let q = app.search_input.trim().to_string();
+                        if !q.is_empty() {
+                            spawn_direct_search(&http, &config, &q, &mut app, &mut tor_rx);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        app.search_input.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        // Ojo: KeyCode::Char('q') se procesa arriba antes
+                        // que este match, así que no se puede escribir
+                        // 'q' en el input. Trueque razonable — para
+                        // salir se usa Esc en Search.
+                        app.search_input.push(c);
+                    }
+                    _ => {}
+                },
+                View::Recs => match key.code {
+                    KeyCode::Esc | KeyCode::Char('b') => {
+                        app.view = View::Menu;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+                    KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
+                    KeyCode::Char('r') if !app.loading => {
+                        spawn_fetch(&config, &http, &mut app, &mut rx);
+                    }
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        app.min_rating = (app.min_rating + 0.5).min(5.0);
+                        app.stale = true;
+                    }
+                    KeyCode::Char('-') | KeyCode::Char('_') => {
+                        app.min_rating = (app.min_rating - 0.5).max(0.5);
+                        app.stale = true;
+                    }
+                    KeyCode::Char(']') => {
+                        app.count += 5;
+                        app.stale = true;
+                    }
+                    KeyCode::Char('[') => {
+                        app.count = app.count.saturating_sub(5).max(1);
+                        app.stale = true;
+                    }
+                    KeyCode::Char('t') => {
+                        spawn_torrents(&config, &http, &mut app, &mut tor_rx);
+                    }
+                    _ => {}
+                },
+                View::Torrents => match key.code {
+                    KeyCode::Esc | KeyCode::Char('b') => {
+                        app.view = match app.tor_source {
+                            TorrentsSource::FromRecs => View::Recs,
+                            TorrentsSource::FromSearch => View::Search,
+                        };
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+                    KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
+                    KeyCode::Enter => {
+                        if let Some(i) = app.tor_state.selected() {
+                            if let Some(t) = app.tor_results.get(i) {
+                                // macOS: `open` con un magnet lo pasa al
+                                // handler registrado (Transmission,
+                                // qBittorrent, etc.). En Linux se usa
+                                // xdg-open; en Windows `start`.
+                                open_magnet(&t.magnet);
+                                app.tor_status = format!("Magnet abierto: {}", t.title);
+                            }
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(i) = app.tor_state.selected() {
+                            if let Some(t) = app.tor_results.get(i).cloned() {
+                                // Si había un stream anterior (por
+                                // ejemplo, VLC ya cerrado pero handle
+                                // aún en memoria), lo tiramos ahora
+                                // para que su Drop libere puertos y
+                                // borre el tempdir ANTES de arrancar
+                                // la nueva sesión librqbit.
+                                app.stream = None;
+                                app.stream_player_alive = None;
+                                // Inicializa el canal de stream la primera
+                                // vez que se usa.
+                                if stream_tx.is_none() {
+                                    let (tx, rx) = mpsc::unbounded_channel();
+                                    stream_tx = Some(tx);
+                                    stream_rx = Some(rx);
+                                }
+                                let tx = stream_tx.as_ref().unwrap().clone();
+                                app.stream_msg = Some(format!("Iniciando stream: {}…", t.title));
+                                tokio::spawn(async move {
+                                    let _ = tx.send(StreamEvent::Starting(
+                                        "Resolviendo metadata del torrent (magnet)…".to_string(),
+                                    ));
+                                    match crate::stream::start(t.magnet.clone()).await {
+                                        Ok(h) => {
+                                            let _ = tx.send(StreamEvent::Ready(Box::new(h)));
                                         }
-                                    });
-                                }
+                                        Err(e) => {
+                                            let _ = tx.send(StreamEvent::Failed(e.to_string()));
+                                        }
+                                    }
+                                });
                             }
                         }
-                        KeyCode::Char('m') => {
-                            app.show_magnet = !app.show_magnet;
+                    }
+                    KeyCode::Char('m') => {
+                        app.show_magnet = !app.show_magnet;
+                    }
+                    KeyCode::Char('x') => {
+                        // Búsqueda de subtítulos en OpenSubtitles para
+                        // el torrent seleccionado. Como `query` mandamos
+                        // el título completo del release
+                        // (`Foo.2007.1080p.BluRay.x264`) para que
+                        // OpenSubtitles rankee por match de edición.
+                        if !subtitles::is_available() {
+                            app.stream_msg = Some(
+                                "Subtítulos deshabilitados: sin OPENSUBTITLES_API_KEY".to_string(),
+                            );
+                        } else if let Some(i) = app.tor_state.selected() {
+                            if let Some(t) = app.tor_results.get(i).cloned() {
+                                // Nuevo canal por búsqueda para
+                                // descartar resultados de búsquedas
+                                // anteriores (evita race si el user
+                                // pulsa 'x' varias veces seguidas).
+                                let (tx, new_rx) = mpsc::unbounded_channel();
+                                subs_rx = Some(new_rx);
+                                app.view = View::Subs;
+                                app.subs_loading = true;
+                                app.subs_error = None;
+                                app.subs_results.clear();
+                                app.subs_state.select(None);
+                                let http_c = http.clone();
+                                let imdb = app.tor_imdb_id.clone();
+                                let query = t.title.clone();
+                                tokio::spawn(async move {
+                                    match subtitles::search(
+                                        &http_c,
+                                        imdb.as_deref(),
+                                        Some(&query),
+                                        subtitles::DEFAULT_LANGUAGES,
+                                    )
+                                    .await
+                                    {
+                                        Ok(list) => {
+                                            let _ = tx.send(SubsEvent::Found(list));
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(SubsEvent::Failed(e.to_string()));
+                                        }
+                                    }
+                                });
+                            }
                         }
-                        _ => {}
-                    },
-                }
+                    }
+                    _ => {}
+                },
+                View::Subs => match key.code {
+                    KeyCode::Esc | KeyCode::Char('b') => {
+                        app.view = View::Torrents;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+                    KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
+                    KeyCode::Enter => {
+                        if let Some(i) = app.subs_state.selected() {
+                            if let Some(sub) = app.subs_results.get(i).cloned() {
+                                let (tx, new_rx) = mpsc::unbounded_channel();
+                                subs_rx = Some(new_rx);
+                                app.subs_loading = true;
+                                app.subs_error = None;
+                                let http_c = http.clone();
+                                // Directorio efímero por sesión. Se
+                                // limpia al salir el proceso.
+                                let dest = std::env::temp_dir().join("letterboxd-cli-subs");
+                                tokio::spawn(async move {
+                                    match subtitles::download(&http_c, &sub, &dest).await {
+                                        Ok(path) => {
+                                            let _ = tx.send(SubsEvent::Downloaded {
+                                                path,
+                                                release: sub.release.clone(),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(SubsEvent::Failed(e.to_string()));
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                },
             }
         }
+    }
 
     Ok(())
 }
@@ -795,6 +941,11 @@ fn spawn_torrents(
     app.tor_error = None;
     app.tor_results.clear();
     app.tor_state.select(None);
+    // Reset del IMDb id + del sub cacheado: nueva película, nueva
+    // búsqueda de subtítulos si el user pulsa 'x'.
+    app.tor_imdb_id = None;
+    app.sub_path = None;
+    app.sub_release = None;
 
     let http = http.clone();
     let bearer = config.tmdb_bearer_token.clone();
@@ -828,6 +979,9 @@ fn spawn_torrents(
             // Emitimos el idioma antes del Done para que el renderer pueda
             // clasificar el audio de cada release.
             let _ = tx.send(TorrentEvent::Language(original_language.clone()));
+            // Y el IMDb ID resuelto, para que la vista de subtítulos
+            // pueda pedir solo subs de esta película concreta.
+            let _ = tx.send(TorrentEvent::Imdb(imdb_id.clone()));
 
             let _ = tx.send(TorrentEvent::Status(match &imdb_id {
                 Some(id) => format!("Buscando \"{title}\" (imdb {id})…"),
@@ -845,8 +999,7 @@ fn spawn_torrents(
             // min_seeders=1 en la TUI: los reportes de seeders de los
             // indexers son aproximados y filtrar por 3 pierde demasiadas
             // pelis de nicho.
-            let mut list =
-                torrents::search_all(&http, &providers, &primary_query, 1, 40).await;
+            let mut list = torrents::search_all(&http, &providers, &primary_query, 1, 40).await;
 
             // Fallback: si no hay resultados con el título original y
             // tenemos título ruso, reintentar. Los indexers rusos (RuTracker,
@@ -919,6 +1072,11 @@ fn spawn_direct_search(
     // Sin TMDB no podemos saber el idioma original — el badge de audio
     // quedará como Unknown salvo que el título del release lo declare.
     app.tor_original_language = None;
+    // Search directa: no tenemos IMDb ID a priori (no pasamos por TMDB).
+    // Los subs se buscarán solo por `query`.
+    app.tor_imdb_id = None;
+    app.sub_path = None;
+    app.sub_release = None;
 
     let http = http.clone();
 
@@ -973,14 +1131,8 @@ fn spawn_login(
     let pass = app.login_pass.clone();
 
     tokio::spawn(async move {
-        match crate::auth::login_with_password(
-            &http,
-            &client_id,
-            &client_secret,
-            &user,
-            &pass,
-        )
-        .await
+        match crate::auth::login_with_password(&http, &client_id, &client_secret, &user, &pass)
+            .await
         {
             Ok(result) => {
                 let _ = tx.send(LoginEvent::Ok {
@@ -1014,6 +1166,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         View::Search => draw_search(f, app),
         View::Recs => draw_recs(f, app),
         View::Torrents => draw_torrents(f, app),
+        View::Subs => draw_subs(f, app),
     }
 }
 
@@ -1117,11 +1270,9 @@ fn draw_login(f: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL).title(" Estado "));
     f.render_widget(status_panel, chunks[3]);
 
-    let footer = Paragraph::new(
-        "Tab/↓↑ cambiar campo · Enter enviar · Esc volver al menú",
-    )
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL));
+    let footer = Paragraph::new("Tab/↓↑ cambiar campo · Enter enviar · Esc volver al menú")
+        .wrap(Wrap { trim: true })
+        .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, chunks[5]);
 }
 
@@ -1157,8 +1308,7 @@ fn draw_menu(f: &mut Frame, app: &mut App) {
             Row::new(vec![
                 Cell::from((*label).to_string())
                     .style(Style::default().add_modifier(Modifier::BOLD)),
-                Cell::from((*desc).to_string())
-                    .style(Style::default().fg(Color::DarkGray)),
+                Cell::from((*desc).to_string()).style(Style::default().fg(Color::DarkGray)),
             ])
             .height(2)
         })
@@ -1271,8 +1421,7 @@ fn draw_recs(f: &mut Frame, app: &mut App) {
                 Row::new(vec![
                     Cell::from(format!("{:>2}.", i + 1))
                         .style(Style::default().fg(Color::DarkGray)),
-                    Cell::from(rec.movie.title.clone())
-                        .style(Style::default().fg(Color::White)),
+                    Cell::from(rec.movie.title.clone()).style(Style::default().fg(Color::White)),
                     Cell::from(year).style(Style::default().fg(Color::DarkGray)),
                     Cell::from(rating).style(Style::default().fg(Color::Yellow)),
                 ])
@@ -1377,9 +1526,8 @@ fn draw_torrents(f: &mut Frame, app: &mut App) {
         } else {
             "\n   (sin resultados)".to_string()
         };
-        let placeholder = Paragraph::new(placeholder_text).block(
-            Block::default().borders(Borders::ALL).title(" Resultados "),
-        );
+        let placeholder = Paragraph::new(placeholder_text)
+            .block(Block::default().borders(Borders::ALL).title(" Resultados "));
         f.render_widget(placeholder, chunks[1]);
     } else {
         let rows: Vec<Row> = app
@@ -1389,10 +1537,8 @@ fn draw_torrents(f: &mut Frame, app: &mut App) {
             .map(|(i, t)| {
                 let size = torrents::format_size(t.size_bytes);
                 let q = t.quality.as_deref().unwrap_or("?");
-                let audio = torrents::classify_audio(
-                    &t.title,
-                    app.tor_original_language.as_deref(),
-                );
+                let audio =
+                    torrents::classify_audio(&t.title, app.tor_original_language.as_deref());
                 let audio_color = match audio {
                     torrents::AudioHint::Original => Color::LightGreen,
                     torrents::AudioHint::Multi => Color::LightBlue,
@@ -1404,13 +1550,10 @@ fn draw_torrents(f: &mut Frame, app: &mut App) {
                         .style(Style::default().fg(Color::DarkGray)),
                     Cell::from(t.title.clone()).style(Style::default().fg(Color::White)),
                     Cell::from(size).style(Style::default().fg(Color::Yellow)),
-                    Cell::from(format!("↑{}", t.seeders))
-                        .style(Style::default().fg(Color::Green)),
-                    Cell::from(format!("↓{}", t.leechers))
-                        .style(Style::default().fg(Color::Red)),
+                    Cell::from(format!("↑{}", t.seeders)).style(Style::default().fg(Color::Green)),
+                    Cell::from(format!("↓{}", t.leechers)).style(Style::default().fg(Color::Red)),
                     Cell::from(q.to_string()).style(Style::default().fg(Color::Cyan)),
-                    Cell::from(audio.badge().to_string())
-                        .style(Style::default().fg(audio_color)),
+                    Cell::from(audio.badge().to_string()).style(Style::default().fg(audio_color)),
                     Cell::from(t.source).style(Style::default().fg(Color::DarkGray)),
                 ])
             })
@@ -1451,11 +1594,7 @@ fn draw_torrents(f: &mut Frame, app: &mut App) {
             .and_then(|i| app.tor_results.get(i))
             .map(|t| t.magnet.clone())
             .unwrap_or_else(|| "(selecciona un torrent para ver su magnet)".to_string());
-        (
-            " Magnet ",
-            text,
-            Style::default().fg(Color::DarkGray),
-        )
+        (" Magnet ", text, Style::default().fg(Color::DarkGray))
     } else if let Some(stream) = app.stream.as_ref() {
         let s = stream.stats();
         let pct = if s.total_bytes > 0 {
@@ -1499,7 +1638,10 @@ fn draw_torrents(f: &mut Frame, app: &mut App) {
             Style::default().fg(Color::Cyan),
         ))
     } else if let Some(msg) = &app.stream_msg {
-        Line::from(Span::styled(msg.clone(), Style::default().fg(Color::Magenta)))
+        Line::from(Span::styled(
+            msg.clone(),
+            Style::default().fg(Color::Magenta),
+        ))
     } else {
         Line::from(Span::raw(format!("{HELP_TORRENTS}  ·  {}", app.tor_status)))
     };
@@ -1507,4 +1649,103 @@ fn draw_torrents(f: &mut Frame, app: &mut App) {
         .wrap(Wrap { trim: true })
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, chunks[3]);
+}
+
+fn draw_subs(f: &mut Frame, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(3),
+        ])
+        .split(f.area());
+
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "💬 Subtítulos",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  —  OpenSubtitles"),
+    ]))
+    .block(Block::default().borders(Borders::ALL));
+    f.render_widget(title, chunks[0]);
+
+    if app.subs_results.is_empty() {
+        let text = if app.subs_loading {
+            format!("\n   {}  Buscando subtítulos…", app.spinner())
+        } else if let Some(err) = &app.subs_error {
+            format!("\n   Error: {err}")
+        } else {
+            "\n   (sin resultados)".to_string()
+        };
+        let placeholder = Paragraph::new(text)
+            .block(Block::default().borders(Borders::ALL).title(" Resultados "));
+        f.render_widget(placeholder, chunks[1]);
+    } else {
+        let rows: Vec<Row> = app
+            .subs_results
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let lang = s.language.to_uppercase();
+                let sdh = if s.hearing_impaired { "SDH" } else { "" };
+                Row::new(vec![
+                    Cell::from(format!("{:>2}.", i + 1))
+                        .style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(lang).style(Style::default().fg(Color::LightCyan)),
+                    Cell::from(s.release.clone()).style(Style::default().fg(Color::White)),
+                    Cell::from(format!("↓ {}", s.downloads))
+                        .style(Style::default().fg(Color::Green)),
+                    Cell::from(if s.rating > 0.0 {
+                        format!("★ {:.1}", s.rating)
+                    } else {
+                        String::new()
+                    })
+                    .style(Style::default().fg(Color::Yellow)),
+                    Cell::from(sdh).style(Style::default().fg(Color::LightMagenta)),
+                ])
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Length(4),  // nº
+            Constraint::Length(4),  // lang
+            Constraint::Fill(1),    // release
+            Constraint::Length(10), // downloads
+            Constraint::Length(6),  // rating
+            Constraint::Length(4),  // SDH
+        ];
+
+        let table = Table::new(rows, widths)
+            .block(Block::default().borders(Borders::ALL).title(" Resultados "))
+            .row_highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ")
+            .column_spacing(1);
+        f.render_stateful_widget(table, chunks[1], &mut app.subs_state);
+    }
+
+    let footer_line = if app.subs_loading {
+        Line::from(Span::styled(
+            format!("{} Trabajando…", app.spinner()),
+            Style::default().fg(Color::Cyan),
+        ))
+    } else if let Some(err) = &app.subs_error {
+        Line::from(Span::styled(
+            format!("Error: {err}"),
+            Style::default().fg(Color::Red),
+        ))
+    } else {
+        Line::from(Span::raw(HELP_SUBS))
+    };
+    let footer = Paragraph::new(footer_line)
+        .wrap(Wrap { trim: true })
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(footer, chunks[2]);
 }

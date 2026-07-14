@@ -8,7 +8,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{build_magnet, infohash_from_magnet, quality_from_title, MovieQuery, Torrent, TorrentProvider};
+use super::{
+    build_magnet, infohash_from_magnet, quality_from_title, MovieQuery, Torrent, TorrentProvider,
+};
 
 pub struct Torznab {
     url: String,
@@ -104,8 +106,7 @@ impl TorrentProvider for Torznab {
             .await
             .context("Error al leer respuesta de Torznab")?;
 
-        let rss: Rss = quick_xml::de::from_str(&body)
-            .context("Error al parsear XML de Torznab")?;
+        let rss: Rss = quick_xml::de::from_str(&body).context("Error al parsear XML de Torznab")?;
 
         let mut out = Vec::new();
         for item in rss.channel.items {

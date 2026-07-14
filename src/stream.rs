@@ -184,13 +184,7 @@ pub async fn start(magnet: String) -> Result<StreamHandle> {
                 .iter()
                 .enumerate()
                 .max_by_key(|(_, f)| f.len)
-                .map(|(i, f)| {
-                    (
-                        i,
-                        f.relative_filename.to_string_lossy().into_owned(),
-                        f.len,
-                    )
-                })
+                .map(|(i, f)| (i, f.relative_filename.to_string_lossy().into_owned(), f.len))
         })
         .context("No se pudo leer metadata del torrent")?
         .context("Torrent sin ficheros")?;
@@ -206,7 +200,9 @@ pub async fn start(magnet: String) -> Result<StreamHandle> {
         file_id,
         file_len,
     };
-    let app = Router::new().route("/video", get(serve_video)).with_state(state);
+    let app = Router::new()
+        .route("/video", get(serve_video))
+        .with_state(state);
 
     let cancel_task = cancel.clone();
     let server_task = tokio::spawn(async move {
@@ -351,35 +347,58 @@ fn parse_range(v: &str) -> Option<(u64, Option<u64>)> {
 /// reproductor termina — así la TUI puede detectar que el usuario cerró VLC
 /// y liberar el stream automáticamente.
 ///
-/// * macOS: `open -W -a VLC <url>` — `-W` hace que `open` bloquee hasta que
-///   VLC salga del todo (⌘Q). Cerrar solo la ventana no cuenta (patrón
-///   estándar macOS: la app sigue viva). Si VLC no está instalado, cae a
-///   `open <url>` (sin `-W`, el flag queda `false` inmediatamente).
-/// * Linux: `vlc <url>` directo — el `Child` ES VLC, así que `wait()` sobre
-///   él detecta el cierre. Fallback a `xdg-open`.
-/// * Windows: `start /wait vlc <url>` — bloquea hasta que VLC cierre.
+/// Si `sub_path` está informado, se le pasa a VLC como `--sub-file=…` para
+/// que arranque con los subtítulos ya cargados.
+///
+/// * macOS: `open -W -a VLC --args <url> [--sub-file=<path>]` — `-W` hace
+///   que `open` bloquee hasta que VLC salga del todo (⌘Q). Cerrar solo la
+///   ventana no cuenta (patrón estándar macOS). Si VLC no está instalado,
+///   cae a `open <url>` (sin `-W`; el flag queda `false` inmediatamente).
+/// * Linux: `vlc <url> [--sub-file=<path>]` directo. Fallback a
+///   `xdg-open` (que no puede pasar subs).
+/// * Windows: `start /wait vlc <url> [--sub-file=<path>]` — bloquea hasta
+///   que VLC cierre.
 ///
 /// Si no se puede lanzar ningún reproductor, el flag queda en `false` para
 /// que la TUI limpie el stream inmediatamente en lugar de dejarlo colgando.
-pub fn open_in_vlc(url: &str) -> Arc<std::sync::atomic::AtomicBool> {
+pub fn open_in_vlc(
+    url: &str,
+    sub_path: Option<&std::path::Path>,
+) -> Arc<std::sync::atomic::AtomicBool> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let alive = Arc::new(AtomicBool::new(true));
 
+    // Preparamos el arg de sub UNA sola vez para no repetir la lógica en
+    // cada rama de SO. VLC acepta `--sub-file=/ruta/absoluta.srt`.
+    let sub_arg: Option<String> = sub_path.map(|p| format!("--sub-file={}", p.display()));
+
     let child_result: std::io::Result<tokio::process::Child> = {
         #[cfg(target_os = "macos")]
         {
-            let vlc = tokio::process::Command::new("open")
-                .args(["-W", "-a", "VLC", url])
-                .spawn();
+            let mut cmd = tokio::process::Command::new("open");
+            cmd.args(["-W", "-a", "VLC", "--args", url]);
+            if let Some(a) = sub_arg.as_deref() {
+                cmd.arg(a);
+            }
+            let vlc = cmd.spawn();
             match vlc {
                 Ok(c) => Ok(c),
+                // Fallback: `open <url>` sin `-a VLC` — deja al SO elegir
+                // el reproductor por defecto. En ese caso perdemos la
+                // capacidad de pasar `--sub-file` (no todos los players lo
+                // soportan) — el user tendrá que cargar el sub a mano.
                 Err(_) => tokio::process::Command::new("open").arg(url).spawn(),
             }
         }
         #[cfg(target_os = "linux")]
         {
-            let vlc = tokio::process::Command::new("vlc").arg(url).spawn();
+            let mut cmd = tokio::process::Command::new("vlc");
+            cmd.arg(url);
+            if let Some(a) = sub_arg.as_deref() {
+                cmd.arg(a);
+            }
+            let vlc = cmd.spawn();
             match vlc {
                 Ok(c) => Ok(c),
                 Err(_) => tokio::process::Command::new("xdg-open").arg(url).spawn(),
@@ -387,9 +406,13 @@ pub fn open_in_vlc(url: &str) -> Arc<std::sync::atomic::AtomicBool> {
         }
         #[cfg(target_os = "windows")]
         {
-            tokio::process::Command::new("cmd")
-                .args(["/C", "start", "/wait", "vlc", url])
-                .spawn()
+            let mut cmd = tokio::process::Command::new("cmd");
+            let mut args: Vec<&str> = vec!["/C", "start", "/wait", "vlc", url];
+            if let Some(a) = sub_arg.as_deref() {
+                args.push(a);
+            }
+            cmd.args(&args);
+            cmd.spawn()
         }
     };
 

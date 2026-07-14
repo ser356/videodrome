@@ -28,8 +28,7 @@ fn path() -> Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("No se puede obtener el directorio de configuración")?
         .join("letterboxd-cli");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("No se pudo crear {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("No se pudo crear {}", dir.display()))?;
     Ok(dir.join(FILE_NAME))
 }
 

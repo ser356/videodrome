@@ -6,6 +6,7 @@ mod letterboxd;
 mod progress;
 mod recommend;
 mod stream;
+mod subtitles;
 mod tmdb;
 mod torrents;
 mod tui;
@@ -270,9 +271,7 @@ async fn main() -> Result<()> {
                 }
 
                 if written == 0 {
-                    anyhow::bail!(
-                        "El Keychain no tiene ninguna credencial de letterboxd-cli."
-                    );
+                    anyhow::bail!("El Keychain no tiene ninguna credencial de letterboxd-cli.");
                 }
 
                 if let Some(parent) = path.parent() {
@@ -289,10 +288,7 @@ async fn main() -> Result<()> {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &path,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 }
 
                 println!(
@@ -362,10 +358,7 @@ async fn main() -> Result<()> {
                     match tmdb.find_by_imdb(id).await? {
                         Some(lookup) => {
                             if !json {
-                                let y = lookup
-                                    .year
-                                    .map(|y| format!(" ({y})"))
-                                    .unwrap_or_default();
+                                let y = lookup.year.map(|y| format!(" ({y})")).unwrap_or_default();
                                 println!(
                                     "  {} IMDb {} → {}{}",
                                     "»".dimmed(),
@@ -408,8 +401,7 @@ async fn main() -> Result<()> {
                 );
             }
 
-            let results =
-                torrents::search_all(&http, &providers, &query, min_seeders, limit).await;
+            let results = torrents::search_all(&http, &providers, &query, min_seeders, limit).await;
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);

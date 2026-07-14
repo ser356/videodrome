@@ -116,8 +116,8 @@ fn release_matches_year(title: &str, target: u16) -> bool {
 
 /// Palabras cortas o vacías que no aportan discriminación. Idiomas: EN + ES.
 const STOPWORDS: &[&str] = &[
-    "the", "and", "for", "with", "from", "una", "uno", "unos", "unas", "los", "las",
-    "que", "por", "para", "con", "del",
+    "the", "and", "for", "with", "from", "una", "uno", "unos", "unas", "los", "las", "que", "por",
+    "para", "con", "del",
 ];
 
 /// Tokeniza un título: pasa a minúsculas, parte por cualquier carácter no
