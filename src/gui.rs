@@ -132,7 +132,9 @@ async fn get_movie_view(
 ) -> Result<Option<MovieView>, String> {
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
     let tmdb = TmdbClient::new(&state.http, &bearer);
-    tmdb.get_movie_view(tmdb_id).await.map_err(|e| e.to_string())
+    tmdb.get_movie_view(tmdb_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---------- Torrents ----------
@@ -321,10 +323,7 @@ struct StreamInfo {
 }
 
 #[tauri::command]
-async fn start_stream(
-    magnet: String,
-    state: State<'_, AppState>,
-) -> Result<StreamInfo, String> {
+async fn start_stream(magnet: String, state: State<'_, AppState>) -> Result<StreamInfo, String> {
     let handle = stream::start(magnet).await.map_err(|e| e.to_string())?;
 
     let mut id_lock = state.next_stream_id.lock().await;
@@ -358,10 +357,7 @@ struct StreamStatsDto {
 }
 
 #[tauri::command]
-async fn stream_stats(
-    id: u64,
-    state: State<'_, AppState>,
-) -> Result<StreamStatsDto, String> {
+async fn stream_stats(id: u64, state: State<'_, AppState>) -> Result<StreamStatsDto, String> {
     let streams = state.streams.lock().await;
     let handle = streams
         .get(&id)
