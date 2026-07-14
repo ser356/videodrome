@@ -27,15 +27,16 @@ brew tap ser356/cask https://github.com/ser356/homebrew-cask
 brew install --cask videodrome
 ```
 
-VLC entra automáticamente como dependencia. La app **no está firmada
-por Apple**, así que la primera vez macOS la bloquea. Para desbloquear:
+VLC entra automáticamente como dependencia. La app lleva **firma
+ad-hoc** (no está firmada con Developer ID de Apple), pero el cask
+limpia `com.apple.quarantine` en postinstall — abre con doble click sin
+más pasos.
+
+Si por lo que sea sigue bloqueada:
 
 ```bash
 xattr -cr /Applications/Videodrome.app
 ```
-
-Alternativa: Ajustes del Sistema → Privacidad y seguridad → "Abrir de
-todas formas" tras el primer intento.
 
 Actualizar: `brew upgrade --cask videodrome`.
 

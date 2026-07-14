@@ -39,14 +39,25 @@ cask "videodrome" do
   #   videodrome tui             # TUI en terminal
   binary "#{appdir}/Videodrome.app/Contents/MacOS/videodrome", target: "videodrome"
 
+  # Limpia com.apple.quarantine automáticamente tras la instalación.
+  # Sin esto, macOS Sequoia+ bloquea la app sin ofrecer siquiera el
+  # botón "Abrir de todas formas" en Ajustes → Privacidad y seguridad
+  # (solo aparece "Trasladar a la papelera"). La firma ad-hoc que
+  # cargo tauri build genera es correcta — el bloqueo es puramente por
+  # el flag de cuarentena que Gatekeeper añade al descargar el zip.
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-cr", "#{appdir}/Videodrome.app"],
+                   sudo: false
+  end
+
   caveats <<~EOS
-    Videodrome no está firmado por Apple. La primera vez que lo abras
-    macOS lo bloqueará. Para desbloquearlo:
+    Videodrome no está firmado con Developer ID de Apple (solo firma
+    ad-hoc). El cask limpia com.apple.quarantine automáticamente en
+    postinstall, así que la app debería abrir con doble click.
 
+    Si por alguna razón sigue bloqueada, ejecuta manualmente:
       xattr -cr /Applications/Videodrome.app
-
-    O bien: Ajustes del Sistema → Privacidad y seguridad → "Abrir de
-    todas formas" tras el primer intento.
 
     Uso desde terminal (mismo binario que la GUI):
       videodrome recommend
