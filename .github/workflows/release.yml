@@ -48,7 +48,7 @@ jobs:
       - name: Empaquetar
         run: |
           mkdir -p dist
-          cp target/x86_64-unknown-linux-gnu/release/letterboxd-cli dist/videodrome
+          cp target/x86_64-unknown-linux-gnu/release/videodrome dist/videodrome
           cp README.md dist/ 2>/dev/null || true
           cp LICENSE dist/ 2>/dev/null || true
           cd dist
@@ -153,15 +153,15 @@ jobs:
       - name: Empaquetar .exe en zip (para scoop)
         shell: pwsh
         run: |
-          $exe = "target/x86_64-pc-windows-msvc/release/Videodrome.exe"
+          $exe = "target/x86_64-pc-windows-msvc/release/videodrome.exe"
           if (-not (Test-Path $exe)) {
             Write-Error ".exe no encontrado en $exe"
             Get-ChildItem target -Recurse -Filter *.exe
             exit 1
           }
           New-Item -ItemType Directory -Force -Path pkg | Out-Null
-          Copy-Item $exe pkg/Videodrome.exe
-          Compress-Archive -Path pkg/Videodrome.exe -DestinationPath "videodrome-${{ github.ref_name }}-windows-x86_64.zip"
+          Copy-Item $exe pkg/videodrome.exe
+          Compress-Archive -Path pkg/videodrome.exe -DestinationPath "videodrome-${{ github.ref_name }}-windows-x86_64.zip"
 
       - uses: actions/upload-artifact@v4
         with:
