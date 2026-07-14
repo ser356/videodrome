@@ -49,23 +49,28 @@ fn compute_seen_and_seeds(
 }
 
 /// Pre-selecciona las `fetch_count` candidatas con mejor freq × TMDB (0-10 → 0-5)
-/// antes de gastar llamadas a Letterboxd para el score final.
+/// antes de gastar llamadas a Letterboxd para el score final. Devuelve las
+/// películas (drenadas del map) junto con su frecuencia — evita recorrer el
+/// map otra vez después.
 fn pre_score_candidates(
-    candidate_movies: &HashMap<u64, TmdbMovie>,
+    candidate_movies: HashMap<u64, TmdbMovie>,
     freq: &HashMap<u64, u32>,
     fetch_count: usize,
-) -> Vec<u64> {
-    let mut v: Vec<(u64, f32)> = candidate_movies
-        .keys()
-        .map(|id| {
-            let f = *freq.get(id).unwrap_or(&1) as f32;
-            let t = candidate_movies[id].vote_average / 2.0;
-            (*id, f * t)
+) -> Vec<(TmdbMovie, f32)> {
+    let mut v: Vec<(TmdbMovie, f32)> = candidate_movies
+        .into_iter()
+        .map(|(id, movie)| {
+            let f = *freq.get(&id).unwrap_or(&1) as f32;
+            (movie, f)
         })
         .collect();
-    v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    v.sort_unstable_by(|a, b| {
+        let sa = a.1 * a.0.vote_average / 2.0;
+        let sb = b.1 * b.0.vote_average / 2.0;
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
     v.truncate(fetch_count);
-    v.into_iter().map(|(id, _)| id).collect()
+    v
 }
 
 /// Score final: rating de Letterboxd si está disponible, si no el de TMDB
@@ -115,34 +120,23 @@ pub async fn build_recommendations<P: Progress>(
             if seen.contains(&movie.id) {
                 continue;
             }
-            freq.entry(movie.id)
-                .and_modify(|c| *c += 1)
-                .or_insert_with(|| {
-                    candidate_movies.insert(movie.id, movie.clone());
-                    1
-                });
+            let count = freq.entry(movie.id).or_insert(0);
+            *count += 1;
+            candidate_movies.entry(movie.id).or_insert(movie);
         }
     }
     progress.finish();
     tmdb_client.save_cache();
 
-    // Pre-selección por freq × TMDB
+    // Pre-selección por freq × TMDB — drena `candidate_movies`, así que las
+    // películas descartadas se sueltan sin recorrer el map una segunda vez.
     let fetch_count = (count * 3).min(candidate_movies.len());
-    let pre_scored = pre_score_candidates(&candidate_movies, &freq, fetch_count);
-
-    let candidates: Vec<(TmdbMovie, f32)> = pre_scored
-        .iter()
-        .map(|id| {
-            let movie = candidate_movies.remove(id).unwrap();
-            let f = *freq.get(id).unwrap_or(&1) as f32;
-            (movie, f)
-        })
-        .collect();
+    let candidates = pre_score_candidates(candidate_movies, &freq, fetch_count);
 
     // ── 3. Ratings de Letterboxd (en paralelo) → re-score final ─────────────
     progress.stage("Obteniendo ratings de Letterboxd…", fetch_count as u64);
 
-    let mut lb_stream = stream::iter(candidates)
+    let mut scored: Vec<Recommendation> = stream::iter(candidates)
         .map(|(movie, f)| async move {
             let lb_rating = lb_client.get_lb_rating(movie.id).await;
             progress.inc();
@@ -153,15 +147,12 @@ pub async fn build_recommendations<P: Progress>(
                 score,
             }
         })
-        .buffer_unordered(LB_CONCURRENCY);
-
-    let mut scored: Vec<Recommendation> = Vec::with_capacity(fetch_count);
-    while let Some(rec) = lb_stream.next().await {
-        scored.push(rec);
-    }
+        .buffer_unordered(LB_CONCURRENCY)
+        .collect()
+        .await;
     progress.finish();
 
-    scored.sort_by(|a, b| {
+    scored.sort_unstable_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -247,8 +238,9 @@ mod tests {
         freq.insert(1, 1);
         freq.insert(2, 2);
 
-        let top = pre_score_candidates(&candidates, &freq, 1);
-        assert_eq!(top, vec![2]);
+        let top = pre_score_candidates(candidates, &freq, 1);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].0.id, 2);
     }
 
     #[test]

@@ -83,30 +83,29 @@ pub async fn search_all(
         });
     }
 
-    let mut all: Vec<Torrent> = Vec::new();
+    // Dedupe por infohash, quedándonos con la entrada de más seeders.
+    // Se hace en el mismo loop que consume los futures — evita un `Vec`
+    // intermedio que en búsquedas amplias (miles de resultados de Knaben)
+    // dispara reallocaciones inútiles.
+    let mut best: HashMap<String, Torrent> = HashMap::new();
     while let Some((_name, res)) = futs.next().await {
         // Silenciamos errores individuales: si un provider está caído
         // (YTS a menudo, un Torznab local mal configurado, etc.) el
         // resto sigue funcionando. En la TUI no podemos hacer eprintln
         // porque corromperíamos la pantalla alternativa.
-        if let Ok(items) = res {
-            all.extend(items);
-        }
-    }
-
-    // Dedupe por infohash, quedándonos con la entrada de más seeders.
-    let mut best: HashMap<String, Torrent> = HashMap::new();
-    for t in all {
-        if t.infohash.is_empty() || t.seeders < min_seeders {
-            continue;
-        }
-        best.entry(t.infohash.clone())
-            .and_modify(|prev| {
-                if t.seeders > prev.seeders {
-                    *prev = t.clone();
+        let Ok(items) = res else { continue };
+        for t in items {
+            if t.infohash.is_empty() || t.seeders < min_seeders {
+                continue;
+            }
+            match best.get_mut(&t.infohash) {
+                Some(prev) if prev.seeders < t.seeders => *prev = t,
+                Some(_) => {}
+                None => {
+                    best.insert(t.infohash.clone(), t);
                 }
-            })
-            .or_insert(t);
+            }
+        }
     }
 
     let mut out: Vec<Torrent> = best.into_values().collect();

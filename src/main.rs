@@ -132,6 +132,19 @@ fn has_display() -> bool {
     }
 }
 
+/// Cliente HTTP compartido para todas las llamadas a APIs externas
+/// (Letterboxd, TMDB, providers de torrents, OpenSubtitles). Un timeout
+/// razonable evita cuelgues indefinidos si un endpoint no responde —
+/// especialmente relevante en la TUI, donde una request colgada bloquea
+/// el spinner sin feedback al usuario.
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("videodrome/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .context("No se pudo construir el cliente HTTP")
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -142,10 +155,7 @@ fn main() -> Result<()> {
     #[cfg(feature = "gui")]
     if cli.command.is_none() && has_display() {
         let config = Config::from_env()?;
-        let http = reqwest::Client::builder()
-            .user_agent("videodrome/0.1")
-            .build()?;
-        return gui::run(config, http);
+        return gui::run(config, http_client()?);
     }
 
     let command = cli.command.unwrap_or(Commands::Tui {
@@ -167,9 +177,7 @@ async fn dispatch(command: Commands) -> Result<()> {
             json,
         } => {
             let config = Config::from_env()?;
-            let http = reqwest::Client::builder()
-                .user_agent("videodrome/0.1")
-                .build()?;
+            let http = http_client()?;
 
             let token = auth::get_access_token(&http, &config).await?;
 
@@ -212,10 +220,7 @@ async fn dispatch(command: Commands) -> Result<()> {
         }
         Commands::Tui { count, min_rating } => {
             let config = Config::from_env()?;
-            let http = reqwest::Client::builder()
-                .user_agent("videodrome/0.1")
-                .build()?;
-            tui::run(config, http, count, min_rating).await?;
+            tui::run(config, http_client()?, count, min_rating).await?;
         }
         Commands::Keychain { action } => match action {
             KeychainAction::Import => {
@@ -362,10 +367,7 @@ async fn dispatch(command: Commands) -> Result<()> {
         } => {
             config::load_env_files();
 
-            let http = reqwest::Client::builder()
-                .user_agent("videodrome/0.1")
-                .timeout(std::time::Duration::from_secs(20))
-                .build()?;
+            let http = http_client()?;
 
             let imdb_norm = imdb.as_ref().map(|s| {
                 let s = s.trim();

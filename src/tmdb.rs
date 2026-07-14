@@ -87,12 +87,13 @@ fn cache_path() -> Result<PathBuf> {
 }
 
 fn load_cache() -> HashMap<u64, CachedRecs> {
-    (|| -> Option<HashMap<u64, CachedRecs>> {
-        let path = cache_path().ok()?;
-        let data = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&data).ok()
-    })()
-    .unwrap_or_default()
+    let Ok(path) = cache_path() else {
+        return HashMap::new();
+    };
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&data).unwrap_or_default()
 }
 
 fn save_cache(cache: &HashMap<u64, CachedRecs>) {
