@@ -1,3 +1,7 @@
 .env
 target/
 .DS_Store
+
+# Impeccable skill local state (consent, cache)
+.impeccable/
+

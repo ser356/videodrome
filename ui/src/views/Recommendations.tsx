@@ -1,122 +1,256 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { BackButton } from '../components/BackButton'
+import { FiltersDropdown } from '../components/FiltersDropdown'
+import { HotkeyBar } from '../components/HotkeyBar'
+import { MovieDetailModal } from '../components/MovieDetailModal'
+import { SearchBox } from '../components/SearchBox'
+import { Toast } from '../components/Toast'
 import { TopNav } from '../components/TopNav'
 import {
   getRecommendations,
   isTauri,
+  tmdbPoster,
   type Recommendation,
 } from '../lib/api'
+import { useHotkeys, type Hotkey } from '../lib/hotkeys'
 
 /**
- * Recommendations. Photo-first card grid (Airbnb pattern), 4-up at
- * desktop, dropping columns responsively. Empty and loading states are
- * skeletons matching the final card shape.
+ * Vista `View::Recs` de la TUI, adaptada al look "cabina de proyección"
+ * definido en DESIGN.md.
+ *
+ * - Grid uniforme de posters. Bajo cada card: solo título + año.
+ *   Nada de rating dot verde ni contadores decorativos.
+ * - Filtros como una query mono editable ("rating ≥ 4.0 · top 20"),
+ *   reforzando el vocabulario CLI. Hotkeys +/- y [/] siguen operando.
+ * - Título de vista "Cartelera" (voz de curator, no consumer-generic).
  */
 export function Recommendations() {
+  const nav = useNavigate()
+  const [count, setCount] = useState(20)
+  const [minRating, setMinRating] = useState(4.0)
   const [items, setItems] = useState<Recommendation[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [stale, setStale] = useState(false)
+  const [sel, setSel] = useState(0)
+  const [detail, setDetail] = useState<Recommendation | null>(null)
 
-  useEffect(() => {
+  const fetchRecs = useCallback(() => {
     if (!isTauri()) {
       setError('Esta vista requiere la app de escritorio (Tauri).')
       return
     }
-    getRecommendations(20, 4.0)
-      .then(setItems)
+    setLoading(true)
+    setError(null)
+    setStale(false)
+    getRecommendations(count, minRating)
+      .then((list) => {
+        setItems(list)
+        setSel(0)
+      })
       .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false))
+  }, [count, minRating])
+
+  useEffect(() => {
+    fetchRecs()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const openTorrents = (rec: Recommendation) => {
+    const y = rec.movie.release_date?.slice(0, 4)
+    nav(
+      `/torrents/tmdb/${rec.movie.id}?title=${encodeURIComponent(rec.movie.title)}${
+        y ? `&year=${y}` : ''
+      }`,
+    )
+  }
+
+  const n = items?.length ?? 0
+  const move = (delta: number) => {
+    if (n === 0) return
+    setSel((i) => (i + delta + n) % n)
+  }
+
+  const bumpRating = (d: number) => {
+    setMinRating((r) => Math.min(5, Math.max(0.5, +(r + d).toFixed(1))))
+    setStale(true)
+  }
+  const bumpCount = (d: number) => {
+    setCount((c) => Math.max(5, c + d))
+    setStale(true)
+  }
+
+  const hotkeys: Hotkey[] = [
+    { key: 'j', hint: '', run: () => move(1) },
+    { key: 'ArrowDown', hint: '', run: () => move(1) },
+    { key: 'k', hint: 'Mover', run: () => move(-1) },
+    { key: 'ArrowUp', hint: '', run: () => move(-1) },
+    { key: 'ArrowRight', hint: '', run: () => move(1) },
+    { key: 'ArrowLeft', hint: '', run: () => move(-1) },
+    {
+      key: 'Enter',
+      hint: 'Detalle',
+      run: () => items && items[sel] && setDetail(items[sel]),
+    },
+    {
+      key: 't',
+      hint: 'Torrents',
+      run: () => items && items[sel] && openTorrents(items[sel]),
+    },
+    { key: 'r', hint: 'Recargar', run: () => fetchRecs() },
+    { key: '+', hint: '', run: () => bumpRating(0.5) },
+    { key: '-', hint: 'Rating', run: () => bumpRating(-0.5) },
+    { key: ']', hint: '', run: () => bumpCount(5) },
+    { key: '[', hint: 'Top', run: () => bumpCount(-5) },
+    { key: 'Escape', hint: '', run: () => nav('/') },
+  ]
+  useHotkeys(hotkeys, [items, sel, count, minRating, fetchRecs], {
+    enabled: detail === null,
+  })
+
   return (
-    <div className="min-h-[100dvh] bg-canvas">
+    <div className="flex min-h-[100dvh] flex-col bg-canvas">
       <TopNav>
-        <a href="/" className="hover:text-ink transition-colors">
-          Inicio
-        </a>
+        <BackButton onClick={() => nav('/')} />
+        <SearchBox />
+        <FiltersDropdown
+          minRating={minRating}
+          count={count}
+          dirty={stale}
+          onChange={(nr, nc) => {
+            setMinRating(nr)
+            setCount(nc)
+            setStale(true)
+          }}
+        />
       </TopNav>
 
-      <main className="mx-auto max-w-[1280px] px-8 pt-12 pb-24">
-        <div className="mb-10 flex items-end justify-between">
-          <h1 className="text-[28px] font-semibold leading-tight text-ink">
-            Para ti
-          </h1>
-          <p className="text-[14px] text-muted">
-            Basado en tus pelis mejor valoradas (rating &gt;= 4.0)
-          </p>
-        </div>
+      <main className="mx-auto w-full max-w-[1400px] flex-1 px-8 py-8">
+        <h1 className="mb-8 text-[22px] font-semibold text-ink">Cartelera</h1>
 
         {error && (
-          <div className="rounded-md border border-hairline bg-surface-soft p-6 text-center text-[15px] text-muted">
+          <div className="rounded-md border border-danger/40 bg-danger/10 p-4 text-[14px] text-danger">
             {error}
           </div>
         )}
 
-        {!error && items === null && <SkeletonGrid />}
+        {!error && !items && loading && <PosterSkeletonGrid />}
 
-        {items && items.length === 0 && (
-          <div className="rounded-md border border-hairline bg-surface-soft p-12 text-center">
-            <p className="text-[16px] text-ink">Todavía no hay resultados.</p>
-            <p className="mt-1 text-[14px] text-muted">
-              Necesitamos al menos una peli tuya con rating &gt;= 4.0 en Letterboxd.
+        {items && items.length === 0 && !loading && (
+          <div className="rounded-lg border border-hairline bg-surface p-10 text-center">
+            <p className="text-[16px] text-ink">Sin resultados.</p>
+            <p className="mt-1 text-[13px] text-muted">
+              Baja el rating mínimo o comprueba tu historial en Letterboxd.
             </p>
           </div>
         )}
 
         {items && items.length > 0 && (
-          <ul className="grid grid-cols-1 gap-x-6 gap-y-10 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {items.map((rec) => (
-              <MovieCard key={rec.movie.id} rec={rec} />
+          <ul className="grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+            {items.map((rec, i) => (
+              <MovieCard
+                key={rec.movie.id}
+                rec={rec}
+                active={i === sel}
+                onClick={() => setDetail(rec)}
+                onMouseEnter={() => setSel(i)}
+              />
             ))}
           </ul>
         )}
       </main>
+
+      <Toast visible={stale && !loading}>
+        <span className="text-muted">Hay cambios pendientes.</span>
+        <span>
+          Pulsa <span className="font-semibold text-ink">R</span> para
+          recargar.
+        </span>
+      </Toast>
+
+      <HotkeyBar hotkeys={hotkeys.filter((h) => h.hint)} />
+
+      {detail && (
+        <MovieDetailModal
+          rec={detail}
+          onClose={() => setDetail(null)}
+          onOpenTorrents={(r) => {
+            setDetail(null)
+            openTorrents(r)
+          }}
+        />
+      )}
     </div>
   )
 }
 
-function MovieCard({ rec }: { rec: Recommendation }) {
+// ─── MovieCard: solo poster + título + año ───
+
+function MovieCard({
+  rec,
+  active,
+  onClick,
+  onMouseEnter,
+}: {
+  rec: Recommendation
+  active: boolean
+  onClick: () => void
+  onMouseEnter: () => void
+}) {
   const { movie } = rec
   const year = movie.release_date?.slice(0, 4) ?? ''
-  const rating = rec.lb_rating ?? movie.vote_average / 2
+  const src = tmdbPoster(movie.poster_path)
 
   return (
-    <li className="group">
-      <div className="aspect-[2/3] w-full overflow-hidden rounded-md bg-surface-strong">
-        <img
-          src={`https://image.tmdb.org/t/p/w500/${(movie as unknown as { poster_path?: string }).poster_path ?? ''}`}
-          alt=""
-          loading="lazy"
-          className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
-          onError={(e) => {
-            const el = e.currentTarget
-            el.style.display = 'none'
-          }}
-        />
-      </div>
-      <div className="mt-3 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-[15px] font-medium text-ink">
-            {movie.title}
-          </p>
-          {year && <p className="mt-0.5 text-[13px] text-muted">{year}</p>}
+    <li>
+      <button
+        onClick={onClick}
+        onMouseEnter={onMouseEnter}
+        className="focus-ring group block w-full rounded-poster text-left"
+      >
+        <div
+          className={`poster-hover relative aspect-[2/3] w-full overflow-hidden rounded-poster bg-surface-hi transition-shadow ${
+            active
+              ? 'outline outline-1 outline-white/40 outline-offset-2'
+              : ''
+          }`}
+        >
+          {src ? (
+            <img
+              src={src}
+              alt={`Poster de ${movie.title}`}
+              loading="lazy"
+              className="h-full w-full object-cover"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+              }}
+            />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center px-3 text-center text-[12px] text-dim">
+              {movie.title}
+            </div>
+          )}
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <span className="inline-block h-2 w-2 rounded-full bg-accent" />
-          <span className="font-mono text-[13px] font-medium text-ink">
-            {rating.toFixed(2)}
+        <div className="mt-3 flex items-baseline justify-between gap-2">
+          <p className="truncate text-[13px] text-body">{movie.title}</p>
+          <span className="shrink-0 text-[11px] text-muted">
+            {year}
           </span>
         </div>
-      </div>
+      </button>
     </li>
   )
 }
 
-function SkeletonGrid() {
+function PosterSkeletonGrid() {
   return (
-    <ul className="grid grid-cols-1 gap-x-6 gap-y-10 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-      {Array.from({ length: 8 }).map((_, i) => (
+    <ul className="grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+      {Array.from({ length: 12 }).map((_, i) => (
         <li key={i}>
-          <div className="aspect-[2/3] w-full animate-pulse rounded-md bg-surface-strong" />
-          <div className="mt-3 h-4 w-3/4 animate-pulse rounded bg-surface-strong" />
-          <div className="mt-2 h-3 w-1/3 animate-pulse rounded bg-surface-strong" />
+          <div className="aspect-[2/3] w-full animate-pulse rounded-poster bg-surface-hi" />
+          <div className="mt-3 h-3 w-3/4 animate-pulse rounded-sm bg-surface-hi" />
         </li>
       ))}
     </ul>

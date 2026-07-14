@@ -1,6 +1,6 @@
 [package]
 name = "letterboxd-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
@@ -8,7 +8,12 @@ name = "letterboxd-cli"
 path = "src/main.rs"
 
 [features]
-default = ["gui"]
+# GUI (Tauri) es opt-in: solo se compila con `--features gui`. Así:
+# * `cargo build --release` (CI, brew formula, scoop) → CLI + TUI puros,
+#   sin dependencias de sistema (webkit, gtk, etc.) ni `ui/dist`.
+# * `cargo tauri build` (release cask) → añade `--features gui` y
+#   empaqueta el `.app` / `.dmg` con el frontend React embebido.
+default = []
 gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-shell"]
 
 [build-dependencies]

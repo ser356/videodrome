@@ -1,71 +1,131 @@
-import { MagnifyingGlass } from '@phosphor-icons/react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { KeyReturn } from '@phosphor-icons/react'
+import { HotkeyBar } from '../components/HotkeyBar'
 import { TopNav } from '../components/TopNav'
+import { hasSession, isTauri } from '../lib/api'
+import { useHotkeys, type Hotkey } from '../lib/hotkeys'
 
 /**
- * Home. Hero-driven: pill search bar centered, single primary CTA below.
- * The search bar is the app's discovery entry point; recommendations
- * button is the alternate flow for users who want curated results.
+ * Menu principal, equivalente al enum `View::Menu` de la TUI: dos
+ * opciones (Recomendaciones / Búsqueda directa) navegables con j/k y
+ * Enter. Si no hay sesión de Letterboxd, "Recomendaciones" redirige a
+ * /login antes.
  */
+const OPTIONS = [
+  {
+    key: 'recs',
+    label: 'Recomendaciones desde Letterboxd',
+    hint: 'Genera y navega por películas recomendadas basadas en tu historial.',
+    path: '/recs',
+    needsSession: true,
+  },
+  {
+    key: 'search',
+    label: 'Buscar torrents directamente',
+    hint: 'Escribe un título y busca torrents sin pasar por Letterboxd.',
+    path: '/search',
+    needsSession: false,
+  },
+] as const
+
 export function Home() {
   const nav = useNavigate()
+  const [i, setI] = useState(0)
+  const [loggedIn, setLoggedIn] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    if (!isTauri()) {
+      setLoggedIn(false)
+      return
+    }
+    hasSession().then(setLoggedIn).catch(() => setLoggedIn(false))
+  }, [])
+
+  const go = (opt: (typeof OPTIONS)[number]) => {
+    if (opt.needsSession && loggedIn === false) {
+      nav('/login?next=' + encodeURIComponent(opt.path))
+      return
+    }
+    nav(opt.path)
+  }
+
+  const hotkeys: Hotkey[] = [
+    { key: 'j', hint: 'bajar', run: () => setI((x) => Math.min(x + 1, OPTIONS.length - 1)) },
+    { key: 'ArrowDown', hint: '', run: () => setI((x) => Math.min(x + 1, OPTIONS.length - 1)) },
+    { key: 'k', hint: 'subir', run: () => setI((x) => Math.max(x - 1, 0)) },
+    { key: 'ArrowUp', hint: '', run: () => setI((x) => Math.max(x - 1, 0)) },
+    { key: 'Enter', hint: 'seleccionar', run: () => go(OPTIONS[i]) },
+  ]
+  useHotkeys(hotkeys, [i, loggedIn])
+
+  const barKeys: Hotkey[] = [
+    { key: 'j', hint: 'Mover', run: () => {} },
+    { key: 'Enter', hint: 'seleccionar', run: () => {} },
+  ]
 
   return (
-    <div className="min-h-[100dvh] bg-canvas">
+    <div className="flex min-h-[100dvh] flex-col bg-canvas">
       <TopNav>
-        <a href="/recommendations" className="hover:text-ink transition-colors">
-          Recomendaciones
-        </a>
-        <button
-          onClick={() => nav('/login')}
-          className="rounded-full border border-hairline px-4 py-2 text-ink hover:border-border-strong transition-colors"
-        >
-          Iniciar sesión
-        </button>
+        {loggedIn ? (
+          <span className="rounded-full px-3 py-1 text-[13px] text-muted">
+            Sesión activa
+          </span>
+        ) : (
+          <button
+            onClick={() => nav('/login')}
+            className="focus-ring glass rounded-full px-4 py-1.5 text-[13px] text-ink transition-transform hover:scale-[1.02]"
+          >
+            Iniciar sesión
+          </button>
+        )}
       </TopNav>
 
-      <main className="mx-auto max-w-[1280px] px-8 pt-24 pb-32">
-        <section className="mx-auto max-w-[720px] text-center">
-          <h1 className="text-[44px] font-semibold leading-[1.1] tracking-[-0.02em] text-ink">
-            Descubre qué ver esta noche
-          </h1>
-          <p className="mx-auto mt-4 max-w-[52ch] text-[17px] leading-relaxed text-muted">
-            Recomendaciones basadas en tu historial de Letterboxd, con torrent
-            listo y streaming embebido cuando quieras verlo ya.
-          </p>
+      <main className="mx-auto flex w-full max-w-[720px] flex-1 flex-col justify-center px-8">
+        <h1 className="mb-2 text-[32px] font-semibold leading-tight tracking-tight text-ink">
+          ¿Qué hacemos hoy?
+        </h1>
+        <p className="mb-10 text-[15px] text-muted">
+          Elige una de las dos opciones o pulsa Enter sobre la resaltada.
+        </p>
 
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              const q = new FormData(e.currentTarget).get('q')?.toString().trim()
-              if (q) nav(`/recommendations?q=${encodeURIComponent(q)}`)
-            }}
-            className="mx-auto mt-10 flex h-[64px] w-full max-w-[560px] items-center rounded-full border border-hairline bg-canvas pl-6 pr-2 shadow-card focus-within:border-border-strong"
-          >
-            <MagnifyingGlass size={20} className="text-muted" weight="bold" />
-            <input
-              name="q"
-              type="text"
-              placeholder="Buscar por título, director, año..."
-              className="mx-3 flex-1 bg-transparent text-[15px] text-ink placeholder:text-muted focus:outline-none"
-            />
-            <button
-              type="submit"
-              className="flex h-12 w-12 items-center justify-center rounded-full bg-accent text-on-accent transition-colors hover:bg-accent-hover active:scale-[0.96]"
-              aria-label="Buscar"
-            >
-              <MagnifyingGlass size={18} weight="bold" />
-            </button>
-          </form>
-
-          <button
-            onClick={() => nav('/recommendations')}
-            className="mt-6 rounded-sm bg-ink px-6 py-3 text-[15px] font-medium text-on-accent transition-colors hover:bg-body active:scale-[0.98]"
-          >
-            Ver recomendaciones para ti
-          </button>
-        </section>
+        <ul className="flex flex-col gap-2">
+          {OPTIONS.map((opt, idx) => {
+            const active = idx === i
+            return (
+              <li key={opt.key}>
+                <button
+                  onClick={() => go(opt)}
+                  onMouseEnter={() => setI(idx)}
+                  className={`focus-ring glass w-full rounded-lg px-5 py-4 text-left transition-transform ${
+                    active
+                      ? 'scale-[1.01] outline outline-1 outline-white/30'
+                      : 'hover:scale-[1.005]'
+                  }`}
+                >
+                  <div className="flex items-baseline justify-between gap-4">
+                    <span className="text-[16px] font-medium text-ink">
+                      {opt.label}
+                    </span>
+                    {active && (
+                      <span
+                        className="flex h-6 w-6 items-center justify-center text-accent"
+                        aria-label="Pulsa Enter"
+                        title="Enter"
+                      >
+                        <KeyReturn size={18} weight="bold" />
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-[13px] text-muted">{opt.hint}</p>
+                </button>
+              </li>
+            )
+          })}
+        </ul>
       </main>
+
+      <HotkeyBar hotkeys={barKeys} />
     </div>
   )
 }

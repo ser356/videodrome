@@ -10,11 +10,16 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource-variable/space-grotesk": "^5.2.10",
     "@fontsource/geist-mono": "^5.2.8",
     "@fontsource/geist-sans": "^5.2.5",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/oswald": "^5.2.8",
+    "@fontsource/space-mono": "^5.2.9",
     "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/vite": "^4.3.2",
     "@tauri-apps/api": "^2.11.1",
+    "fast-average-color": "^9.5.2",
     "motion": "^12.42.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

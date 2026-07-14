@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
+  "version": "{{VERSION}}",
+  "description": "Recomendaciones Letterboxd + streaming BitTorrent en VLC (GUI + CLI, mismo binario).",
+  "homepage": "https://github.com/{{REPO}}",
+  "license": "MIT",
+  "url": "https://github.com/{{REPO}}/releases/download/{{TAG}}/videodrome-{{TAG}}-windows-x86_64.zip",
+  "hash": "{{SHA_WIN}}",
+  "bin": [
+    ["Videodrome.exe", "videodrome"]
+  ],
+  "shortcuts": [
+    ["Videodrome.exe", "Videodrome"]
+  ],
+  "depends": ["extras/vlc"],
+  "notes": [
+    "Videodrome se ha instalado con GUI + CLI en el mismo binario.",
+    "  · Doble click en Start Menu (o busca 'Videodrome') → GUI.",
+    "  · `videodrome recommend` en PowerShell/cmd → CLI.",
+    "  · `videodrome tui` → TUI en terminal.",
+    "VLC se instaló automáticamente como dependencia (bucket 'extras')."
+  ],
+  "checkver": {
+    "github": "https://github.com/{{REPO}}"
+  },
+  "autoupdate": {
+    "url": "https://github.com/{{REPO}}/releases/download/v$version/videodrome-v$version-windows-x86_64.zip"
+  }
+}

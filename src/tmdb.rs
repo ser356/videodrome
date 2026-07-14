@@ -19,6 +19,11 @@ pub struct TmdbMovie {
     pub popularity: f32,
     #[serde(default)]
     pub release_date: Option<String>, // "YYYY-MM-DD"
+    /// Ruta relativa del poster en TMDB (ej. `/abc123.jpg`). Se combina
+    /// con `https://image.tmdb.org/t/p/w500` en el frontend para mostrar
+    /// la miniatura en la GUI.
+    #[serde(default)]
+    pub poster_path: Option<String>,
 }
 
 impl TmdbMovie {
@@ -283,6 +288,93 @@ impl<'a> TmdbClient<'a> {
             year,
         }))
     }
+
+    /// Vista de detalle para el modal estilo Stremio: sinopsis, backdrop,
+    /// runtime, géneros, etc. Endpoint distinto de `get_movie_details`
+    /// para no acoplar la búsqueda de torrents con la UI de detalle.
+    #[cfg(feature = "gui")]
+    pub async fn get_movie_view(&self, tmdb_id: u64) -> Result<Option<MovieView>> {
+        #[derive(Deserialize)]
+        struct Resp {
+            id: u64,
+            title: String,
+            #[serde(default)]
+            original_title: Option<String>,
+            #[serde(default)]
+            overview: Option<String>,
+            #[serde(default)]
+            tagline: Option<String>,
+            #[serde(default)]
+            poster_path: Option<String>,
+            #[serde(default)]
+            backdrop_path: Option<String>,
+            #[serde(default)]
+            release_date: Option<String>,
+            #[serde(default)]
+            runtime: Option<u32>,
+            #[serde(default)]
+            vote_average: f32,
+            #[serde(default)]
+            genres: Vec<Genre>,
+        }
+        #[derive(Deserialize)]
+        struct Genre {
+            #[serde(default)]
+            name: String,
+        }
+
+        let url = format!("{BASE_URL}/movie/{tmdb_id}?language=es-ES");
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.bearer_token)
+            .send()
+            .await
+            .with_context(|| format!("Error al llamar a TMDB /movie/{tmdb_id} (view)"))?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let body: Resp = resp
+            .json()
+            .await
+            .context("Error al parsear TMDB /movie (view)")?;
+
+        Ok(Some(MovieView {
+            id: body.id,
+            title: body.title,
+            original_title: body.original_title.filter(|s| !s.is_empty()),
+            overview: body.overview.filter(|s| !s.is_empty()),
+            tagline: body.tagline.filter(|s| !s.is_empty()),
+            poster_path: body.poster_path,
+            backdrop_path: body.backdrop_path,
+            release_date: body.release_date.filter(|s| !s.is_empty()),
+            runtime: body.runtime.filter(|r| *r > 0),
+            vote_average: body.vote_average,
+            genres: body
+                .genres
+                .into_iter()
+                .map(|g| g.name)
+                .filter(|s| !s.is_empty())
+                .collect(),
+        }))
+    }
+}
+
+/// Vista de detalle de una película para el modal de la GUI.
+#[cfg(feature = "gui")]
+#[derive(Debug, Serialize, Clone)]
+pub struct MovieView {
+    pub id: u64,
+    pub title: String,
+    pub original_title: Option<String>,
+    pub overview: Option<String>,
+    pub tagline: Option<String>,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+    pub release_date: Option<String>,
+    pub runtime: Option<u32>,
+    pub vote_average: f32,
+    pub genres: Vec<String>,
 }
 
 /// Detalles útiles de una película para búsquedas en providers de torrents.

@@ -1,8 +1,10 @@
 name: Smoke test package managers
 
 # Smoke tests que verifican que los manifests publicados en los buckets
-# externos (ser356/scoop-bucket, ser356/homebrew-tap) instalan y ejecutan
-# el binario correctamente.
+# externos (ser356/scoop-bucket, ser356/homebrew-cask) instalan y
+# ejecutan el binario correctamente. Prueba tanto la GUI (arranque del
+# .app / .exe) como el CLI (subcomandos por terminal desde el mismo
+# binario).
 #
 # Solo se lanza a mano — el CI normal no lo dispara para no gastar
 # minutos de runner en cada push.
@@ -29,32 +31,35 @@ jobs:
         shell: powershell
         run: scoop bucket add ser356 https://github.com/ser356/scoop-bucket
 
-      - name: Instalar letterboxd-cli
+      - name: Instalar videodrome
         shell: powershell
-        run: scoop install ser356/letterboxd-cli
+        run: scoop install ser356/videodrome
 
-      - name: Verificar binario en PATH
+      - name: Verificar CLI en PATH
         shell: powershell
         run: |
-          Get-Command letterboxd-cli
-          letterboxd-cli --help
+          Get-Command videodrome
+          videodrome --help
 
       - name: Verificar VLC como dependencia
         shell: powershell
         run: scoop list
 
-  homebrew-macos:
+  homebrew-cask:
     runs-on: macos-latest
     steps:
-      - name: Añadir tap + trust
-        run: |
-          brew tap ser356/tap
-          brew trust ser356/tap
+      - name: Añadir tap
+        run: brew tap ser356/cask https://github.com/ser356/homebrew-cask
 
-      - name: Instalar letterboxd-cli
-        run: brew install letterboxd-cli
+      - name: Instalar videodrome
+        run: brew install --cask videodrome
 
-      - name: Verificar binario
+      - name: Verificar .app en /Applications
         run: |
-          which letterboxd-cli
-          letterboxd-cli --help
+          test -d "/Applications/Videodrome.app" || (echo "❌ Videodrome.app no encontrado"; exit 1)
+          echo "✅ .app instalado"
+
+      - name: Verificar CLI (symlink en PATH)
+        run: |
+          which videodrome
+          videodrome --help

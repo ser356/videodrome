@@ -26,6 +26,12 @@ jobs:
     # Matrix con macos-latest para que el código gateado a
     # `target_os = "macos"` (Keychain) se compile y se lintee de verdad,
     # no solo en Linux.
+    #
+    # NOTA: no usamos `--all-features` porque `--features gui` arrastra
+    # Tauri, que a su vez exige `ui/dist` (build de Vite/React) y libs
+    # de sistema (webkit2gtk en Linux). El build de la GUI se valida en
+    # el workflow `release.yml`, no en cada PR. Aquí solo probamos el
+    # CLI/TUI puros — que son el 90% del código.
     strategy:
       fail-fast: false
       matrix:
@@ -43,10 +49,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --all-features
+        run: cargo test
 
       - name: cargo build --release
         run: cargo build --release

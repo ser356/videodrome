@@ -1,7 +1,16 @@
 name: Release
 
-# Se dispara al pushear un tag `v*` (ej. `v0.1.0`, `v0.2.0-rc1`).
+# Se dispara al pushear un tag `v*` (ej. `v0.2.0`).
 # También lanzable a mano desde la pestaña Actions.
+#
+# Produce dos tipos de artefactos:
+#   - GUI bundle:  Videodrome.app (mac, arm64) y Videodrome.exe (win, x64).
+#                  El mismo binario acepta subcomandos por terminal → CLI.
+#   - Linux CLI:   binario suelto en tar.gz (Linux no tiene bundle GUI; se
+#                  usa como CLI puro).
+#
+# Publica el cask (mac) en `ser356/homebrew-cask` y el manifest scoop
+# (win) en `ser356/scoop-bucket`.
 on:
   push:
     tags: ["v*"]
@@ -12,202 +21,255 @@ on:
         required: true
 
 permissions:
-  contents: write # necesario para crear/actualizar la Release
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: tar.gz
-            name: linux-x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            archive: tar.gz
-            name: macos-arm64
-          # NOTA: no publicamos binario x86_64-apple-darwin porque los
-          # runners `macos-13` de GitHub Actions están deprecated y se
-          # cuelgan en queue durante horas. Los Macs Intel ejecutan el
-          # binario arm64 sin problema vía Rosetta 2 (preinstalada o
-          # instalable en un click en macOS 13+).
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
-            name: windows-x86_64
-
-    runs-on: ${{ matrix.os }}
+  # ─── Linux: solo binario CLI (sin GUI) ─────────────────────────────
+  build-linux-cli:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Instalar toolchain de Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-
-      - name: Cachear dependencias de cargo
-        uses: Swatinem/rust-cache@v2
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
-
-      # Build en release con las credenciales de app inyectadas como env
-      # vars — `option_env!` en config.rs las hornea al binario.
-      - name: cargo build --release
+          key: linux-cli
+      - name: cargo build --release (sin gui)
         env:
           LB_APP_CLIENT_ID: ${{ secrets.LB_APP_CLIENT_ID }}
           LB_APP_CLIENT_SECRET: ${{ secrets.LB_APP_CLIENT_SECRET }}
           LB_APP_TMDB_BEARER: ${{ secrets.LB_APP_TMDB_BEARER }}
           LB_APP_OS_API_KEY: ${{ secrets.LB_APP_OS_API_KEY }}
-        run: cargo build --release --target ${{ matrix.target }}
-
-      # Empaqueta el binario + README + LICENSE (si existe).
-      - name: Empaquetar (tar.gz, Unix)
-        if: matrix.archive == 'tar.gz'
-        shell: bash
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+      - name: Empaquetar
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/letterboxd-cli dist/
+          cp target/x86_64-unknown-linux-gnu/release/letterboxd-cli dist/videodrome
           cp README.md dist/ 2>/dev/null || true
           cp LICENSE dist/ 2>/dev/null || true
           cd dist
-          tar czf ../letterboxd-cli-${{ matrix.name }}.tar.gz *
-
-      - name: Empaquetar (zip, Windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/letterboxd-cli.exe dist/
-          if (Test-Path README.md) { Copy-Item README.md dist/ }
-          if (Test-Path LICENSE)   { Copy-Item LICENSE dist/ }
-          Compress-Archive -Path dist/* -DestinationPath letterboxd-cli-${{ matrix.name }}.zip
-
-      - name: Subir artifact
-        uses: actions/upload-artifact@v4
+          tar czf ../videodrome-${{ github.ref_name }}-linux-x86_64.tar.gz *
+      - uses: actions/upload-artifact@v4
         with:
-          name: letterboxd-cli-${{ matrix.name }}
-          path: letterboxd-cli-${{ matrix.name }}.*
+          name: videodrome-linux-x86_64
+          path: videodrome-*-linux-x86_64.tar.gz
           retention-days: 7
 
+  # ─── macOS: Videodrome.app zippeado (GUI + CLI dual) ───────────────
+  build-macos-gui:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-gui
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Instalar tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build frontend
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Tauri build (app bundle)
+        env:
+          LB_APP_CLIENT_ID: ${{ secrets.LB_APP_CLIENT_ID }}
+          LB_APP_CLIENT_SECRET: ${{ secrets.LB_APP_CLIENT_SECRET }}
+          LB_APP_TMDB_BEARER: ${{ secrets.LB_APP_TMDB_BEARER }}
+          LB_APP_OS_API_KEY: ${{ secrets.LB_APP_OS_API_KEY }}
+        run: |
+          cargo tauri build \
+            --target aarch64-apple-darwin \
+            --bundles app \
+            --features gui
+
+      - name: Empaquetar .app en zip (ditto preserva metadatos)
+        run: |
+          APP_PATH="target/aarch64-apple-darwin/release/bundle/macos/Videodrome.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "❌ .app no encontrado en $APP_PATH"
+            find target -name "*.app" -type d
+            exit 1
+          fi
+          ZIP="videodrome-${{ github.ref_name }}-macos-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP"
+          echo "✅ Generado $ZIP ($(du -h "$ZIP" | cut -f1))"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: videodrome-macos-arm64
+          path: videodrome-*-macos-arm64.zip
+          retention-days: 7
+
+  # ─── Windows: .exe zippeado (GUI + CLI dual) ───────────────────────
+  build-windows-gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-gui
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Instalar tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build frontend
+        working-directory: ui
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+
+      - name: Tauri build (nsis)
+        env:
+          LB_APP_CLIENT_ID: ${{ secrets.LB_APP_CLIENT_ID }}
+          LB_APP_CLIENT_SECRET: ${{ secrets.LB_APP_CLIENT_SECRET }}
+          LB_APP_TMDB_BEARER: ${{ secrets.LB_APP_TMDB_BEARER }}
+          LB_APP_OS_API_KEY: ${{ secrets.LB_APP_OS_API_KEY }}
+        run: cargo tauri build --target x86_64-pc-windows-msvc --bundles nsis --features gui
+
+      - name: Empaquetar .exe en zip (para scoop)
+        shell: pwsh
+        run: |
+          $exe = "target/x86_64-pc-windows-msvc/release/Videodrome.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error ".exe no encontrado en $exe"
+            Get-ChildItem target -Recurse -Filter *.exe
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path pkg | Out-Null
+          Copy-Item $exe pkg/Videodrome.exe
+          Compress-Archive -Path pkg/Videodrome.exe -DestinationPath "videodrome-${{ github.ref_name }}-windows-x86_64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: videodrome-windows-x86_64
+          path: videodrome-*-windows-x86_64.zip
+          retention-days: 7
+
+  # ─── Publicar Release + subir todos los artifacts ──────────────────
   release:
-    needs: build
+    needs: [build-linux-cli, build-macos-gui, build-windows-gui]
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Resolve tag
-        id: tag
+      - id: tag
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Descargar artifacts
-        uses: actions/download-artifact@v4
+          echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}"   >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-
-      - name: Publicar Release en GitHub
+      - name: Publicar Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: dist/*
           generate_release_notes: true
 
-  # Publica manifestos actualizados en los repos externos
-  # `ser356/homebrew-tap` y `ser356/scoop-bucket`. Va como job del mismo
-  # workflow (en vez de `on: release: published` en otro workflow) porque
-  # los workflows disparados por `GITHUB_TOKEN` no disparan otros workflows
-  # (protección anti-recursión de GitHub Actions).
+  # ─── Cask (mac) + scoop (win) ──────────────────────────────────────
   publish-packages:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout letterboxd-cli
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Resolve version
-        id: v
+      - name: SHA256 del zip macOS
+        id: sha_mac
         run: |
-          TAG="${{ needs.release.outputs.tag }}"
-          VERSION="${TAG#v}"
-          echo "tag=$TAG"       >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          URL="https://github.com/${{ github.repository }}/releases/download/${{ needs.release.outputs.tag }}/videodrome-${{ needs.release.outputs.tag }}-macos-arm64.zip"
+          curl -sL "$URL" -o mac.zip
+          echo "sha=$(sha256sum mac.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
-      - name: Calcular SHA256 del tarball de código fuente
-        id: sha
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: SHA256 del zip Windows
+        id: sha_win
         run: |
-          TAG="${{ steps.v.outputs.tag }}"
-          SRC_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
-          curl -sL "$SRC_URL" -o source.tar.gz
-          SHA_SRC=$(sha256sum source.tar.gz | awk '{print $1}')
-          echo "source=$SHA_SRC" >> "$GITHUB_OUTPUT"
-          echo "SHA source tarball: $SHA_SRC"
+          URL="https://github.com/${{ github.repository }}/releases/download/${{ needs.release.outputs.tag }}/videodrome-${{ needs.release.outputs.tag }}-windows-x86_64.zip"
+          curl -sL "$URL" -o win.zip
+          echo "sha=$(sha256sum win.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
-      # ---------- HOMEBREW TAP ----------
-      - name: Render fórmula Homebrew
+      # ── HOMEBREW CASK (mac) ──
+      - name: Render cask
         run: |
           mkdir -p out
           sed \
-            -e "s|{{VERSION}}|${{ steps.v.outputs.version }}|g" \
-            -e "s|{{SHA_SOURCE_TARBALL}}|${{ steps.sha.outputs.source }}|g" \
-            packaging/homebrew/letterboxd-cli.rb.tmpl > out/letterboxd-cli.rb
-          echo "----- fórmula generada -----"
-          cat out/letterboxd-cli.rb
+            -e "s|{{VERSION}}|${{ needs.release.outputs.version }}|g" \
+            -e "s|{{TAG}}|${{ needs.release.outputs.tag }}|g" \
+            -e "s|{{SHA_MAC}}|${{ steps.sha_mac.outputs.sha }}|g" \
+            -e "s|{{REPO}}|${{ github.repository }}|g" \
+            packaging/homebrew-cask/videodrome.rb.tmpl > out/videodrome.rb
+          cat out/videodrome.rb
 
-      - name: Push a ser356/homebrew-tap
+      - name: Push a ser356/homebrew-cask
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_PAT }}
         run: |
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/ser356/homebrew-tap.git" tap
-          mkdir -p tap/Formula
-          cp out/letterboxd-cli.rb tap/Formula/letterboxd-cli.rb
-          cd tap
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/ser356/homebrew-cask.git" cask
+          mkdir -p cask/Casks
+          cp out/videodrome.rb cask/Casks/videodrome.rb
+          cd cask
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/letterboxd-cli.rb
+          git add Casks/videodrome.rb
           if git diff --cached --quiet; then
-            echo "No hay cambios en la fórmula."
+            echo "No hay cambios en el cask."
           else
-            git commit -m "letterboxd-cli ${{ steps.v.outputs.tag }}"
+            git commit -m "videodrome ${{ needs.release.outputs.tag }}"
             git push
           fi
 
-      # ---------- SCOOP BUCKET ----------
-      - name: Render manifest Scoop
+      # ── SCOOP BUCKET (win) ──
+      - name: Render scoop manifest
         run: |
           sed \
-            -e "s|{{VERSION}}|${{ steps.v.outputs.version }}|g" \
-            -e "s|{{SHA_SOURCE_TARBALL}}|${{ steps.sha.outputs.source }}|g" \
-            packaging/scoop/letterboxd-cli.json.tmpl > out/letterboxd-cli.json
-          echo "----- manifest generado -----"
-          cat out/letterboxd-cli.json
+            -e "s|{{VERSION}}|${{ needs.release.outputs.version }}|g" \
+            -e "s|{{TAG}}|${{ needs.release.outputs.tag }}|g" \
+            -e "s|{{SHA_WIN}}|${{ steps.sha_win.outputs.sha }}|g" \
+            -e "s|{{REPO}}|${{ github.repository }}|g" \
+            packaging/scoop/videodrome.json.tmpl > out/videodrome.json
+          cat out/videodrome.json
 
       - name: Push a ser356/scoop-bucket
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_PAT }}
         run: |
           git clone "https://x-access-token:${GH_TOKEN}@github.com/ser356/scoop-bucket.git" bucket
-          # La convención de Scoop es que los manifests vivan en `bucket/` o
-          # en la raíz. Usamos `bucket/` (permite `scoop bucket add …` limpio).
           mkdir -p bucket/bucket
-          cp out/letterboxd-cli.json bucket/bucket/letterboxd-cli.json
+          cp out/videodrome.json bucket/bucket/videodrome.json
           cd bucket
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add bucket/letterboxd-cli.json
+          git add bucket/videodrome.json
           if git diff --cached --quiet; then
             echo "No hay cambios en el manifest."
           else
-            git commit -m "letterboxd-cli ${{ steps.v.outputs.tag }}"
+            git commit -m "videodrome ${{ needs.release.outputs.tag }}"
             git push
           fi

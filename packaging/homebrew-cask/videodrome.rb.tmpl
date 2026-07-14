@@ -1,0 +1,66 @@
+# Homebrew Cask template — el workflow de release sustituye
+# {{VERSION}}, {{TAG}}, {{SHA_MAC}} y {{REPO}} y publica el fichero final
+# en `ser356/homebrew-cask/Casks/videodrome.rb`.
+#
+# Instalación:
+#   brew tap ser356/cask
+#   brew install --cask videodrome
+#
+# Qué hace este cask:
+#   1. Descarga el zip con `Videodrome.app` (build sin firmar).
+#   2. Copia el .app a /Applications → aparece en Launchpad/Spotlight.
+#   3. Crea un symlink `videodrome` en /opt/homebrew/bin apuntando al
+#      binario dentro del bundle → mismo ejecutable dual (GUI si arranca
+#      sin args, CLI/TUI con subcomandos).
+#   4. Al hacer `brew uninstall --cask` limpia el .app, el symlink y los
+#      datos de config del user (`~/Library/Application Support/videodrome`,
+#      caches, credenciales del Keychain no se tocan — se limpian con
+#      `videodrome keychain clear`).
+cask "videodrome" do
+  version "{{VERSION}}"
+  sha256 "{{SHA_MAC}}"
+
+  url "https://github.com/{{REPO}}/releases/download/{{TAG}}/videodrome-{{TAG}}-macos-arm64.zip"
+  name "Videodrome"
+  desc "Recomendaciones Letterboxd + streaming BitTorrent en VLC"
+  homepage "https://github.com/{{REPO}}"
+
+  # arm64 only — los runners macos-13 Intel de Actions están deprecated.
+  # Los Macs Intel con Rosetta 2 pueden ejecutar el binario arm64.
+  depends_on macos: ">= :catalina"
+  depends_on cask: "vlc"
+
+  app "Videodrome.app"
+
+  # Symlink del binario dentro del bundle → user puede correr:
+  #   videodrome                 # sin args = GUI
+  #   videodrome recommend       # CLI
+  #   videodrome torrents "..."  # CLI
+  #   videodrome tui             # TUI en terminal
+  binary "#{appdir}/Videodrome.app/Contents/MacOS/Videodrome", target: "videodrome"
+
+  caveats <<~EOS
+    Videodrome no está firmado por Apple. La primera vez que lo abras
+    macOS lo bloqueará. Para desbloquearlo:
+
+      xattr -cr /Applications/Videodrome.app
+
+    O bien: Ajustes del Sistema → Privacidad y seguridad → "Abrir de
+    todas formas" tras el primer intento.
+
+    Uso desde terminal (mismo binario que la GUI):
+      videodrome recommend
+      videodrome tui
+      videodrome torrents "Alien" --year 1979
+
+    Requiere sesión Letterboxd la primera vez (login desde la GUI o
+    variables de entorno).
+  EOS
+
+  zap trash: [
+    "~/Library/Application Support/videodrome",
+    "~/Library/Caches/dev.ser356.videodrome",
+    "~/Library/Preferences/dev.ser356.videodrome.plist",
+    "~/Library/WebKit/dev.ser356.videodrome",
+  ]
+end

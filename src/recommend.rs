@@ -203,6 +203,7 @@ mod tests {
             vote_average,
             popularity: 0.0,
             release_date: None,
+            poster_path: None,
         }
     }
 

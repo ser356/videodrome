@@ -33,7 +33,7 @@ const USER_AGENT: &str = concat!("letterboxd-cli v", env!("CARGO_PKG_VERSION"));
 pub const DEFAULT_LANGUAGES: &str = "es,en,fr,de,it";
 
 /// Subtítulo devuelto por la búsqueda.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Subtitle {
     /// ID interno de OpenSubtitles del `file` (no del release). Es lo que
     /// se manda a `POST /download`.
