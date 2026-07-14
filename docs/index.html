@@ -3,36 +3,44 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>letterboxd-cli — install</title>
+  <title>videodrome — install</title>
   <style>
-    :root { color-scheme: dark light; }
+    :root { color-scheme: dark; --accent: #ff8000; --bg: #0e0f13; --fg: #f4f4f4; --dim: rgba(255,255,255,.55); }
+    * { box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
       max-width: 780px;
       margin: 3rem auto;
       padding: 0 1.5rem;
       line-height: 1.55;
+      background: var(--bg);
+      color: var(--fg);
     }
-    h1 { margin-bottom: 0.25rem; }
-    h2 { margin-top: 2.5rem; }
+    h1 { margin: 0 0 .25rem 0; font-size: 2.4rem; letter-spacing: -.02em; }
+    h2 { margin-top: 2.5rem; font-size: 1.15rem; color: var(--dim); font-weight: 500; text-transform: uppercase; letter-spacing: .06em; }
+    h3 { margin-top: 1.75rem; font-size: 1rem; color: var(--fg); }
+    p  { color: rgba(255,255,255,.75); }
     pre {
-      background: #1a1a1a;
-      color: #f4f4f4;
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.08);
       padding: 1rem 1.25rem;
-      border-radius: 8px;
+      border-radius: 10px;
       overflow-x: auto;
-      font-size: 0.9rem;
+      font-size: .9rem;
     }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    a { color: #4a9eff; }
-    small { color: #888; }
+    code { font-family: inherit; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    small { color: var(--dim); }
+    .tag { display: inline-block; margin-left: .5rem; padding: .1rem .5rem; font-size: .7rem; border: 1px solid var(--accent); color: var(--accent); border-radius: 999px; vertical-align: middle; }
   </style>
 </head>
 <body>
-  <h1>🎬 letterboxd-cli</h1>
+  <h1>🎬 videodrome<span class="tag">v0.2</span></h1>
   <p>
-    Recomendaciones de películas basadas en tu Letterboxd, búsqueda de torrents y
-    streaming BitTorrent integrado (TUI en Rust).
+    Recomendaciones basadas en tu Letterboxd + búsqueda de torrents +
+    streaming BitTorrent embebido en VLC. GUI (Tauri) y CLI/TUI en el
+    mismo binario.
   </p>
   <p>
     <a href="https://github.com/ser356/letterboxd-cli">Ver en GitHub →</a>
@@ -40,32 +48,44 @@
 
   <h2>Instalación</h2>
 
-  <h3>macOS · Homebrew</h3>
-<pre><code>brew tap ser356/tap
-brew trust ser356/tap
-brew install letterboxd-cli
-brew install --cask vlc</code></pre>
+  <h3>macOS · Homebrew Cask</h3>
+<pre><code>brew tap ser356/cask https://github.com/ser356/homebrew-cask
+brew install --cask videodrome</code></pre>
+  <small>
+    Copia <code>Videodrome.app</code> a <code>/Applications</code>
+    (aparece en Launchpad) y crea un symlink <code>videodrome</code> en
+    <code>/opt/homebrew/bin</code>. La app no está firmada por Apple —
+    la primera vez ejecuta <code>xattr -cr /Applications/Videodrome.app</code>.
+  </small>
 
   <h3>Windows · one-liner (PowerShell)</h3>
 <pre><code>irm https://ser356.github.io/letterboxd-cli/install.ps1 | iex</code></pre>
   <small>
-    Instala Scoop si falta, añade los buckets necesarios, compila el CLI
-    desde código fuente y trae VLC como dependencia. Requiere PowerShell
-    normal (no Administrador).
+    Instala Scoop si falta, añade los buckets necesarios, descarga el
+    binario prebuilt (~30 s). Trae VLC como dependencia. Requiere
+    PowerShell normal (no Administrador).
   </small>
 
-  <h3>Linux · cargo</h3>
-<pre><code>cargo install --git https://github.com/ser356/letterboxd-cli
+  <h3>Linux · tarball</h3>
+<pre><code>curl -sL https://github.com/ser356/letterboxd-cli/releases/latest/download/videodrome-v0.2.0-linux-x86_64.tar.gz | tar -xz
+sudo mv videodrome /usr/local/bin/
 sudo apt install vlc</code></pre>
-
-  <h3>Nix / NixOS</h3>
-<pre><code>nix profile install github:ser356/letterboxd-cli</code></pre>
+  <small>
+    Linux solo tiene CLI/TUI por ahora (sin bundle GUI).
+  </small>
 
   <h2>Uso</h2>
-  <pre><code>letterboxd-cli</code></pre>
+
+  <pre><code># GUI: doble click en Launchpad / Start Menu
+
+# CLI (mismo binario):
+videodrome recommend --count 30 --min-rating 4.0
+videodrome torrents "Alien" --year 1979
+videodrome tui                        # TUI en terminal</code></pre>
+
   <p>
-    La primera vez se te pedirá login de Letterboxd (usuario + contraseña).
-    Todo lo demás va bakeado.
+    La primera vez la GUI te pide login de Letterboxd. Todo lo demás
+    (TMDB, OpenSubtitles) va bakeado en el binario.
   </p>
 </body>
 </html>

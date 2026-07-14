@@ -1,11 +1,11 @@
-# letterboxd-cli — instalador para Windows (source build via Scoop)
+# videodrome — installer para Windows (Scoop, binario prebuilt)
 #
-# Uso (PowerShell normal, no admin):
+# Uso (PowerShell normal, NO admin):
 #   irm https://ser356.github.io/letterboxd-cli/install.ps1 | iex
 #
-# Instala Scoop (si falta), añade los buckets main + extras + ser356,
-# instala letterboxd-cli (que trae VLC y rustup como deps) y compila el
-# binario desde código fuente en tu máquina. Cero fricción para amigos.
+# Instala Scoop (si falta), añade los buckets extras (VLC) + ser356
+# (videodrome) e instala el paquete. El binario ya viene compilado —
+# no hace falta Rust ni node en tu máquina. ~30 segundos.
 
 $ErrorActionPreference = 'Stop'
 
@@ -36,7 +36,7 @@ if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
 function Ensure-Bucket {
     param([string]$Name, [string]$Url = '')
     $buckets = scoop bucket list 2>$null | Out-String
-    if ($buckets -notmatch "^\s*$Name\s") {
+    if ($buckets -notmatch "(?m)^\s*$Name\s") {
         Write-Host "==> Añadiendo bucket $Name..." -ForegroundColor Cyan
         if ($Url) {
             scoop bucket add $Name $Url
@@ -48,16 +48,16 @@ function Ensure-Bucket {
     }
 }
 
-Ensure-Bucket -Name 'main'
 Ensure-Bucket -Name 'extras'
 Ensure-Bucket -Name 'ser356' -Url 'https://github.com/ser356/scoop-bucket'
 
-Write-Host "==> Instalando letterboxd-cli (compila desde source, ~2-4 min)..." -ForegroundColor Cyan
-scoop install ser356/letterboxd-cli
+Write-Host "==> Instalando videodrome (binario prebuilt, ~30s)..." -ForegroundColor Cyan
+scoop install ser356/videodrome
 
 Write-Host ""
 Write-Host "✅ Listo." -ForegroundColor Green
 Write-Host ""
-Write-Host "Cierra y vuelve a abrir PowerShell y ejecuta:"
-Write-Host "  letterboxd-cli"
+Write-Host "  · Doble click en Start Menu (busca 'Videodrome') → GUI"
+Write-Host "  · videodrome recommend                              → CLI"
+Write-Host "  · videodrome tui                                    → TUI en terminal"
 Write-Host ""
