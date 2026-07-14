@@ -31,10 +31,11 @@ jobs:
             target: aarch64-apple-darwin
             archive: tar.gz
             name: macos-arm64
-          - os: macos-13 # Intel Mac runner
-            target: x86_64-apple-darwin
-            archive: tar.gz
-            name: macos-x86_64
+          # NOTA: no publicamos binario x86_64-apple-darwin porque los
+          # runners `macos-13` de GitHub Actions están deprecated y se
+          # cuelgan en queue durante horas. Los Macs Intel ejecutan el
+          # binario arm64 sin problema vía Rosetta 2 (preinstalada o
+          # instalable en un click en macOS 13+).
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
@@ -61,6 +62,7 @@ jobs:
           LB_APP_CLIENT_ID: ${{ secrets.LB_APP_CLIENT_ID }}
           LB_APP_CLIENT_SECRET: ${{ secrets.LB_APP_CLIENT_SECRET }}
           LB_APP_TMDB_BEARER: ${{ secrets.LB_APP_TMDB_BEARER }}
+          LB_APP_OS_API_KEY: ${{ secrets.LB_APP_OS_API_KEY }}
         run: cargo build --release --target ${{ matrix.target }}
 
       # Empaqueta el binario + README + LICENSE (si existe).
