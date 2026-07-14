@@ -1,0 +1,80 @@
+name: Smoke test package managers
+
+# Smoke tests que verifican que los manifests publicados en los buckets
+# externos (ser356/scoop-bucket, ser356/homebrew-tap) instalan y ejecutan
+# el binario correctamente.
+#
+# Solo se lanza a mano — el CI normal no lo dispara para no gastar
+# minutos de runner en cada push.
+on:
+  workflow_dispatch:
+
+jobs:
+  scoop:
+    runs-on: windows-latest
+    steps:
+      - name: Instalar Scoop
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+          Invoke-Expression (New-Object System.Net.WebClient).DownloadString('https://get.scoop.sh')
+          scoop --version
+
+      - name: Añadir bucket 'extras' (para VLC)
+        shell: powershell
+        run: scoop bucket add extras
+
+      - name: Añadir bucket personal ser356
+        shell: powershell
+        run: scoop bucket add ser356 https://github.com/ser356/scoop-bucket
+
+      - name: Instalar letterboxd-cli
+        shell: powershell
+        run: scoop install ser356/letterboxd-cli
+
+      - name: Verificar binario en PATH
+        shell: powershell
+        run: |
+          Get-Command letterboxd-cli
+          letterboxd-cli --help
+
+      - name: Verificar VLC como dependencia
+        shell: powershell
+        run: scoop list
+
+  homebrew-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Añadir tap + trust
+        run: |
+          brew tap ser356/tap
+          brew trust ser356/tap
+
+      - name: Instalar letterboxd-cli
+        run: brew install letterboxd-cli
+
+      - name: Verificar binario
+        run: |
+          which letterboxd-cli
+          letterboxd-cli --help
+
+  homebrew-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar Homebrew (Linuxbrew)
+        run: |
+          NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+
+      - name: Añadir tap + trust
+        run: |
+          brew tap ser356/tap
+          brew trust ser356/tap
+
+      - name: Instalar letterboxd-cli (incluye VLC como dep)
+        run: brew install letterboxd-cli
+
+      - name: Verificar binario
+        run: |
+          which letterboxd-cli
+          letterboxd-cli --help
