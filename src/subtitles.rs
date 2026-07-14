@@ -22,9 +22,9 @@ use serde::Deserialize;
 
 const API_BASE: &str = "https://api.opensubtitles.com/api/v1";
 
-/// API key bakeada en el binario en compile time. Se inyecta con
-/// `LB_APP_OS_API_KEY=xxx cargo install --path .`.
-const BAKED_OS_API_KEY: Option<&str> = option_env!("LB_APP_OS_API_KEY");
+/// API key hardcoded en el source (source build para amigos). Se rota
+/// aquí si algún día se abusa.
+const BAKED_OS_API_KEY: Option<&str> = Some("BGtS90uaAB0s7LndtE3kqmusBpcLv4ir");
 
 /// User-Agent requerido por OpenSubtitles (si no lo mandas te banean).
 const USER_AGENT: &str = concat!("letterboxd-cli v", env!("CARGO_PKG_VERSION"));

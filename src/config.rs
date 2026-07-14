@@ -3,21 +3,18 @@ use anyhow::{Context, Result};
 use crate::credentials;
 use crate::keychain;
 
-/// Credenciales de "app" baked-in en el binario al compilar. Se inyectan
-/// vía `cargo install` con:
+/// Credenciales de "app" hardcoded en el source. Sí, están públicas en
+/// GitHub. El trade-off aceptado:
+/// - Letterboxd: cualquiera con un iPhone puede extraerlas de la app.
+/// - TMDB: cuota generosa por IP anónima; si se abusa se rota key.
+/// - OpenSubtitles: 200 downloads/día por IP anónima, quota compartida
+///   irrelevante en escala amigos.
 ///
-/// ```sh
-/// LB_APP_CLIENT_ID=xxx \
-/// LB_APP_CLIENT_SECRET=yyy \
-/// LB_APP_TMDB_BEARER=zzz \
-/// cargo install --path .
-/// ```
-///
-/// Si no están definidas al compilar, valen `None` y hay que resolverlas
-/// en runtime desde env/Keychain — útil en desarrollo.
-const BAKED_CLIENT_ID: Option<&str> = option_env!("LB_APP_CLIENT_ID");
-const BAKED_CLIENT_SECRET: Option<&str> = option_env!("LB_APP_CLIENT_SECRET");
-const BAKED_TMDB_BEARER: Option<&str> = option_env!("LB_APP_TMDB_BEARER");
+/// Ventaja: source build (`brew install`, `cargo install --git`, `nix
+/// build`) produce un binario funcional sin pedir configuración al user.
+const BAKED_CLIENT_ID: Option<&str> = Some("4f203301-9688-f722-9f4b-c59e90ad6fd6");
+const BAKED_CLIENT_SECRET: Option<&str> = Some("7d0356bd9e6a357a068f7c48b8557dbfe36b056331bdffc554720165f1620876");
+const BAKED_TMDB_BEARER: Option<&str> = Some("eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIwOWY4ZmFmZDc5ODVjOTVlNDE0NWFjMTQzMWE3MTc0YSIsIm5iZiI6MTc4MjU5OTEzNy42NDQsInN1YiI6IjZhNDA0ZGUxMDg5ZmE3YjE5OTA4MDYxMSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.RJ1x2zx09nEowi09FE2Tt86sJruCnPGOgUEBXQ3vveA");
 
 #[derive(Debug, Clone)]
 pub struct Config {

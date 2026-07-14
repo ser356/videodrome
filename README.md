@@ -18,9 +18,15 @@ Para compilar desde código además:
 
 ## Instalación
 
-Recomendado: **usa un gestor de paquetes**. Instala el CLI, sus dependencias
-(VLC) y las actualizaciones futuras en un solo sitio, sin disparar SmartScreen
-(Windows) ni Gatekeeper (macOS).
+Recomendado: **usa un gestor de paquetes**. Los tres compilan desde
+código en tu máquina, así que:
+
+- El binario resultante nunca dispara Gatekeeper (macOS) ni SmartScreen
+  (Windows) porque no lleva la marca "descargado de internet".
+- Funciona en cualquier arquitectura (arm64/x86_64 mac, x86_64 windows,
+  todas las distros Linux) sin publicar binarios prebuilt para cada una.
+
+Contrapartida: la instalación tarda **2–4 minutos** por compilar.
 
 ### macOS · Homebrew ⭐️
 
@@ -39,29 +45,29 @@ Actualización: `brew upgrade letterboxd-cli`.
 > VLC se instala aparte porque Homebrew ya no permite que una fórmula
 > dependa de un cask.
 >
-> Solo Apple Silicon (M1+). Los Macs Intel deben usar la vía "compilar
-> desde código" más abajo — los runners `macos-13` de GitHub Actions
-> están deprecated y no publicamos binario x86_64.
+> `brew install` compilará el CLI en local (~2–4 min); rust se instala
+> automáticamente como build-dependency si no lo tienes.
 
 ### Windows · Scoop ⭐️
 
 ```powershell
+scoop bucket add main
 scoop bucket add extras
 scoop bucket add ser356 https://github.com/ser356/scoop-bucket
 scoop install ser356/letterboxd-cli
 ```
 
-Instala también VLC como dependencia. Actualización: `scoop update letterboxd-cli`.
+Instala también VLC y rustup como dependencias. Compila el CLI en local
+(~2–4 min). Actualización: `scoop update letterboxd-cli`.
 
 ### Linux ⭐️
 
-En Linux la vía recomendada es **compilar desde código con `cargo`** (rustup
-suele venir preinstalado en distros de desarrollo). Instala VLC con tu
-gestor nativo:
+Compila desde código con `cargo` (rustup suele venir preinstalado en
+distros de desarrollo). Instala VLC con tu gestor nativo:
 
 ```bash
 cargo install --git https://github.com/ser356/letterboxd-cli
-sudo apt install vlc            # o dnf / pacman según distro
+sudo apt install vlc
 ```
 
 **NixOS / Nix**: si usas Nix hay un flake preparado:
@@ -73,10 +79,10 @@ nix profile install github:ser356/letterboxd-cli
 Compila desde código de forma reproducible y trae VLC en el `PATH` del
 binario automáticamente.
 
-### Alternativa 1 — Binarios prebuilt (releases)
+### Alternativa — Binarios prebuilt (releases)
 
-Si no usas ningún gestor de paquetes, descarga el archivo de tu plataforma
-desde [Releases](https://github.com/ser356/letterboxd-cli/releases):
+Si no quieres esperar a la compilación local, descarga el archivo de tu
+plataforma desde [Releases](https://github.com/ser356/letterboxd-cli/releases):
 
 - `letterboxd-cli-macos-arm64.tar.gz`
 - `letterboxd-cli-linux-x86_64.tar.gz`
@@ -90,7 +96,7 @@ cuarentena con:
 xattr -d com.apple.quarantine letterboxd-cli
 ```
 
-### Alternativa 2 — Compilar desde código
+### Compilar en clon local
 
 ```bash
 git clone https://github.com/ser356/letterboxd-cli

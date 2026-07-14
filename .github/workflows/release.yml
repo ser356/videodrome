@@ -141,27 +141,17 @@ jobs:
           echo "tag=$TAG"       >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Descargar artifacts del release
+      - name: Calcular SHA256 del tarball de código fuente
+        id: sha
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p artifacts
-          gh release download "${{ steps.v.outputs.tag }}" \
-            -R "${{ github.repository }}" \
-            -p 'letterboxd-cli-*.tar.gz' \
-            -p 'letterboxd-cli-*.zip' \
-            -D artifacts
-          echo "Artifacts descargados:"
-          ls -la artifacts/
-
-      - name: Calcular SHA256
-        id: sha
-        run: |
-          cd artifacts
-          SHA_MAC_ARM64=$(sha256sum letterboxd-cli-macos-arm64.tar.gz | awk '{print $1}')
-          SHA_WIN_X86_64=$(sha256sum letterboxd-cli-windows-x86_64.zip | awk '{print $1}')
-          echo "mac_arm64=$SHA_MAC_ARM64" >> "$GITHUB_OUTPUT"
-          echo "win_x86_64=$SHA_WIN_X86_64" >> "$GITHUB_OUTPUT"
+          TAG="${{ steps.v.outputs.tag }}"
+          SRC_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          curl -sL "$SRC_URL" -o source.tar.gz
+          SHA_SRC=$(sha256sum source.tar.gz | awk '{print $1}')
+          echo "source=$SHA_SRC" >> "$GITHUB_OUTPUT"
+          echo "SHA source tarball: $SHA_SRC"
 
       # ---------- HOMEBREW TAP ----------
       - name: Render fórmula Homebrew
@@ -169,7 +159,7 @@ jobs:
           mkdir -p out
           sed \
             -e "s|{{VERSION}}|${{ steps.v.outputs.version }}|g" \
-            -e "s|{{SHA_MAC_ARM64}}|${{ steps.sha.outputs.mac_arm64 }}|g" \
+            -e "s|{{SHA_SOURCE_TARBALL}}|${{ steps.sha.outputs.source }}|g" \
             packaging/homebrew/letterboxd-cli.rb.tmpl > out/letterboxd-cli.rb
           echo "----- fórmula generada -----"
           cat out/letterboxd-cli.rb
@@ -197,7 +187,7 @@ jobs:
         run: |
           sed \
             -e "s|{{VERSION}}|${{ steps.v.outputs.version }}|g" \
-            -e "s|{{SHA_WIN_X86_64}}|${{ steps.sha.outputs.win_x86_64 }}|g" \
+            -e "s|{{SHA_SOURCE_TARBALL}}|${{ steps.sha.outputs.source }}|g" \
             packaging/scoop/letterboxd-cli.json.tmpl > out/letterboxd-cli.json
           echo "----- manifest generado -----"
           cat out/letterboxd-cli.json

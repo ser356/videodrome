@@ -3,14 +3,24 @@
   "description": "Letterboxd recs + torrent search + BitTorrent streaming",
   "homepage": "https://github.com/ser356/letterboxd-cli",
   "license": "MIT",
-  "url": "https://github.com/ser356/letterboxd-cli/releases/download/v{{VERSION}}/letterboxd-cli-windows-x86_64.zip",
-  "hash": "{{SHA_WIN_X86_64}}",
-  "bin": "letterboxd-cli.exe",
-  "depends": "extras/vlc",
-  "suggest": {
-    "VLC": "extras/vlc"
+  "url": "https://github.com/ser356/letterboxd-cli/archive/refs/tags/v{{VERSION}}.tar.gz",
+  "hash": "{{SHA_SOURCE_TARBALL}}",
+  "extract_dir": "letterboxd-cli-{{VERSION}}",
+  "depends": ["extras/vlc", "main/rustup-msvc"],
+  "installer": {
+    "script": [
+      "rustup default stable-msvc | Out-Null",
+      "$env:CARGO_TARGET_DIR = \"$dir\\target\"",
+      "Push-Location $dir",
+      "cargo install --path . --root $dir --locked",
+      "if ($LASTEXITCODE -ne 0) { throw 'cargo install failed' }",
+      "Pop-Location",
+      "Remove-Item -Recurse -Force \"$dir\\target\", \"$dir\\src\", \"$dir\\Cargo.lock\", \"$dir\\Cargo.toml\" -ErrorAction SilentlyContinue"
+    ]
   },
+  "bin": "bin\\letterboxd-cli.exe",
   "notes": [
+    "letterboxd-cli se compiló desde código fuente en tu máquina (~2-4 min).",
     "VLC se instaló automáticamente como dependencia (bucket 'extras').",
     "La primera vez que abras la TUI, se te pedirá login de Letterboxd."
   ],
@@ -18,6 +28,7 @@
     "github": "https://github.com/ser356/letterboxd-cli"
   },
   "autoupdate": {
-    "url": "https://github.com/ser356/letterboxd-cli/releases/download/v$version/letterboxd-cli-windows-x86_64.zip"
+    "url": "https://github.com/ser356/letterboxd-cli/archive/refs/tags/v$version.tar.gz",
+    "extract_dir": "letterboxd-cli-$version"
   }
 }
