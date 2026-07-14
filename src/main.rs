@@ -25,7 +25,7 @@ use tmdb::TmdbClient;
 
 #[derive(Parser)]
 #[command(
-    name = "letterboxd-cli",
+    name = "videodrome",
     about = "Recomendaciones de películas desde Letterboxd"
 )]
 struct Cli {
@@ -106,7 +106,7 @@ enum KeychainAction {
     /// Lee las credenciales actuales de .env y las guarda en el Keychain
     Import,
     /// Vuelca las credenciales del Keychain a un .env (por defecto
-    /// `~/.config/letterboxd-cli/.env`). Útil para evitar el diálogo de
+    /// `~/.config/videodrome/.env`). Útil para evitar el diálogo de
     /// aprobación del Keychain en cada ejecución.
     Export {
         /// Ruta del fichero .env de destino
@@ -143,7 +143,7 @@ fn main() -> Result<()> {
     if cli.command.is_none() && has_display() {
         let config = Config::from_env()?;
         let http = reqwest::Client::builder()
-            .user_agent("letterboxd-cli/0.1")
+            .user_agent("videodrome/0.1")
             .build()?;
         return gui::run(config, http);
     }
@@ -168,7 +168,7 @@ async fn dispatch(command: Commands) -> Result<()> {
         } => {
             let config = Config::from_env()?;
             let http = reqwest::Client::builder()
-                .user_agent("letterboxd-cli/0.1")
+                .user_agent("videodrome/0.1")
                 .build()?;
 
             let token = auth::get_access_token(&http, &config).await?;
@@ -213,7 +213,7 @@ async fn dispatch(command: Commands) -> Result<()> {
         Commands::Tui { count, min_rating } => {
             let config = Config::from_env()?;
             let http = reqwest::Client::builder()
-                .user_agent("letterboxd-cli/0.1")
+                .user_agent("videodrome/0.1")
                 .build()?;
             tui::run(config, http, count, min_rating).await?;
         }
@@ -245,7 +245,7 @@ async fn dispatch(command: Commands) -> Result<()> {
                 if imported == 0 {
                     anyhow::bail!(
                         "No se encontró ninguna variable en el entorno ni en \
-                         ~/.config/letterboxd-cli/.env. Crea un .env con al \
+                         ~/.config/videodrome/.env. Crea un .env con al \
                          menos una de las variables antes de importar."
                     );
                 }
@@ -267,7 +267,7 @@ async fn dispatch(command: Commands) -> Result<()> {
                     dirs::home_dir()
                         .expect("HOME no definido")
                         .join(".config")
-                        .join("letterboxd-cli")
+                        .join("videodrome")
                         .join(".env")
                 });
 
@@ -304,7 +304,7 @@ async fn dispatch(command: Commands) -> Result<()> {
                 }
 
                 if written == 0 {
-                    anyhow::bail!("El Keychain no tiene ninguna credencial de letterboxd-cli.");
+                    anyhow::bail!("El Keychain no tiene ninguna credencial de videodrome.");
                 }
 
                 if let Some(parent) = path.parent() {
@@ -363,7 +363,7 @@ async fn dispatch(command: Commands) -> Result<()> {
             config::load_env_files();
 
             let http = reqwest::Client::builder()
-                .user_agent("letterboxd-cli/0.1")
+                .user_agent("videodrome/0.1")
                 .timeout(std::time::Duration::from_secs(20))
                 .build()?;
 

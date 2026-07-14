@@ -831,7 +831,7 @@ async fn run_app(
                                 let http_c = http.clone();
                                 // Directorio efímero por sesión. Se
                                 // limpia al salir el proceso.
-                                let dest = std::env::temp_dir().join("letterboxd-cli-subs");
+                                let dest = std::env::temp_dir().join("videodrome-subs");
                                 tokio::spawn(async move {
                                     match subtitles::download(&http_c, &sub, &dest).await {
                                         Ok(path) => {
@@ -1191,7 +1191,7 @@ fn draw_login(f: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(Span::styled(
-            "Necesario una sola vez — el refresh_token se guardará en ~/.config/letterboxd-cli/credentials.json",
+            "Necesario una sola vez — el refresh_token se guardará en ~/.config/videodrome/credentials.json",
             Style::default().fg(Color::DarkGray),
         )),
     ])
@@ -1288,7 +1288,7 @@ fn draw_menu(f: &mut Frame, app: &mut App) {
 
     let banner = Paragraph::new(vec![
         Line::from(vec![Span::styled(
-            "🎬 letterboxd-cli",
+            "🎬 videodrome",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1382,7 +1382,7 @@ fn draw_recs(f: &mut Frame, app: &mut App) {
 
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
-            "🎬 letterboxd-cli",
+            "🎬 videodrome",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),

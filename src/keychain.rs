@@ -3,12 +3,12 @@
 //! con un mensaje claro.
 //!
 //! Convención en el Keychain: cada credencial es un item genérico con
-//! `service` = nombre de la credencial (p.ej. `letterboxd-client-id`) y
-//! `account` = nombre de la app (`letterboxd-cli`). Así aparecen agrupadas
+//! `service` = nombre de la credencial (p.ej. `videodromeent-id`) y
+//! `account` = nombre de la app (`videodrome`). Así aparecen agrupadas
 //! en Acceso a Llaveros con nombres legibles.
 
-pub const CLIENT_ID: &str = "letterboxd-client-id";
-pub const CLIENT_SECRET: &str = "letterboxd-client-secret";
+pub const CLIENT_ID: &str = "videodromeent-id";
+pub const CLIENT_SECRET: &str = "videodromeent-secret";
 pub const REFRESH_TOKEN: &str = "letterboxd-refresh-token";
 pub const TMDB_BEARER_TOKEN: &str = "letterboxd-tmdb-bearer-token";
 pub const USERNAME: &str = "letterboxd-username";
@@ -20,7 +20,7 @@ mod imp {
     use anyhow::Result;
     use keyring::{Entry, Error as KeyringError};
 
-    const ACCOUNT: &str = "letterboxd-cli";
+    const ACCOUNT: &str = "videodrome";
 
     /// Lee una credencial del Keychain. `None` si no existe o si el Keychain
     /// no está accesible (por ejemplo, sesión sin desbloquear).

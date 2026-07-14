@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # Reemplaza los placeholders __LB_APP_*__ en src/config.rs y src/subtitles.rs
-# con los valores reales de tu ~/.config/letterboxd-cli/.env
+# con los valores reales de tu ~/.config/videodrome/.env
 #
 # Uso: ./scripts/bake-keys.sh
 #
@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 set -a
-for f in "$HOME/.config/letterboxd-cli/.env" "$ROOT/.env"; do
+for f in "$HOME/.config/videodrome/.env" "$ROOT/.env"; do
   [[ -f "$f" ]] && source "$f"
 done
 set +a
@@ -22,7 +22,7 @@ set +a
 check_var() {
   local name="$1"
   if [[ -z "${(P)name:-}" ]]; then
-    echo "❌ Variable $name no está definida en ~/.config/letterboxd-cli/.env ni en el .env del repo" >&2
+    echo "❌ Variable $name no está definida en ~/.config/videodrome/.env ni en el .env del repo" >&2
     exit 1
   fi
 }

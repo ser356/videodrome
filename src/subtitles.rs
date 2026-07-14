@@ -27,7 +27,7 @@ const API_BASE: &str = "https://api.opensubtitles.com/api/v1";
 const BAKED_OS_API_KEY: Option<&str> = Some("BGtS90uaAB0s7LndtE3kqmusBpcLv4ir");
 
 /// User-Agent requerido por OpenSubtitles (si no lo mandas te banean).
-const USER_AGENT: &str = concat!("letterboxd-cli v", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("videodrome v", env!("CARGO_PKG_VERSION"));
 
 /// Idiomas por defecto que se piden a OpenSubtitles.
 pub const DEFAULT_LANGUAGES: &str = "es,en,fr,de,it";

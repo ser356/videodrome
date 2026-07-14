@@ -81,7 +81,7 @@ fn now_unix() -> u64 {
 fn cache_path() -> Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("No se puede obtener el directorio de configuración")?
-        .join("letterboxd-cli");
+        .join("videodrome");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join(RECS_CACHE_FILE))
 }

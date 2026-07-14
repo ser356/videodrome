@@ -1,7 +1,7 @@
 # videodrome — installer para Windows (Scoop, binario prebuilt)
 #
 # Uso (PowerShell normal, NO admin):
-#   irm https://ser356.github.io/letterboxd-cli/install.ps1 | iex
+#   irm https://ser356.github.io/videodrome/install.ps1 | iex
 #
 # Instala Scoop (si falta), añade los buckets extras (VLC) + ser356
 # (videodrome) e instala el paquete. El binario ya viene compilado —

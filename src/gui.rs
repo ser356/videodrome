@@ -414,7 +414,7 @@ async fn download_subtitle(
     stream_id: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let dest = std::env::temp_dir().join("letterboxd-cli-subs");
+    let dest = std::env::temp_dir().join("videodrome-subs");
     let path = subtitles::download(&state.http, &sub, &dest)
         .await
         .map_err(|e| e.to_string())?;

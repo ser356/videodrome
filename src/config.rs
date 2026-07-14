@@ -31,7 +31,7 @@ pub struct Config {
 
 fn load_dotenv() {
     if let Some(home) = dirs::home_dir() {
-        let env_path = home.join(".config").join("letterboxd-cli").join(".env");
+        let env_path = home.join(".config").join("videodrome").join(".env");
         if env_path.exists() {
             dotenvy::from_path(&env_path).ok();
         }
@@ -76,7 +76,7 @@ impl Config {
     /// 1. Variables de entorno / `.env` (override en desarrollo).
     /// 2. Keychain de macOS (solo macOS, si estaba populado).
     /// 3. Baked-in en el binario (para builds distribuidos a usuarios).
-    /// 4. `credentials.json` en `~/.config/letterboxd-cli/` (guardado tras
+    /// 4. `credentials.json` en `~/.config/videodrome/` (guardado tras
     ///    el login en la TUI). Solo para `refresh_token` y `username`.
     ///
     /// Los campos de app (client_id/secret, tmdb) deben estar por 1, 2 o

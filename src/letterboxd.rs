@@ -73,7 +73,7 @@ struct CachedEntries {
 fn cache_path() -> Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("No se puede obtener el directorio de configuración")?
-        .join("letterboxd-cli");
+        .join("videodrome");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join(LOG_ENTRIES_CACHE))
 }
@@ -118,7 +118,7 @@ struct CachedWatchlist {
 fn watchlist_cache_path() -> Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("No se puede obtener el directorio de configuración")?
-        .join("letterboxd-cli");
+        .join("videodrome");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join(WATCHLIST_CACHE))
 }

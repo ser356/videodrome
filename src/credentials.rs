@@ -1,5 +1,5 @@
 //! Almacén cross-platform de credenciales de usuario (refresh_token +
-//! username) en `~/.config/letterboxd-cli/credentials.json`.
+//! username) en `~/.config/videodrome/credentials.json`.
 //!
 //! Motivación: la app se distribuye a usuarios de macOS/Linux/Windows. El
 //! Keychain solo existe en macOS, así que las credenciales del usuario se
@@ -27,7 +27,7 @@ pub struct Credentials {
 fn path() -> Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("No se puede obtener el directorio de configuración")?
-        .join("letterboxd-cli");
+        .join("videodrome");
     std::fs::create_dir_all(&dir).with_context(|| format!("No se pudo crear {}", dir.display()))?;
     Ok(dir.join(FILE_NAME))
 }
