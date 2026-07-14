@@ -1,7 +1,7 @@
 # letterboxd-cli — instalador para Windows (source build via Scoop)
 #
 # Uso (PowerShell normal, no admin):
-#   irm https://raw.githubusercontent.com/ser356/letterboxd-cli/main/scripts/install-windows.ps1 | iex
+#   irm https://ser356.github.io/letterboxd-cli/install.ps1 | iex
 #
 # Instala Scoop (si falta), añade los buckets main + extras + ser356,
 # instala letterboxd-cli (que trae VLC y rustup como deps) y compila el

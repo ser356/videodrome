@@ -50,15 +50,25 @@ Actualización: `brew upgrade letterboxd-cli`.
 
 ### Windows · Scoop ⭐️
 
+**Una línea en PowerShell** (no admin):
+
+```powershell
+irm https://ser356.github.io/letterboxd-cli/install.ps1 | iex
+```
+
+Instala Scoop (si no lo tienes), añade los buckets necesarios, compila
+letterboxd-cli desde código en tu máquina y trae VLC + rustup como
+dependencias. ~5-10 min la primera vez. Actualización: `scoop update
+letterboxd-cli`.
+
+Si ya tienes Scoop y prefieres el flujo manual:
+
 ```powershell
 scoop bucket add main
 scoop bucket add extras
 scoop bucket add ser356 https://github.com/ser356/scoop-bucket
 scoop install ser356/letterboxd-cli
 ```
-
-Instala también VLC y rustup como dependencias. Compila el CLI en local
-(~2–4 min). Actualización: `scoop update letterboxd-cli`.
 
 ### Linux ⭐️
 
