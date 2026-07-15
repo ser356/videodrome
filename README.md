@@ -64,7 +64,7 @@ Actualizar: `scoop update videodrome`.
 ### Linux · tarball CLI
 
 ```bash
-curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v0.2.0-linux-x86_64.tar.gz | tar -xz
+curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v0.3.0-linux-x86_64.tar.gz | tar -xz
 sudo mv videodrome /usr/local/bin/
 sudo apt install vlc  # o el gestor que uses
 ```
@@ -126,6 +126,10 @@ Las películas ya vistas o en watchlist se excluyen automáticamente. El
 ranking es `frecuencia × rating_LB` (cuántas semillas la recomiendan,
 ponderado por rating de la comunidad Letterboxd).
 
+Los defaults (`--count`, `--min-rating`, idiomas de subtítulos) se
+pueden persistir desde la vista **Ajustes** de la GUI —
+`~/.config/videodrome/preferences.json`.
+
 Ejemplo JSON:
 
 ```bash
@@ -151,13 +155,19 @@ videodrome torrents --imdb tt0120689     # resuelve título vía TMDB
 | `-n, --limit <N>` | Número máximo de resultados | `20` |
 | `--json` | Salida JSON | `false` |
 
-Providers activos por defecto:
+Providers activos por defecto (todos en paralelo, dedupe por
+infohash):
 
 - **YTS** (`yts.mx`) — solo cine, JSON público.
+- **Apibay** (`apibay.org`) — API pública de The Pirate Bay.
 - **Knaben** (`api.knaben.org`) — agregador 1337x, TPB, TorrentGalaxy,
   YTS, Nyaa, RuTracker…
 - **Torznab** — opt-in. Se activa si defines `TORZNAB_URL` +
   `TORZNAB_APIKEY` (Jackett / Prowlarr).
+
+Ranking: `seeders × calidad × idioma`. La calidad prioriza 2160p >
+1080p > 720p. El idioma promociona releases con el audio original de
+la película (o etiqueta `Multi`) frente a doblajes.
 
 #### `tui`
 
@@ -248,6 +258,11 @@ En `~/.config/videodrome/`:
 | `log_entries.json` | 1 h |
 | `watchlist.json` | 1 h |
 | `tmdb_recs_cache.json` | 24 h |
+| `search_cache.json` | 24 h (búsquedas TMDB + torrents desde la GUI) |
+| `preferences.json` | persistente (defaults de la vista Recs, idiomas de subs) |
+
+Desde la GUI, la vista **Ajustes** permite limpiar cada caché
+individualmente o todas de golpe.
 
 ---
 
