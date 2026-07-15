@@ -302,9 +302,10 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
                   ref={(el: HTMLLIElement | null) => { rowsRef.current[i] = el }}
                   t={t}
                   active={i === sel}
-                  onClick={() => setSel(i)}
-                  onDoubleClick={() => {
+                  onClick={() => {
                     setSel(i)
+                    // Un solo clic lanza el flujo (pregunta subs → stream).
+                    // Los power-users siguen usando j/k + Enter con teclado.
                     startStreamFlow()
                   }}
                 />
@@ -360,20 +361,17 @@ const TorrentRow = ({
   t,
   active,
   onClick,
-  onDoubleClick,
 }: {
   ref: (el: HTMLLIElement | null) => void
   t: Torrent
   active: boolean
   onClick: () => void
-  onDoubleClick: () => void
 }) => {
   const flag = audioFlag(t.audio)
   return (
     <li
       ref={ref}
       onClick={onClick}
-      onDoubleClick={onDoubleClick}
       className={`grid cursor-pointer grid-cols-[3rem_1fr_5rem_4.5rem_4.5rem_4rem_4rem_5rem] items-center gap-x-3 border-t border-hairline-soft px-4 py-2.5 text-[13px] transition-colors ${
         active ? 'bg-surface-hi text-ink' : 'text-body hover:bg-surface'
       }`}

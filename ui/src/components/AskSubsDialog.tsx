@@ -1,11 +1,12 @@
+import { useState } from 'react'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
 
 /**
  * Diálogo previo a lanzar el stream: "¿Cargar subtítulos?".
  *
- * - `Enter` (o click en "Con subtítulos") abre la SubsSheet.
- * - `N` (o click en "Sin subtítulos") arranca el stream directamente.
- * - `Esc` cancela y no hace nada.
+ * Foco entre botones con `←/→` (y `h/l` estilo vim, `j/k` también).
+ * `Enter` confirma el botón enfocado. `S` salta directo a "con subs"
+ * y `N` a "sin subs" para quien no quiera mover el foco. `Esc` cancela.
  */
 export function AskSubsDialog({
   title,
@@ -18,12 +19,28 @@ export function AskSubsDialog({
   onNo: () => void
   onClose: () => void
 }) {
+  const [focus, setFocus] = useState<'yes' | 'no'>('yes')
+
+  const confirm = () => {
+    if (focus === 'yes') onYes()
+    else onNo()
+  }
+
   const hotkeys: Hotkey[] = [
-    { key: 'Enter', hint: '', run: onYes },
+    { key: 'ArrowLeft', hint: '', run: () => setFocus('yes') },
+    { key: 'ArrowRight', hint: '', run: () => setFocus('no') },
+    { key: 'ArrowUp', hint: '', run: () => setFocus('yes') },
+    { key: 'ArrowDown', hint: '', run: () => setFocus('no') },
+    { key: 'h', hint: '', run: () => setFocus('yes') },
+    { key: 'k', hint: '', run: () => setFocus('yes') },
+    { key: 'l', hint: '', run: () => setFocus('no') },
+    { key: 'j', hint: '', run: () => setFocus('no') },
+    { key: 'Enter', hint: '', run: confirm },
+    { key: 's', hint: '', run: onYes },
     { key: 'n', hint: '', run: onNo },
     { key: 'Escape', hint: '', run: onClose, ignoreInInput: false },
   ]
-  useHotkeys(hotkeys, [])
+  useHotkeys(hotkeys, [focus])
 
   return (
     <div
@@ -51,8 +68,12 @@ export function AskSubsDialog({
         <div className="grid grid-cols-2 gap-3">
           <button
             onClick={onYes}
-            autoFocus
-            className="focus-ring flex flex-col items-start gap-1 rounded-lg border border-accent/50 bg-accent/10 px-4 py-3 text-left transition-colors hover:bg-accent/20"
+            onMouseEnter={() => setFocus('yes')}
+            className={`flex flex-col items-start gap-1 rounded-lg border px-4 py-3 text-left transition-colors ${
+              focus === 'yes'
+                ? 'border-accent bg-accent/20 ring-2 ring-accent/40'
+                : 'border-accent/30 bg-accent/5 hover:bg-accent/10'
+            }`}
           >
             <span className="text-[14px] font-semibold text-accent">
               Con subtítulos
@@ -64,7 +85,12 @@ export function AskSubsDialog({
 
           <button
             onClick={onNo}
-            className="focus-ring flex flex-col items-start gap-1 rounded-lg border border-hairline bg-surface px-4 py-3 text-left transition-colors hover:border-border-strong hover:bg-surface-hi"
+            onMouseEnter={() => setFocus('no')}
+            className={`flex flex-col items-start gap-1 rounded-lg border px-4 py-3 text-left transition-colors ${
+              focus === 'no'
+                ? 'border-border-strong bg-surface-hi ring-2 ring-white/20'
+                : 'border-hairline bg-surface hover:border-border-strong hover:bg-surface-hi'
+            }`}
           >
             <span className="text-[14px] font-semibold text-ink">
               Sin subtítulos
@@ -77,13 +103,13 @@ export function AskSubsDialog({
 
         <footer className="border-t border-hairline pt-3 text-[11px] text-dim">
           <kbd className="rounded-sm border border-hairline bg-surface px-1.5 py-0.5 text-[11px] text-body">
+            ← / →
+          </kbd>{' '}
+          mover ·{' '}
+          <kbd className="rounded-sm border border-hairline bg-surface px-1.5 py-0.5 text-[11px] text-body">
             ⏎
           </kbd>{' '}
-          con subs ·{' '}
-          <kbd className="rounded-sm border border-hairline bg-surface px-1.5 py-0.5 text-[11px] text-body">
-            N
-          </kbd>{' '}
-          sin subs ·{' '}
+          confirmar ·{' '}
           <kbd className="rounded-sm border border-hairline bg-surface px-1.5 py-0.5 text-[11px] text-body">
             Esc
           </kbd>{' '}
