@@ -123,9 +123,10 @@ export function StreamPanel({
         <p className="text-body">{message}</p>
       ) : (
         <p className="text-body">
-          Pulsa <Kbd>S</Kbd> para empezar a streamear el torrent
-          seleccionado. <Kbd>Enter</Kbd> abre el magnet en tu cliente BT
-          por defecto. <Kbd>X</Kbd> busca subtítulos.
+          Pulsa <Kbd>Enter</Kbd> para proyectar el torrent seleccionado
+          en VLC (te preguntará si quieres subtítulos antes de arrancar).{' '}
+          <Kbd>S</Kbd> envía el magnet a tu cliente BitTorrent por
+          defecto.
         </p>
       )}
     </div>

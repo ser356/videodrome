@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { AskSubsDialog } from '../components/AskSubsDialog'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { StreamPanel } from '../components/StreamPanel'
 import { SubsSheet } from '../components/SubsSheet'
@@ -27,8 +28,9 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  * - `tmdb`: viene de Recs, hace `search_torrents_by_tmdb` con detalles TMDB.
  * - `direct`: viene de Search, hace `search_torrents_direct` con la query.
  *
- * Hotkeys 1:1 con la TUI:
- *   j/k mover · Enter magnet · s stream · x subtítulos · m toggle panel
+ * Hotkeys:
+ *   j/k mover · Enter proyectar (pregunta por subs → stream) ·
+ *   s abre magnet en cliente BT externo · m toggle panel ·
  *   b Esc volver
  */
 export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
@@ -45,12 +47,12 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   const [stream, setStream] = useState<StreamInfo | null>(null)
   const [streamMsg, setStreamMsg] = useState<string | null>(null)
 
-  // Subs state (modal sheet)
+  // Subs state (modal sheet + gate dialog)
   const [subsOpen, setSubsOpen] = useState(false)
+  const [askSubsOpen, setAskSubsOpen] = useState(false)
   const [subsLoading, setSubsLoading] = useState(false)
   const [subs, setSubs] = useState<Subtitle[]>([])
   const [pendingSubPath, setPendingSubPath] = useState<string | null>(null)
-  const [pendingSubRelease, setPendingSubRelease] = useState<string | null>(null)
 
   // Panel toggle: false = stream progress, true = magnet raw text
   const [showMagnet, setShowMagnet] = useState(false)
@@ -116,7 +118,10 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     }
   }
 
-  const goStream = async () => {
+  const goStream = async (
+    subPath: string | null = null,
+    subRelease: string | null = null,
+  ) => {
     if (!current) return
     setStreamMsg(`Iniciando stream: ${current.title}…`)
     if (stream) {
@@ -124,13 +129,31 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
       setStream(null)
     }
     try {
-      const info = await startStreamWithSub(current.magnet, pendingSubPath)
+      const info = await startStreamWithSub(current.magnet, subPath)
       setStream(info)
-      const subNote = pendingSubRelease ? `  ·  sub: ${pendingSubRelease}` : ''
+      const subNote = subRelease ? `  ·  sub: ${subRelease}` : ''
       setStreamMsg(`Streaming ${info.file_name}${subNote}`)
     } catch (e) {
       setStreamMsg(`Error stream: ${String(e)}`)
     }
+  }
+
+  // Enter en la lista de torrents: preguntar por subs antes de streamear.
+  // Si no hay torrent seleccionado, no-op.
+  const startStreamFlow = () => {
+    if (!current) return
+    setAskSubsOpen(true)
+  }
+
+  const confirmStreamWithSubs = () => {
+    setAskSubsOpen(false)
+    openSubs()
+  }
+
+  const confirmStreamWithoutSubs = async () => {
+    setAskSubsOpen(false)
+    setPendingSubPath(null)
+    await goStream(null, null)
   }
 
   const openSubs = async () => {
@@ -153,10 +176,12 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     setSubsLoading(true)
     try {
       const path = await downloadSubtitle(sub)
+      const release = sub.release || sub.file_name || 'sub'
       setPendingSubPath(path)
-      setPendingSubRelease(sub.release || sub.file_name || 'sub')
-      setStreamMsg(`Sub cargado (${sub.language}): pulsa S para stream con subs.`)
       setSubsOpen(false)
+      // Encadenar con el stream: el usuario ya confirmó "con subs" en
+      // el diálogo previo, no hay que volver a pedir Enter.
+      await goStream(path, release)
     } catch (e) {
       setStreamMsg(`Error descargando sub: ${String(e)}`)
     } finally {
@@ -186,9 +211,8 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     { key: 'ArrowDown', hint: '', run: () => move(1) },
     { key: 'k', hint: 'Mover', run: () => move(-1) },
     { key: 'ArrowUp', hint: '', run: () => move(-1) },
-    { key: 'Enter', hint: 'Magnet', run: goMagnet },
-    { key: 's', hint: 'Stream', run: goStream },
-    { key: 'x', hint: 'Subtítulos', run: openSubs },
+    { key: 'Enter', hint: 'Proyectar', run: startStreamFlow },
+    { key: 's', hint: 'Magnet', run: goMagnet },
     {
       key: 'm',
       hint: 'Panel',
@@ -197,11 +221,11 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     { key: 'b', hint: '', run: goBack },
     { key: 'Escape', hint: 'Volver', run: goBack },
   ]
-  // Cuando la SubsSheet está abierta, sus hotkeys (Enter, j/k, Esc) toman
-  // el control. Si dejamos las de Torrents activas, Enter dispara AMBOS
-  // handlers → se abre qBittorrent al elegir un subtítulo.
+  // Cuando cualquier modal (subs sheet o diálogo de subs) está abierto,
+  // sus hotkeys locales toman el control y las de la vista se desactivan
+  // para no disparar handlers dobles.
   useHotkeys(hotkeys, [current, stream, pendingSubPath, backTo], {
-    enabled: !subsOpen,
+    enabled: !subsOpen && !askSubsOpen,
   })
 
   const label = result?.title
@@ -281,7 +305,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
                   onClick={() => setSel(i)}
                   onDoubleClick={() => {
                     setSel(i)
-                    goMagnet()
+                    startStreamFlow()
                   }}
                 />
               ))}
@@ -314,6 +338,15 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
           loading={subsLoading}
           onPick={chooseSub}
           onClose={() => setSubsOpen(false)}
+        />
+      )}
+
+      {askSubsOpen && (
+        <AskSubsDialog
+          title={current?.title ?? ''}
+          onYes={confirmStreamWithSubs}
+          onNo={confirmStreamWithoutSubs}
+          onClose={() => setAskSubsOpen(false)}
         />
       )}
     </div>
