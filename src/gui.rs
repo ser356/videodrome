@@ -17,7 +17,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
@@ -104,12 +104,13 @@ pub struct AppState {
     search_cache: Arc<Mutex<HashMap<String, CachedSearch>>>,
 }
 
-/// Un stream vivo + el flag que se pone en `false` cuando VLC termina.
+/// Un stream vivo + el handle del reproductor externo. Guardamos el
+/// `PlayerHandle` entero (no solo el flag `alive`) para poder cerrar
+/// VLC activamente desde `stop_stream` — pulsar "Detener" en la UI
+/// siempre debe cerrar VLC, no solo parar la descarga.
 struct ActiveStream {
     handle: StreamHandle,
-    /// Flag compartido con la tarea que espera al proceso VLC. Cuando el
-    /// player muere se pone en `false` y `stream_stats` limpia el slot.
-    alive: Arc<AtomicBool>,
+    player: stream::PlayerHandle,
 }
 
 /// Progress no-op: la GUI no necesita ver las etapas por ahora.
@@ -337,13 +338,17 @@ struct MovieHit {
 // ---------- Torrents ----------
 
 /// Datos enriquecidos que la GUI muestra sobre la película en la vista de
-/// torrents (título original + IMDb + idioma) además de la lista.
+/// torrents (título original + IMDb + idioma + runtime) además de la lista.
 #[derive(Serialize)]
 struct TorrentSearchResult {
     title: String,
     imdb_id: Option<String>,
     original_language: Option<String>,
     year: Option<u16>,
+    /// Duración en minutos según TMDB, usada para convertir la fracción
+    /// del resume a segundos (`--start-time` de VLC). `None` cuando no
+    /// venimos de TMDB o TMDB no la expone.
+    runtime_minutes: Option<u32>,
     results: Vec<TorrentDto>,
 }
 
@@ -402,7 +407,7 @@ async fn search_torrents_by_tmdb(
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
     let tmdb = TmdbClient::new(&state.http, &bearer);
     let details = tmdb.get_movie_details(tmdb_id).await.ok().flatten();
-    let (title, russian_title, year, imdb_id, original_language) = match details {
+    let (title, russian_title, year, imdb_id, original_language, runtime) = match details {
         Some(d) => (
             d.original_title
                 .or(d.fallback_title)
@@ -411,8 +416,9 @@ async fn search_torrents_by_tmdb(
             d.year.or(fallback_year),
             d.imdb_id,
             d.original_language,
+            d.runtime,
         ),
-        None => (fallback_title.clone(), None, fallback_year, None, None),
+        None => (fallback_title.clone(), None, fallback_year, None, None, None),
     };
 
     let providers = torrents::default_providers();
@@ -452,6 +458,7 @@ async fn search_torrents_by_tmdb(
         imdb_id,
         original_language: original_language.clone(),
         year,
+        runtime_minutes: runtime,
         results: list
             .into_iter()
             .map(|t| TorrentDto::from_torrent(t, original_language.as_deref()))
@@ -482,6 +489,7 @@ async fn search_torrents_direct(
         imdb_id: None,
         original_language: None,
         year,
+        runtime_minutes: None,
         results: list
             .into_iter()
             .map(|t| TorrentDto::from_torrent(t, None))
@@ -513,24 +521,29 @@ struct StreamInfo {
 
 #[tauri::command]
 async fn start_stream(magnet: String, state: State<'_, AppState>) -> Result<StreamInfo, String> {
-    start_stream_inner(magnet, None, &state).await
+    start_stream_inner(magnet, None, None, &state).await
 }
 
 /// Como `start_stream`, pero pasando explícitamente un path de subtítulo
-/// para VLC. Único camino usado por la GUI actual (el diálogo previo
-/// pregunta si cargar subs y ya descarga antes de arrancar).
+/// para VLC y — opcionalmente — la posición inicial en segundos para
+/// reanudar desde donde el user lo dejó. Único camino usado por la GUI
+/// actual (el diálogo previo pregunta si cargar subs y ya descarga
+/// antes de arrancar, y el prompt de resume calcula los segundos con
+/// el runtime de TMDB).
 #[tauri::command]
 async fn start_stream_with_sub(
     magnet: String,
     sub_path: Option<String>,
+    resume_seconds: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<StreamInfo, String> {
-    start_stream_inner(magnet, sub_path.map(PathBuf::from), &state).await
+    start_stream_inner(magnet, sub_path.map(PathBuf::from), resume_seconds, &state).await
 }
 
 async fn start_stream_inner(
     magnet: String,
     sub_path: Option<PathBuf>,
+    resume_seconds: Option<u32>,
     state: &State<'_, AppState>,
 ) -> Result<StreamInfo, String> {
     let handle = stream::start(magnet).await.map_err(|e| e.to_string())?;
@@ -546,15 +559,16 @@ async fn start_stream_inner(
         file_name: handle.file_name.clone(),
     };
 
-    // Guardamos el AtomicBool de vida del player para que `stream_stats`
-    // pueda reflejar el estado real y limpiar el slot cuando VLC muere.
-    let alive = stream::open_in_vlc(&handle.url, sub_path.as_deref());
+    // Guardamos el PlayerHandle entero: `alive` para reflejar el
+    // estado en `stream_stats` y `kill_token` para que `stop_stream`
+    // cierre VLC activamente cuando el user pulse "Detener".
+    let player = stream::open_in_vlc(&handle.url, sub_path.as_deref(), resume_seconds);
 
     state
         .streams
         .lock()
         .await
-        .insert(id, ActiveStream { handle, alive });
+        .insert(id, ActiveStream { handle, player });
     Ok(info)
 }
 
@@ -573,7 +587,7 @@ async fn stream_stats(id: u64, state: State<'_, AppState>) -> Result<StreamStats
     let active = streams
         .get(&id)
         .ok_or_else(|| format!("stream {id} no encontrado"))?;
-    let alive = active.alive.load(Ordering::Relaxed);
+    let alive = active.player.alive.load(Ordering::Relaxed);
     let StreamStats {
         progress_bytes,
         total_bytes,
@@ -599,8 +613,37 @@ async fn stream_stats(id: u64, state: State<'_, AppState>) -> Result<StreamStats
 
 #[tauri::command]
 async fn stop_stream(id: u64, state: State<'_, AppState>) -> Result<(), String> {
-    state.streams.lock().await.remove(&id);
+    // Pulsar "Detener" en la UI SIEMPRE cierra VLC: sin esto quedaba
+    // VLC vivo (macOS lo lanza vía LaunchServices, no como hijo
+    // directo) y el user tenía que ir a cerrarlo a mano. `kill()`
+    // dispara el `CancellationToken` que la tarea de espera del
+    // PlayerHandle usa para invocar el quit nativo por SO.
+    if let Some(active) = state.streams.lock().await.remove(&id) {
+        active.player.kill();
+    }
     Ok(())
+}
+
+/// Devuelve la posición de resume guardada para un magnet, si la caché
+/// tiene una entrada para su infohash. `fraction` en [0.0, 1.0] es la
+/// relación `max_seek_bytes / file_len` alcanzada en la sesión previa.
+/// El frontend la convierte a segundos con el runtime de TMDB y decide
+/// si mostrar el prompt de "Reanudar".
+#[derive(Serialize)]
+struct ResumeDto {
+    fraction: f32,
+    updated_at: u64,
+}
+
+#[tauri::command]
+async fn get_resume(magnet: String) -> Result<Option<ResumeDto>, String> {
+    let Some(hash) = stream::parse_infohash(&magnet) else {
+        return Ok(None);
+    };
+    Ok(stream::load_resume(&hash).map(|r| ResumeDto {
+        fraction: r.fraction,
+        updated_at: r.updated_at,
+    }))
 }
 
 // ---------- Subtítulos ----------
@@ -672,7 +715,7 @@ fn cache_files() -> Vec<(&'static str, &'static str, &'static str)> {
 #[tauri::command]
 async fn cache_info() -> Result<Vec<CacheEntry>, String> {
     let dir = config_dir().map_err(|e| e.to_string())?;
-    Ok(cache_files()
+    let mut out: Vec<CacheEntry> = cache_files()
         .into_iter()
         .map(|(kind, label, file)| {
             let path = dir.join(file);
@@ -697,32 +740,65 @@ async fn cache_info() -> Result<Vec<CacheEntry>, String> {
                 modified_at,
             }
         })
-        .collect())
+        .collect();
+
+    // Entrada virtual para la caché de streams: agrega tamaño de todas
+    // las carpetas `<hash>/`. El path apunta al directorio raíz para que
+    // el user lo pueda inspeccionar (es donde el prune actúa).
+    let streams_root = stream::cache_dir().map_err(|e| e.to_string())?;
+    let streams_size = stream::total_size();
+    let streams_modified = std::fs::metadata(&streams_root)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let streams_exists = streams_size > 0;
+    out.push(CacheEntry {
+        kind: "streams",
+        label: "Streams (piezas de BitTorrent)",
+        path: streams_root.display().to_string(),
+        exists: streams_exists,
+        size_bytes: streams_size,
+        modified_at: streams_modified,
+    });
+
+    Ok(out)
 }
 
 /// Borra uno o todos los ficheros de caché. `kind = "all"` los borra
-/// todos de golpe. Nunca borra `token.json` — la sesión se cierra con
-/// `logout`, no aquí.
+/// todos de golpe. El kind `"streams"` es especial: barre el
+/// directorio persistente de streams (`~/.cache/videodrome/streams/`)
+/// que usa librqbit para reanudar bajadas entre sesiones. Nunca borra
+/// `token.json` — la sesión se cierra con `logout`, no aquí.
 #[tauri::command]
 async fn clear_cache(kind: String, state: State<'_, AppState>) -> Result<(), String> {
     let dir = config_dir().map_err(|e| e.to_string())?;
     let known = cache_files();
-    let to_delete: Vec<&'static str> = if kind == "all" {
-        known.iter().map(|(_, _, f)| *f).collect()
-    } else {
-        known
-            .iter()
-            .find(|(k, _, _)| *k == kind)
-            .map(|(_, _, f)| vec![*f])
-            .ok_or_else(|| format!("caché desconocida: {kind}"))?
+
+    let (files_to_delete, wipe_streams): (Vec<&'static str>, bool) = match kind.as_str() {
+        "all" => (known.iter().map(|(_, _, f)| *f).collect(), true),
+        "streams" => (vec![], true),
+        other => {
+            let f = known
+                .iter()
+                .find(|(k, _, _)| *k == other)
+                .map(|(_, _, f)| *f)
+                .ok_or_else(|| format!("caché desconocida: {other}"))?;
+            (vec![f], false)
+        }
     };
 
-    for file in to_delete {
+    for file in files_to_delete {
         let path = dir.join(file);
         if path.exists() {
             std::fs::remove_file(&path)
                 .map_err(|e| format!("Error al borrar {}: {e}", path.display()))?;
         }
+    }
+
+    if wipe_streams {
+        stream::clear_all().map_err(|e| e.to_string())?;
     }
 
     // El cache de búsqueda vive también en memoria: si lo borramos del
@@ -754,6 +830,17 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
         next_stream_id: Arc::new(Mutex::new(0)),
         search_cache: Arc::new(Mutex::new(load_search_cache())),
     };
+
+    // Prune de la caché de streams al arrancar, en un hilo aparte para
+    // no bloquear el splash: si el user tiene 40 GB de pelis viejas,
+    // los `remove_dir_all` se pueden llevar unos segundos. El TTL se
+    // lee de Preferences (default 7 días); un TTL de 0 se trata como 1
+    // día dentro de `stream::prune` para evitar recoger entradas que
+    // el drop de un StreamHandle acaba de tocar.
+    std::thread::spawn(|| {
+        let prefs = preferences::load();
+        let _ = stream::prune(prefs.stream_cache_ttl_days);
+    });
 
     tauri::Builder::default()
         // Single-instance: si el usuario hace doble click en el atajo del
@@ -794,6 +881,7 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             start_stream_with_sub,
             stream_stats,
             stop_stream,
+            get_resume,
             subtitles_available,
             search_subtitles,
             download_subtitle,

@@ -249,11 +249,13 @@ function PreferencesEditor({
   const [rating, setRating] = useState(prefs.default_min_rating)
   const [count, setCount] = useState(prefs.default_count)
   const [langs, setLangs] = useState(prefs.subtitle_languages)
+  const [ttl, setTtl] = useState(prefs.stream_cache_ttl_days)
 
   const dirty =
     rating !== prefs.default_min_rating ||
     count !== prefs.default_count ||
-    langs.trim() !== prefs.subtitle_languages.trim()
+    langs.trim() !== prefs.subtitle_languages.trim() ||
+    ttl !== prefs.stream_cache_ttl_days
 
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -300,6 +302,21 @@ function PreferencesEditor({
         />
       </Field>
 
+      <Field
+        label="TTL caché de streams (días)"
+        hint="Purga al arrancar: pelis no reproducidas en N días se borran del disco. Entre 1 y 365."
+      >
+        <input
+          type="number"
+          min={1}
+          max={365}
+          step={1}
+          value={ttl}
+          onChange={(e) => setTtl(Math.max(1, Number(e.target.value) || 1))}
+          className="focus-ring h-10 w-full rounded-md border border-hairline bg-surface px-3 text-[14px] text-ink"
+        />
+      </Field>
+
       <div className="flex items-end justify-end sm:col-span-2">
         <button
           disabled={!dirty || saving}
@@ -308,6 +325,7 @@ function PreferencesEditor({
               default_min_rating: rating,
               default_count: count,
               subtitle_languages: langs.trim(),
+              stream_cache_ttl_days: ttl,
             })
           }
           className="focus-ring h-10 rounded-full bg-accent px-5 text-[13px] font-semibold text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-accent-disabled"

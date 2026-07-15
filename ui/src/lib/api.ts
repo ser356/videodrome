@@ -61,6 +61,10 @@ export interface TorrentSearchResult {
   imdb_id: string | null
   original_language: string | null
   year: number | null
+  /** Duración TMDB en minutos; se usa para calcular los segundos de
+   * `--start-time` cuando el user acepta reanudar. `null` en búsquedas
+   * directas (sin TMDB) o si TMDB no lo expone. */
+  runtime_minutes: number | null
   results: Torrent[]
 }
 
@@ -135,13 +139,31 @@ export const openMagnet = (magnet: string) =>
 
 // -------- Streaming --------
 
-export const startStreamWithSub = (magnet: string, subPath: string | null) =>
-  invoke<StreamInfo>('start_stream_with_sub', { magnet, subPath })
+export const startStreamWithSub = (
+  magnet: string,
+  subPath: string | null,
+  resumeSeconds: number | null = null,
+) =>
+  invoke<StreamInfo>('start_stream_with_sub', {
+    magnet,
+    subPath,
+    resumeSeconds,
+  })
 
 export const streamStats = (id: number) =>
   invoke<StreamStats>('stream_stats', { id })
 
 export const stopStream = (id: number) => invoke<void>('stop_stream', { id })
+
+/** Estado de resume persistido para un magnet, si su infohash tiene
+ * caché. `fraction` en [0, 1]. */
+export interface Resume {
+  fraction: number
+  updated_at: number
+}
+
+export const getResume = (magnet: string) =>
+  invoke<Resume | null>('get_resume', { magnet })
 
 // -------- Subtitles --------
 
@@ -165,7 +187,7 @@ export const downloadSubtitle = (sub: Subtitle) =>
 // -------- Ajustes: caché + preferencias --------
 
 export interface CacheEntry {
-  kind: 'log_entries' | 'watchlist' | 'tmdb_recs' | 'search'
+  kind: 'log_entries' | 'watchlist' | 'tmdb_recs' | 'search' | 'streams'
   label: string
   path: string
   exists: boolean
@@ -177,6 +199,8 @@ export interface Preferences {
   default_min_rating: number
   default_count: number
   subtitle_languages: string
+  /** TTL de la caché de streams en días (auto-prune al arrancar). */
+  stream_cache_ttl_days: number
 }
 
 export const cacheInfo = () => invoke<CacheEntry[]>('cache_info')

@@ -260,6 +260,8 @@ impl<'a> TmdbClient<'a> {
             #[serde(default)]
             original_language: Option<String>,
             #[serde(default)]
+            runtime: Option<u32>,
+            #[serde(default)]
             external_ids: Option<ExternalIdsNested>,
             #[serde(default)]
             translations: Option<TranslationsNested>,
@@ -330,6 +332,7 @@ impl<'a> TmdbClient<'a> {
             russian_title,
             original_language: body.original_language.filter(|s| !s.is_empty()),
             year,
+            runtime: body.runtime.filter(|r| *r > 0),
         }))
     }
 
@@ -435,4 +438,8 @@ pub struct MovieDetails {
     /// Idioma original de la película (ISO 639-1: `"en"`, `"es"`, ...).
     pub original_language: Option<String>,
     pub year: Option<u16>,
+    /// Runtime en minutos (para calcular resume-seconds desde una
+    /// fracción de bytes). `None` cuando TMDB no lo expone o es 0.
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub runtime: Option<u32>,
 }

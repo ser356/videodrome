@@ -432,12 +432,14 @@ async fn run_app(
                     }
                     StreamEvent::Ready(handle) => {
                         // Auto-abre VLC apuntando a la URL del stream. El
-                        // Arc<AtomicBool> que devuelve se pone false cuando
-                        // VLC termina → así detectamos el cierre del
-                        // reproductor y liberamos el stream automáticamente.
-                        // Si hay sub descargado, se pasa como --sub-file.
-                        let alive =
-                            crate::stream::open_in_vlc(&handle.url, app.sub_path.as_deref());
+                        // El PlayerHandle contiene el flag `alive` que
+                        // se pone a false cuando VLC termina — así
+                        // detectamos el cierre del reproductor y
+                        // liberamos el stream automáticamente. En TUI
+                        // solo nos interesa el flag; el `kill_token` no
+                        // se usa (no hay botón "Detener").
+                        let player =
+                            crate::stream::open_in_vlc(&handle.url, app.sub_path.as_deref(), None);
                         let sub_note = app
                             .sub_release
                             .as_deref()
@@ -451,7 +453,7 @@ async fn run_app(
                         // abiertos (Drop apaga el server + limpia el
                         // tempdir).
                         app.stream = Some(*handle);
-                        app.stream_player_alive = Some(alive);
+                        app.stream_player_alive = Some(player.alive);
                     }
                     StreamEvent::Failed(e) => {
                         app.stream_msg = Some(format!("❌ Stream: {e}"));

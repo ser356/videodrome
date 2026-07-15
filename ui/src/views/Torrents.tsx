@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { AskSubsDialog } from '../components/AskSubsDialog'
 import { HotkeyBar } from '../components/HotkeyBar'
+import { ResumeDialog } from '../components/ResumeDialog'
 import { StreamPanel } from '../components/StreamPanel'
 import { SubsSheet } from '../components/SubsSheet'
 import { TopNav } from '../components/TopNav'
@@ -9,6 +10,7 @@ import {
   audioFlag,
   downloadSubtitle,
   formatSize,
+  getResume,
   isTauri,
   openMagnet,
   searchSubtitles,
@@ -16,6 +18,7 @@ import {
   searchTorrentsDirect,
   startStreamWithSub,
   stopStream,
+  type Resume,
   type StreamInfo,
   type Subtitle,
   type Torrent,
@@ -53,6 +56,16 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   const [subsLoading, setSubsLoading] = useState(false)
   const [subs, setSubs] = useState<Subtitle[]>([])
   const [pendingSubPath, setPendingSubPath] = useState<string | null>(null)
+
+  // Resume state: se pregunta ANTES del stream cuando la caché tiene
+  // una posición previa reproducible (fraction en 2%–95% y runtime
+  // conocido).
+  const [resumePrompt, setResumePrompt] = useState<{
+    fraction: number
+    seconds: number
+    subPath: string | null
+    subRelease: string | null
+  } | null>(null)
 
   // Panel toggle: false = stream progress, true = magnet raw text
   const [showMagnet, setShowMagnet] = useState(false)
@@ -121,6 +134,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   const goStream = async (
     subPath: string | null = null,
     subRelease: string | null = null,
+    resumeSeconds: number | null = null,
   ) => {
     if (!current) return
     setStreamMsg(`Iniciando stream: ${current.title}…`)
@@ -129,13 +143,50 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
       setStream(null)
     }
     try {
-      const info = await startStreamWithSub(current.magnet, subPath)
+      const info = await startStreamWithSub(current.magnet, subPath, resumeSeconds)
       setStream(info)
       const subNote = subRelease ? `  ·  sub: ${subRelease}` : ''
-      setStreamMsg(`Streaming ${info.file_name}${subNote}`)
+      const resumeNote = resumeSeconds
+        ? `  ·  reanudado en ${formatMinutes(resumeSeconds)}`
+        : ''
+      setStreamMsg(`Streaming ${info.file_name}${subNote}${resumeNote}`)
     } catch (e) {
       setStreamMsg(`Error stream: ${String(e)}`)
     }
+  }
+
+  /**
+   * Antes de arrancar el stream, consulta la caché a ver si hay un
+   * resume guardado para este magnet. Si la fracción está en el rango
+   * "útil" (2%–95%) y conocemos el runtime de TMDB (solo modo `tmdb`),
+   * abrimos el ResumeDialog en lugar de arrancar directo — el usuario
+   * decide reanudar o empezar de cero. Sin runtime no podemos convertir
+   * bytes→segundos, así que empezamos siempre desde el principio.
+   */
+  const maybePromptResume = async (
+    subPath: string | null,
+    subRelease: string | null,
+  ) => {
+    if (!current) return
+    if (result?.runtime_minutes) {
+      try {
+        const r: Resume | null = await getResume(current.magnet)
+        if (r && r.fraction > 0.02 && r.fraction < 0.95) {
+          const seconds = Math.round(r.fraction * result.runtime_minutes * 60)
+          setResumePrompt({
+            fraction: r.fraction,
+            seconds,
+            subPath,
+            subRelease,
+          })
+          return
+        }
+      } catch {
+        // Si el backend falla leyendo el resume, fallback a empezar
+        // desde el principio en lugar de bloquear al user.
+      }
+    }
+    await goStream(subPath, subRelease, null)
   }
 
   // Enter en la lista de torrents: preguntar por subs antes de streamear.
@@ -153,7 +204,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   const confirmStreamWithoutSubs = async () => {
     setAskSubsOpen(false)
     setPendingSubPath(null)
-    await goStream(null, null)
+    await maybePromptResume(null, null)
   }
 
   const openSubs = async () => {
@@ -181,7 +232,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
       setSubsOpen(false)
       // Encadenar con el stream: el usuario ya confirmó "con subs" en
       // el diálogo previo, no hay que volver a pedir Enter.
-      await goStream(path, release)
+      await maybePromptResume(path, release)
     } catch (e) {
       setStreamMsg(`Error descargando sub: ${String(e)}`)
     } finally {
@@ -221,11 +272,11 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     { key: 'b', hint: '', run: goBack },
     { key: 'Escape', hint: 'Volver', run: goBack },
   ]
-  // Cuando cualquier modal (subs sheet o diálogo de subs) está abierto,
-  // sus hotkeys locales toman el control y las de la vista se desactivan
-  // para no disparar handlers dobles.
+  // Cuando cualquier modal (subs sheet, diálogo de subs o el prompt de
+  // resume) está abierto, sus hotkeys locales toman el control y las de
+  // la vista se desactivan para no disparar handlers dobles.
   useHotkeys(hotkeys, [current, stream, pendingSubPath, backTo], {
-    enabled: !subsOpen && !askSubsOpen,
+    enabled: !subsOpen && !askSubsOpen && !resumePrompt,
   })
 
   const label = result?.title
@@ -359,6 +410,24 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
           onClose={() => setAskSubsOpen(false)}
         />
       )}
+
+      {resumePrompt && (
+        <ResumeDialog
+          fraction={resumePrompt.fraction}
+          seconds={resumePrompt.seconds}
+          onResume={async () => {
+            const p = resumePrompt
+            setResumePrompt(null)
+            await goStream(p.subPath, p.subRelease, p.seconds)
+          }}
+          onRestart={async () => {
+            const p = resumePrompt
+            setResumePrompt(null)
+            await goStream(p.subPath, p.subRelease, null)
+          }}
+          onClose={() => setResumePrompt(null)}
+        />
+      )}
     </div>
   )
 }
@@ -409,4 +478,17 @@ const TorrentRow = ({
       <span className="text-[11px] text-dim">{t.source}</span>
     </li>
   )
+}
+
+/** Formatea segundos como `MM:SS` o `H:MM:SS` — usado en el toast de
+ * "streaming reanudado en …". Deliberadamente duplicado de
+ * `ResumeDialog.formatHms` para no crear un módulo utils compartido
+ * solo por dos usos. */
+function formatMinutes(total: number): string {
+  const s = Math.max(0, Math.floor(total))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`
 }

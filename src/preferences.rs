@@ -33,6 +33,13 @@ pub struct Preferences {
     /// OpenSubtitles como parámetro `languages`.
     #[serde(default = "default_subtitle_languages")]
     pub subtitle_languages: String,
+    /// Días que se conserva la caché de streams antes de purgarse
+    /// automáticamente al arrancar la GUI. Cada entrada guarda el
+    /// mtime de un fichero `.last_used` dentro de `<hash>/` que se
+    /// toca al iniciar/terminar el stream; si excede el TTL se borra
+    /// el directorio entero. Rango efectivo 1–365; 0 se trata como 1.
+    #[serde(default = "default_stream_cache_ttl_days")]
+    pub stream_cache_ttl_days: u32,
 }
 
 fn default_min_rating() -> f32 {
@@ -44,6 +51,9 @@ fn default_count() -> usize {
 fn default_subtitle_languages() -> String {
     crate::subtitles::DEFAULT_LANGUAGES.to_string()
 }
+fn default_stream_cache_ttl_days() -> u32 {
+    7
+}
 
 impl Default for Preferences {
     fn default() -> Self {
@@ -51,6 +61,7 @@ impl Default for Preferences {
             default_min_rating: default_min_rating(),
             default_count: default_count(),
             subtitle_languages: default_subtitle_languages(),
+            stream_cache_ttl_days: default_stream_cache_ttl_days(),
         }
     }
 }
