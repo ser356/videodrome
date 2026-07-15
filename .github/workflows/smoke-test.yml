@@ -50,7 +50,8 @@ jobs:
     steps:
       - name: Añadir tap
         run: brew tap ser356/cask https://github.com/ser356/homebrew-cask
-
+      - name: Trust Tap
+        run: brew trust ser356/cask
       - name: Instalar videodrome
         run: brew install --cask videodrome
 
