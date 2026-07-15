@@ -124,8 +124,7 @@ impl Drop for StreamHandle {
         if let Some(hash) = self.infohash.as_deref() {
             let max = self.max_seek.load(Ordering::Relaxed);
             if self.file_len > 0 {
-                let fraction =
-                    (max as f32 / self.file_len as f32).clamp(0.0, 1.0);
+                let fraction = (max as f32 / self.file_len as f32).clamp(0.0, 1.0);
                 let resume = Resume {
                     fraction,
                     updated_at: now_unix(),
@@ -750,8 +749,7 @@ pub fn cache_dir() -> Result<PathBuf> {
         .context("No se puede obtener el directorio de caché del sistema")?
         .join("videodrome")
         .join("streams");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("No se pudo crear {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("No se pudo crear {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -768,8 +766,7 @@ pub fn parse_infohash(magnet: &str) -> Option<String> {
         };
         let hash = v.to_ascii_lowercase();
         let is_hex40 = hash.len() == 40 && hash.chars().all(|c| c.is_ascii_hexdigit());
-        let is_b32 =
-            hash.len() == 32 && hash.chars().all(|c| c.is_ascii_alphanumeric());
+        let is_b32 = hash.len() == 32 && hash.chars().all(|c| c.is_ascii_alphanumeric());
         if is_hex40 || is_b32 {
             return Some(hash);
         }

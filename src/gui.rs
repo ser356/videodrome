@@ -418,7 +418,14 @@ async fn search_torrents_by_tmdb(
             d.original_language,
             d.runtime,
         ),
-        None => (fallback_title.clone(), None, fallback_year, None, None, None),
+        None => (
+            fallback_title.clone(),
+            None,
+            fallback_year,
+            None,
+            None,
+            None,
+        ),
     };
 
     let providers = torrents::default_providers();
