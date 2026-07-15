@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Pre-commit: rustfmt check on staged Rust files.
+# Fail fast so CI's `cargo fmt --all --check` never bites us.
+set -euo pipefail
+
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
+if [ -z "$staged_rs" ]; then
+  exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo not found, skipping fmt check" >&2
+  exit 0
+fi
+
+if ! cargo fmt --all -- --check >/dev/null 2>&1; then
+  echo "pre-commit: cargo fmt --check failed." >&2
+  echo "            Run 'cargo fmt --all' and stage the changes." >&2
+  exit 1
+fi
