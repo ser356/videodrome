@@ -56,6 +56,7 @@ export function Home() {
     { key: 'k', hint: 'subir', run: () => setI((x) => Math.max(x - 1, 0)) },
     { key: 'ArrowUp', hint: '', run: () => setI((x) => Math.max(x - 1, 0)) },
     { key: 'Enter', hint: 'seleccionar', run: () => go(OPTIONS[i]) },
+    { key: ',', hint: 'Ajustes', run: () => nav('/settings') },
   ]
   useHotkeys(hotkeys, [i, loggedIn])
 
@@ -79,6 +80,13 @@ export function Home() {
             Iniciar sesión
           </button>
         )}
+        <button
+          onClick={() => nav('/settings')}
+          className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-[13px] text-body hover:border-border-strong"
+          title="Ajustes (,)"
+        >
+          Ajustes
+        </button>
       </TopNav>
 
       <main className="mx-auto flex w-full max-w-[720px] flex-1 flex-col justify-center px-8">

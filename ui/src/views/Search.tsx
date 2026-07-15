@@ -33,7 +33,7 @@ export function Search() {
           onSubmit={(e) => {
             e.preventDefault()
             const q = new FormData(e.currentTarget).get('q')?.toString().trim()
-            if (q) nav(`/torrents/search?q=${encodeURIComponent(q)}`)
+            if (q) nav(`/search/results?q=${encodeURIComponent(q)}`)
           }}
           className="flex gap-2"
         >

@@ -8,6 +8,7 @@ import { SearchBox } from '../components/SearchBox'
 import { Toast } from '../components/Toast'
 import { TopNav } from '../components/TopNav'
 import {
+  getPreferences,
   getRecommendations,
   isTauri,
   tmdbPoster,
@@ -54,7 +55,48 @@ export function Recommendations() {
   }, [count, minRating])
 
   useEffect(() => {
-    fetchRecs()
+    // Al montar, leemos las preferencias guardadas y disparamos la
+    // primera búsqueda con esos valores. Si el user no ha tocado nunca
+    // ajustes, `getPreferences` devuelve los defaults sensatos (4.0 /
+    // 20). No pasamos por `fetchRecs` porque su closure aún vería los
+    // valores hardcoded del `useState` antes de que React aplique los
+    // setters — llamamos directo a `getRecommendations` con los valores
+    // frescos.
+    if (!isTauri()) {
+      setError('Esta vista requiere la app de escritorio (Tauri).')
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      let c = count
+      let r = minRating
+      try {
+        const p = await getPreferences()
+        c = p.default_count
+        r = p.default_min_rating
+      } catch {
+        // preferencias corruptas o backend down: seguimos con defaults
+      }
+      if (cancelled) return
+      setCount(c)
+      setMinRating(r)
+      setLoading(true)
+      setError(null)
+      setStale(false)
+      try {
+        const list = await getRecommendations(c, r)
+        if (cancelled) return
+        setItems(list)
+        setSel(0)
+      } catch (e) {
+        if (!cancelled) setError(String(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

@@ -192,6 +192,36 @@ impl<'a> TmdbClient<'a> {
         }))
     }
 
+    /// Busca películas por texto libre en TMDB (`/search/movie`). Usado en la
+    /// GUI para mostrar una pantalla intermedia con posters cuando el user
+    /// teclea una query imprecisa, antes de disparar la búsqueda de
+    /// torrents. Ordenado por popularidad tal cual lo devuelve TMDB.
+    pub async fn search_movies(&self, query: &str) -> Result<Vec<TmdbMovie>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(vec![]);
+        }
+        let url = format!(
+            "{BASE_URL}/search/movie?query={}&language=es-ES&include_adult=false&page=1",
+            urlencoding::encode(q)
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.bearer_token)
+            .send()
+            .await
+            .with_context(|| format!("Error al llamar a TMDB /search/movie para '{q}'"))?;
+        if !resp.status().is_success() {
+            return Ok(vec![]);
+        }
+        let body: RecommendationsResponse = resp
+            .json()
+            .await
+            .context("Error al parsear respuesta de TMDB /search/movie")?;
+        Ok(body.results)
+    }
+
     /// Consulta `/movie/{tmdb_id}?append_to_response=external_ids,translations`
     /// para obtener en una sola llamada:
     /// * `imdb_id` — imprescindible para providers Torznab que lo aceptan.

@@ -58,15 +58,18 @@ function matchesKey(e: KeyboardEvent, spec: string): boolean {
   return e.key.toLowerCase() === spec.toLowerCase()
 }
 
-/** Nav keys (arrows, Escape, Enter) fire even when a text input has focus,
- * because those are how the user submits or bails from the input itself. */
+/** Nav keys (arrows, Escape) fire even when a text input has focus,
+ * because those are how the user bails from the input itself.
+ * Enter NO se incluye a propósito: dentro de un `<input>` pertenece al
+ * `onSubmit` del formulario que lo contiene (p. ej. SearchBox). Si lo
+ * tratáramos como nav-key, la hotkey global de la vista (Recs: "Enter →
+ * Detalle") se comería el submit y abriría el modal en vez de buscar. */
 function isNavKey(spec: string): boolean {
   return (
     spec === 'ArrowUp' ||
     spec === 'ArrowDown' ||
     spec === 'ArrowLeft' ||
     spec === 'ArrowRight' ||
-    spec === 'Escape' ||
-    spec === 'Enter'
+    spec === 'Escape'
   )
 }

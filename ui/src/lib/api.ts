@@ -120,6 +120,16 @@ export const searchTorrentsByTmdb = (
 export const searchTorrentsDirect = (query: string) =>
   invoke<TorrentSearchResult>('search_torrents_direct', { query })
 
+/** Hit de TMDB anotado con el número de torrents disponibles. Los hits
+ * sin torrents se filtran en el backend, así que aquí todos tienen
+ * `torrent_count >= 1`. */
+export interface MovieHit extends Movie {
+  torrent_count: number
+}
+
+export const searchMoviesTmdb = (query: string) =>
+  invoke<MovieHit[]>('search_movies_tmdb', { query })
+
 export const openMagnet = (magnet: string) =>
   invoke<void>('open_magnet', { magnet })
 
@@ -151,6 +161,30 @@ export const searchSubtitles = (
 
 export const downloadSubtitle = (sub: Subtitle) =>
   invoke<string>('download_subtitle', { sub, streamId: null })
+
+// -------- Ajustes: caché + preferencias --------
+
+export interface CacheEntry {
+  kind: 'log_entries' | 'watchlist' | 'tmdb_recs' | 'search'
+  label: string
+  path: string
+  exists: boolean
+  size_bytes: number
+  modified_at: number
+}
+
+export interface Preferences {
+  default_min_rating: number
+  default_count: number
+  subtitle_languages: string
+}
+
+export const cacheInfo = () => invoke<CacheEntry[]>('cache_info')
+export const clearCache = (kind: CacheEntry['kind'] | 'all') =>
+  invoke<void>('clear_cache', { kind })
+export const getPreferences = () => invoke<Preferences>('get_preferences')
+export const setPreferences = (prefs: Preferences) =>
+  invoke<void>('set_preferences', { prefs })
 
 // -------- Helpers --------
 

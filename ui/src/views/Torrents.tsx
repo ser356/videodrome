@@ -171,6 +171,15 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   }
 
   const backTo = mode === 'tmdb' ? '/recs' : '/search'
+  const goBack = () => {
+    // En modo tmdb el user puede venir de /recs o de /search/results.
+    // history.back respeta ambos flujos sin acoplar la vista al origen.
+    if (mode === 'tmdb' && window.history.length > 1) {
+      nav(-1)
+    } else {
+      nav(backTo)
+    }
+  }
 
   const hotkeys: Hotkey[] = [
     { key: 'j', hint: '', run: () => move(1) },
@@ -185,8 +194,8 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
       hint: 'Panel',
       run: () => setShowMagnet((v) => !v),
     },
-    { key: 'b', hint: '', run: () => nav(backTo) },
-    { key: 'Escape', hint: 'Volver', run: () => nav(backTo) },
+    { key: 'b', hint: '', run: goBack },
+    { key: 'Escape', hint: 'Volver', run: goBack },
   ]
   // Cuando la SubsSheet está abierta, sus hotkeys (Enter, j/k, Esc) toman
   // el control. Si dejamos las de Torrents activas, Enter dispara AMBOS
@@ -202,7 +211,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
       : ''
 
   return (
-    <div className="flex min-h-[100dvh] flex-col bg-canvas">
+    <div className="flex h-[100dvh] flex-col bg-canvas">
       <TopNav>
         {pendingSubPath && (
           <span className="rounded-full border border-good/40 bg-good/10 px-3 py-1 text-[12px] text-good">
@@ -210,14 +219,14 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
           </span>
         )}
         <button
-          onClick={() => nav(backTo)}
+          onClick={goBack}
           className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
         >
           Volver
         </button>
       </TopNav>
 
-      <main className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-6 px-8 py-6">
+      <main className="mx-auto flex h-full min-h-0 w-full max-w-[1400px] flex-1 flex-col gap-4 px-8 py-6">
         <div className="flex items-baseline justify-between">
           <h1 className="text-[20px] font-semibold text-ink">
             🧲 Torrents{' '}
@@ -251,8 +260,8 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
         )}
 
         {torrents.length > 0 && (
-          <div className="overflow-hidden rounded-lg border border-hairline">
-            <div className="grid grid-cols-[3rem_1fr_5rem_4.5rem_4.5rem_4rem_4rem_5rem] items-center gap-x-3 bg-surface px-4 py-2 text-[11px] uppercase tracking-wide text-dim">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-hairline">
+            <div className="grid grid-cols-[3rem_1fr_5rem_4.5rem_4.5rem_4rem_4rem_5rem] items-center gap-x-3 border-b border-hairline bg-surface px-4 py-2 text-[11px] uppercase tracking-wide text-dim">
               <span>#</span>
               <span>Release</span>
               <span className="text-right">Tamaño</span>
@@ -262,7 +271,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
               <span>Audio</span>
               <span>Fuente</span>
             </div>
-            <ul>
+            <ul className="min-h-0 flex-1 overflow-y-auto">
               {torrents.map((t, i) => (
                 <TorrentRow
                   key={t.magnet + i}
@@ -280,19 +289,21 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
           </div>
         )}
 
-        <StreamPanel
-          showMagnet={showMagnet}
-          magnet={current?.magnet}
-          stream={stream}
-          message={streamMsg}
-          onStopStream={async () => {
-            if (stream) {
-              await stopStream(stream.id).catch(() => {})
-              setStream(null)
-              setStreamMsg('Stream detenido.')
-            }
-          }}
-        />
+        <div className="shrink-0">
+          <StreamPanel
+            showMagnet={showMagnet}
+            magnet={current?.magnet}
+            stream={stream}
+            message={streamMsg}
+            onStopStream={async () => {
+              if (stream) {
+                await stopStream(stream.id).catch(() => {})
+                setStream(null)
+                setStreamMsg('Stream detenido.')
+              }
+            }}
+          />
+        </div>
       </main>
 
       <HotkeyBar hotkeys={hotkeys.filter((h) => h.hint)} />

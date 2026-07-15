@@ -48,14 +48,14 @@
 
   <h2>Instalación</h2>
 
-  <h3>macOS · Homebrew Cask</h3>
-<pre><code>brew tap ser356/cask https://github.com/ser356/homebrew-cask
-brew install --cask videodrome</code></pre>
+  <h3>Un solo comando · macOS y Linux</h3>
+<pre><code>curl -fsSL https://ser356.github.io/videodrome/setup.sh | bash</code></pre>
   <small>
-    Copia <code>Videodrome.app</code> a <code>/Applications</code>
-    (aparece en Launchpad) y crea un symlink <code>videodrome</code> en
-    <code>/opt/homebrew/bin</code>. La app no está firmada por Apple —
-    la primera vez ejecuta <code>xattr -cr /Applications/Videodrome.app</code>.
+    Detecta el sistema, instala Homebrew si falta (macOS) o descarga el
+    tarball en <code>~/.local/bin</code> (Linux). En macOS resuelve VLC
+    automáticamente como dependencia del cask; en Linux te recuerda el
+    comando para tu distro. Es un <code>bash</code> normal — descárgalo
+    primero si prefieres inspeccionarlo.
   </small>
 
   <h3>Windows · one-liner (PowerShell)</h3>
@@ -64,6 +64,18 @@ brew install --cask videodrome</code></pre>
     Instala Scoop si falta, añade los buckets necesarios, descarga el
     binario prebuilt (~30 s). Trae VLC como dependencia. Requiere
     PowerShell normal (no Administrador).
+  </small>
+
+  <h2>Instalación manual</h2>
+
+  <h3>macOS · Homebrew Cask</h3>
+<pre><code>brew tap ser356/cask https://github.com/ser356/homebrew-cask
+brew install --cask videodrome</code></pre>
+  <small>
+    Copia <code>Videodrome.app</code> a <code>/Applications</code>
+    (aparece en Launchpad) y crea un symlink <code>videodrome</code> en
+    <code>/opt/homebrew/bin</code>. La app no está firmada por Apple —
+    la primera vez ejecuta <code>xattr -cr /Applications/Videodrome.app</code>.
   </small>
 
   <h3>Linux · tarball</h3>

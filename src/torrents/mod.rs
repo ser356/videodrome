@@ -11,6 +11,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub mod apibay;
 pub mod knaben;
 pub mod torznab;
 pub mod yts;
@@ -154,8 +155,11 @@ fn language_multiplier(hint: AudioHint) -> f64 {
 /// Devuelve los providers habilitados por defecto. Torznab se activa si están
 /// definidas `TORZNAB_URL` y `TORZNAB_APIKEY` en el entorno.
 pub fn default_providers() -> Vec<Arc<dyn TorrentProvider>> {
-    let mut providers: Vec<Arc<dyn TorrentProvider>> =
-        vec![Arc::new(yts::Yts), Arc::new(knaben::Knaben)];
+    let mut providers: Vec<Arc<dyn TorrentProvider>> = vec![
+        Arc::new(yts::Yts),
+        Arc::new(knaben::Knaben),
+        Arc::new(apibay::Apibay),
+    ];
 
     if let (Ok(url), Ok(key)) = (
         std::env::var("TORZNAB_URL"),

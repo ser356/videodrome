@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Subtitle } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
 
@@ -19,10 +19,15 @@ export function SubsSheet({
   onClose: () => void
 }) {
   const [sel, setSel] = useState(0)
+  const rowsRef = useRef<Array<HTMLLIElement | null>>([])
 
   useEffect(() => {
     setSel(0)
   }, [subs])
+
+  useEffect(() => {
+    rowsRef.current[sel]?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [sel])
 
   const move = (delta: number) => {
     if (subs.length === 0) return
@@ -75,6 +80,7 @@ export function SubsSheet({
             {subs.map((sub, i) => (
               <li
                 key={sub.file_id}
+                ref={(el: HTMLLIElement | null) => { rowsRef.current[i] = el }}
                 onClick={() => setSel(i)}
                 onDoubleClick={() => onPick(sub)}
                 className={`flex cursor-pointer items-center gap-3 border-b border-hairline-soft px-5 py-3 transition-colors ${

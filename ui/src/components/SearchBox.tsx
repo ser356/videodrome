@@ -2,9 +2,9 @@ import { MagnifyingGlass } from '@phosphor-icons/react'
 import { useNavigate } from 'react-router-dom'
 
 /**
- * Caja de búsqueda pill (glass), Enter navega a /torrents/search con la
- * query. Es el atajo desde cualquier vista para buscar torrents por
- * título sin pasar por las recomendaciones de Letterboxd.
+ * Caja de búsqueda pill (glass). Enter navega a la pantalla intermedia
+ * `/search/results`, que resuelve la query contra TMDB y muestra posters
+ * para desambiguar antes de saltar a torrents.
  */
 export function SearchBox({ compact = false }: { compact?: boolean }) {
   const nav = useNavigate()
@@ -16,7 +16,7 @@ export function SearchBox({ compact = false }: { compact?: boolean }) {
           .get('q')
           ?.toString()
           .trim()
-        if (q) nav(`/torrents/search?q=${encodeURIComponent(q)}`)
+        if (q) nav(`/search/results?q=${encodeURIComponent(q)}`)
       }}
       className="glass flex items-center gap-2 rounded-full px-3 py-1.5 focus-within:outline focus-within:outline-2 focus-within:outline-accent"
     >

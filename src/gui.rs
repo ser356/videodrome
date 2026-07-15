@@ -12,10 +12,12 @@
 //! - Subtítulos: `search_subtitles`, `download_subtitle`
 
 use anyhow::Context;
-use serde::Serialize;
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use tokio::sync::Mutex;
 
@@ -23,12 +25,67 @@ use crate::auth;
 use crate::config::Config;
 use crate::credentials::{self, Credentials};
 use crate::letterboxd::LetterboxdClient;
+use crate::preferences::{self, Preferences};
 use crate::progress::Progress;
 use crate::recommend::{build_recommendations, Recommendation};
 use crate::stream::{self, StreamHandle, StreamStats};
 use crate::subtitles::{self, Subtitle};
-use crate::tmdb::{MovieView, TmdbClient};
+use crate::tmdb::{MovieView, TmdbClient, TmdbMovie};
 use crate::torrents::{self, AudioHint, MovieQuery, Torrent};
+
+const SEARCH_CACHE_FILE: &str = "search_cache.json";
+const SEARCH_CACHE_TTL_SECS: u64 = 24 * 3600;
+
+/// Entrada del cache de `search_movies_tmdb` (persistido en disco).
+/// La key es la query normalizada (trim + lowercase). El valor es el
+/// resultado final ya filtrado por presencia de torrents — cachear el
+/// resultado enriquecido evita repetir el sondeo caro a los providers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedSearch {
+    timestamp: u64,
+    hits: Vec<MovieHit>,
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("El tiempo no puede ir hacia atrás")
+        .as_secs()
+}
+
+fn config_dir() -> anyhow::Result<PathBuf> {
+    let dir = dirs::config_dir()
+        .context("No se puede obtener el directorio de configuración")?
+        .join("videodrome");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn search_cache_path() -> anyhow::Result<PathBuf> {
+    Ok(config_dir()?.join(SEARCH_CACHE_FILE))
+}
+
+fn load_search_cache() -> HashMap<String, CachedSearch> {
+    let Ok(path) = search_cache_path() else {
+        return HashMap::new();
+    };
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn save_search_cache(cache: &HashMap<String, CachedSearch>) {
+    if let Ok(path) = search_cache_path() {
+        if let Ok(json) = serde_json::to_string(cache) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+}
+
+fn normalize_query(q: &str) -> String {
+    q.trim().to_lowercase()
+}
 
 /// Estado global compartido con los comandos Tauri.
 pub struct AppState {
@@ -41,6 +98,9 @@ pub struct AppState {
     /// Subs descargados para pasarlos a VLC (`--sub-file=…`) al lanzar el
     /// stream. Indexado por `stream_id`.
     pending_subs: Arc<Mutex<HashMap<u64, PathBuf>>>,
+    /// Caché en memoria (y persistida) de `search_movies_tmdb`. Evita
+    /// repetir el sondeo a providers cuando el user repite una búsqueda.
+    search_cache: Arc<Mutex<HashMap<String, CachedSearch>>>,
 }
 
 /// Progress no-op: la GUI no necesita ver las etapas por ahora.
@@ -135,6 +195,110 @@ async fn get_movie_view(
     tmdb.get_movie_view(tmdb_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Búsqueda TMDB por texto libre. Alimenta la pantalla intermedia de la
+/// GUI: el user teclea "matrix" y ve posters de todas las coincidencias
+/// antes de decidir de cuál quiere torrents. Evita el problema de "he
+/// pedido una peli y me han salido resultados de otra distinta".
+///
+/// Cada hit de TMDB se cruza en paralelo con los providers de torrents:
+/// si ninguno devuelve nada con seeders ≥ 1, la película se descarta —
+/// no tiene sentido enseñar carátulas de pelis que después no vamos a
+/// poder ver. Se preserva el orden de relevancia de TMDB.
+#[tauri::command]
+async fn search_movies_tmdb(
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<MovieHit>, String> {
+    let key = normalize_query(&query);
+    if key.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Cache hit: si tenemos resultados recientes para la query
+    // normalizada, devolvemos sin tocar TMDB ni providers.
+    {
+        let cache = state.search_cache.lock().await;
+        if let Some(cached) = cache.get(&key) {
+            if now_unix() - cached.timestamp < SEARCH_CACHE_TTL_SECS {
+                return Ok(cached.hits.clone());
+            }
+        }
+    }
+
+    let bearer = state.config.lock().await.tmdb_bearer_token.clone();
+    let tmdb = TmdbClient::new(&state.http, &bearer);
+    let movies = tmdb.search_movies(&query).await.map_err(|e| e.to_string())?;
+
+    let providers = torrents::default_providers();
+    let http = state.http.clone();
+
+    // Sondeo ligero por película en paralelo (concurrencia 6 para no
+    // saturar Knaben/YTS). Pedimos solo 5 resultados por película, lo
+    // justo para saber si hay algo con seeders. min_seeders=1 filtra
+    // torrents muertos ya en el provider.
+    let checks = movies.into_iter().enumerate().map(|(idx, m)| {
+        let providers = providers.clone();
+        let http = http.clone();
+        async move {
+            let q = MovieQuery {
+                title: m.title.clone(),
+                year: m.year(),
+                imdb_id: None,
+                tmdb_id: Some(m.id),
+                original_language: None,
+            };
+            let list = torrents::search_all(&http, &providers, &q, 1, 5).await;
+            (idx, m, list.len() as u32)
+        }
+    });
+
+    let mut results: Vec<(usize, TmdbMovie, u32)> = futures::stream::iter(checks)
+        .buffer_unordered(6)
+        .filter(|(_, _, n)| futures::future::ready(*n > 0))
+        .collect()
+        .await;
+
+    // FuturesUnordered rompe el orden; restauramos el de TMDB (por
+    // relevancia) que es lo que el user espera visualmente.
+    results.sort_by_key(|(idx, _, _)| *idx);
+
+    let hits: Vec<MovieHit> = results
+        .into_iter()
+        .map(|(_, movie, torrent_count)| MovieHit {
+            movie,
+            torrent_count,
+        })
+        .collect();
+
+    // Persistir en cache. Solo cacheamos hits no vacíos: si no ha salido
+    // nada la próxima vez volvemos a preguntar (los indexadores pueden
+    // haber revivido). Se guarda de forma tolerante: fallar aquí no
+    // rompe la respuesta al frontend.
+    if !hits.is_empty() {
+        let mut cache = state.search_cache.lock().await;
+        cache.insert(
+            key,
+            CachedSearch {
+                timestamp: now_unix(),
+                hits: hits.clone(),
+            },
+        );
+        save_search_cache(&cache);
+    }
+
+    Ok(hits)
+}
+
+/// Película de TMDB anotada con el número de torrents que los providers
+/// devolvieron para ella. Se usa en la pantalla intermedia de búsqueda.
+/// `Deserialize` para poder rehidratarlo desde el cache en disco.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct MovieHit {
+    #[serde(flatten)]
+    movie: TmdbMovie,
+    torrent_count: u32,
 }
 
 // ---------- Torrents ----------
@@ -454,6 +618,109 @@ async fn start_stream_with_sub(
     Ok(info)
 }
 
+// ---------- Ajustes: caché + preferencias ----------
+
+/// Descripción de un archivo de caché para la vista Ajustes. El frontend
+/// pinta esto en una tabla y ofrece un botón "Borrar" por fila.
+#[derive(Serialize)]
+struct CacheEntry {
+    /// Identificador estable que usa `clear_cache` (`"log_entries"`,
+    /// `"watchlist"`, `"tmdb_recs"`, `"search"`).
+    kind: &'static str,
+    /// Etiqueta legible para la UI.
+    label: &'static str,
+    /// Ruta absoluta del archivo (por si el user quiere inspeccionarlo).
+    path: String,
+    exists: bool,
+    size_bytes: u64,
+    /// Última modificación en segundos desde epoch (0 si no existe).
+    modified_at: u64,
+}
+
+fn cache_files() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        ("log_entries", "Historial Letterboxd", "log_entries.json"),
+        ("watchlist", "Watchlist Letterboxd", "watchlist.json"),
+        ("tmdb_recs", "Recomendaciones TMDB", "tmdb_recs_cache.json"),
+        ("search", "Búsquedas TMDB + torrents", SEARCH_CACHE_FILE),
+    ]
+}
+
+#[tauri::command]
+async fn cache_info() -> Result<Vec<CacheEntry>, String> {
+    let dir = config_dir().map_err(|e| e.to_string())?;
+    Ok(cache_files()
+        .into_iter()
+        .map(|(kind, label, file)| {
+            let path = dir.join(file);
+            let (exists, size_bytes, modified_at) = match std::fs::metadata(&path) {
+                Ok(m) => {
+                    let ts = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    (true, m.len(), ts)
+                }
+                Err(_) => (false, 0, 0),
+            };
+            CacheEntry {
+                kind,
+                label,
+                path: path.display().to_string(),
+                exists,
+                size_bytes,
+                modified_at,
+            }
+        })
+        .collect())
+}
+
+/// Borra uno o todos los ficheros de caché. `kind = "all"` los borra
+/// todos de golpe. Nunca borra `token.json` — la sesión se cierra con
+/// `logout`, no aquí.
+#[tauri::command]
+async fn clear_cache(kind: String, state: State<'_, AppState>) -> Result<(), String> {
+    let dir = config_dir().map_err(|e| e.to_string())?;
+    let known = cache_files();
+    let to_delete: Vec<&'static str> = if kind == "all" {
+        known.iter().map(|(_, _, f)| *f).collect()
+    } else {
+        known
+            .iter()
+            .find(|(k, _, _)| *k == kind)
+            .map(|(_, _, f)| vec![*f])
+            .ok_or_else(|| format!("caché desconocida: {kind}"))?
+    };
+
+    for file in to_delete {
+        let path = dir.join(file);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("Error al borrar {}: {e}", path.display()))?;
+        }
+    }
+
+    // El cache de búsqueda vive también en memoria: si lo borramos del
+    // disco pero no del state, la siguiente consulta vuelve a escribirlo
+    // con los datos viejos. Vaciar el mapa cuando corresponda.
+    if kind == "all" || kind == "search" {
+        state.search_cache.lock().await.clear();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_preferences() -> Result<Preferences, String> {
+    Ok(preferences::load())
+}
+
+#[tauri::command]
+async fn set_preferences(prefs: Preferences) -> Result<(), String> {
+    preferences::save(&prefs).map_err(|e| e.to_string())
+}
+
 // ---------- Entry point ----------
 
 pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
@@ -463,6 +730,7 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
         streams: Arc::new(Mutex::new(HashMap::new())),
         next_stream_id: Arc::new(Mutex::new(0)),
         pending_subs: Arc::new(Mutex::new(HashMap::new())),
+        search_cache: Arc::new(Mutex::new(load_search_cache())),
     };
 
     tauri::Builder::default()
@@ -496,6 +764,7 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             get_username,
             get_recommendations,
             get_movie_view,
+            search_movies_tmdb,
             search_torrents_by_tmdb,
             search_torrents_direct,
             open_magnet,
@@ -506,6 +775,10 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             subtitles_available,
             search_subtitles,
             download_subtitle,
+            cache_info,
+            clear_cache,
+            get_preferences,
+            set_preferences,
         ])
         .run(tauri::generate_context!())
         .context("Error al ejecutar la app Tauri")

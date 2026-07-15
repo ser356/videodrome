@@ -113,10 +113,29 @@ export function StreamPanel({
     )
   }
 
+  // Hint / status placeholder. Con borde-l naranja + kbds resaltados
+  // para que no se lea como "otro bloque de fondo" cuando el panel está
+  // vacío. Si hay `message` (feedback de la última acción), lo mostramos
+  // en su lugar con el mismo tratamiento visual.
   return (
-    <div className="glass rounded-lg p-4 text-[13px] text-muted">
-      {message ??
-        'Pulsa S para empezar a streamear el torrent seleccionado. Enter abre el magnet en tu cliente BT por defecto. X busca subtítulos.'}
+    <div className="glass flex items-start gap-3 rounded-lg border-l-2 border-accent bg-accent/[0.06] p-4 text-[13px]">
+      {message ? (
+        <p className="text-body">{message}</p>
+      ) : (
+        <p className="text-body">
+          Pulsa <Kbd>S</Kbd> para empezar a streamear el torrent
+          seleccionado. <Kbd>Enter</Kbd> abre el magnet en tu cliente BT
+          por defecto. <Kbd>X</Kbd> busca subtítulos.
+        </p>
+      )}
     </div>
+  )
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="mx-0.5 rounded-sm border border-accent/40 bg-accent/15 px-1.5 py-0.5 text-[11px] font-semibold text-accent">
+      {children}
+    </kbd>
   )
 }

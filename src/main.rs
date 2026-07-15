@@ -17,6 +17,8 @@ mod credentials;
 mod gui;
 mod keychain;
 mod letterboxd;
+#[cfg(feature = "gui")]
+mod preferences;
 mod progress;
 mod recommend;
 mod stream;
