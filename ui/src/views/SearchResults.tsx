@@ -178,13 +178,14 @@ function MovieCard({
               src={src}
               alt={`Poster de ${movie.title}`}
               loading="lazy"
-              className="h-full w-full object-cover"
+              draggable={false}
+              className="pointer-events-none h-full w-full select-none object-cover"
               onError={(e) => {
                 e.currentTarget.style.display = 'none'
               }}
             />
           ) : (
-            <div className="flex h-full w-full items-center justify-center px-3 text-center text-[12px] text-dim">
+            <div className="pointer-events-none flex h-full w-full items-center justify-center px-3 text-center text-[12px] text-dim">
               {movie.title}
             </div>
           )}

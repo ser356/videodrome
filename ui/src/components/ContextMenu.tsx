@@ -59,19 +59,19 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
       if (!ref.current) return
       if (!ref.current.contains(e.target as Node)) onClose()
     }
-    const onContext = (e: MouseEvent) => {
-      // Un segundo right-click fuera del menú lo cierra; el consumidor
-      // decidirá si abre uno nuevo en el evento nativo.
-      if (!ref.current) return
-      if (!ref.current.contains(e.target as Node)) onClose()
-    }
+    // Nota: NO registramos un listener global sobre `contextmenu`. Si
+    // el user hace un segundo right-click en otra card, el handler
+    // sintético de esa card ya llama a setMenu con las nuevas coords;
+    // añadir aquí un cierre a nivel documento producía un race (React
+    // dispatcha primero el synthetic y luego los doc-listeners, así
+    // que setMenu(new) → setMenu(null) → menú desaparecía y "no hacía
+    // nada"). El `mousedown` fuera cubre el caso de cerrar cuando el
+    // user clica en otra parte de la UI.
     document.addEventListener('keydown', onKey)
     document.addEventListener('mousedown', onClickOutside)
-    document.addEventListener('contextmenu', onContext)
     return () => {
       document.removeEventListener('keydown', onKey)
       document.removeEventListener('mousedown', onClickOutside)
-      document.removeEventListener('contextmenu', onContext)
     }
   }, [onClose])
 

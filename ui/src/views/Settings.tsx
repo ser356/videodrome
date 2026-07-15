@@ -499,10 +499,11 @@ function DismissedCard({
             src={src}
             alt={`Poster de ${entry.title}`}
             loading="lazy"
-            className="h-full w-full object-cover opacity-70"
+            draggable={false}
+            className="pointer-events-none h-full w-full select-none object-cover opacity-70"
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center px-2 text-center text-[11px] text-dim">
+          <div className="pointer-events-none flex h-full w-full items-center justify-center px-2 text-center text-[11px] text-dim">
             {entry.title}
           </div>
         )}

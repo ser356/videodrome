@@ -125,39 +125,50 @@ export function Recommendations() {
   }
 
   /**
-   * "No sugerir" reactivo: marca la card seleccionada con la animación
-   * de fade-out, pide al backend la lista fresca (que ya viene sin la
-   * descartada y con el reemplazo al final), y sustituye el estado
-   * cuando la animación acaba. El backend garantiza que devuelve
-   * `count` resultados si tiene material — la vista nunca "encoge".
+   * "No sugerir" reactivo con dos fases desacopladas para que la card
+   * desaparezca YA aunque el backend tarde varios segundos en volver
+   * (la recomputación pega a TMDB + Letterboxd si la caché no ayuda):
+   *
+   *  1. Animación de fade-out (220 ms) → tras ella, quitamos la card
+   *     localmente. Aquí el user ya ve el efecto inmediato.
+   *  2. En paralelo, backend recalcula la lista con el reemplazo al
+   *     final. Cuando responde, sustituimos `items` completo → el
+   *     nuevo poster entra con `animate-card-in` (key nueva).
    */
   const dismissCurrent = async (rec: Recommendation) => {
     if (dismissingId !== null) return
     setDismissingId(rec.movie.id)
-    // Timing: la animación dura 220ms; esperamos ese margen antes de
-    // hacer el swap, y en paralelo lanzamos la refresh contra backend.
+
+    // Fire-and-forget: el backend refresca en background. No bloquea
+    // la eliminación visual.
     const refresh = dismissRecommendation(
       rec.movie.id,
       rec.movie.title,
       rec.movie.poster_path,
       count,
       minRating,
-    )
-    const [freshList] = await Promise.all([
-      refresh,
-      new Promise((r) => setTimeout(r, 220)),
-    ]).catch(() => [null] as const)
+    ).catch((e) => {
+      setFlashMsg(`Error al descartar: ${String(e)}`)
+      return null
+    })
+
+    // Fase 1: espera solo la animación, luego elimina localmente.
+    await new Promise((r) => setTimeout(r, 220))
     setDismissingId(null)
-    if (!freshList) {
-      setFlashMsg('No se pudo descartar. Reintenta.')
-      return
-    }
-    setItems(freshList)
-    // Mantén la selección en la misma posición visual (si aún cabe).
-    setSel((i) => Math.min(i, Math.max(0, freshList.length - 1)))
+    setItems((prev) =>
+      prev ? prev.filter((r) => r.movie.id !== rec.movie.id) : prev,
+    )
+    setSel((i) => Math.max(0, Math.min(i, (items?.length ?? 1) - 2)))
     setFlashMsg(
       `Descartada: ${rec.movie.title}. Restaurar desde Ajustes.`,
     )
+
+    // Fase 2: cuando el backend termine, sustituimos la lista completa
+    // para meter el reemplazo backfill al final. Si no hay respuesta
+    // (error), nos quedamos con la lista de `count - 1` — el user
+    // puede pulsar R para recargar.
+    const freshList = await refresh
+    if (freshList) setItems(freshList)
   }
 
   // Auto-hide del toast de dismiss.
@@ -369,13 +380,14 @@ function MovieCard({
               src={src}
               alt={`Poster de ${movie.title}`}
               loading="lazy"
-              className="h-full w-full object-cover"
+              draggable={false}
+              className="pointer-events-none h-full w-full select-none object-cover"
               onError={(e) => {
                 e.currentTarget.style.display = 'none'
               }}
             />
           ) : (
-            <div className="flex h-full w-full items-center justify-center px-3 text-center text-[12px] text-dim">
+            <div className="pointer-events-none flex h-full w-full items-center justify-center px-3 text-center text-[12px] text-dim">
               {movie.title}
             </div>
           )}
