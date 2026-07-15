@@ -5,3 +5,11 @@ target/
 # Impeccable skill local state (consent, cache)
 .impeccable/
 
+# Notas internas / assets de dev que no van al repo público
+CLAUDE.md
+DESIGN.md
+PRODUCT.md
+demo.tape
+flake.nix
+flake.lock
+

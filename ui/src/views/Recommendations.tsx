@@ -17,8 +17,7 @@ import {
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
 
 /**
- * Vista `View::Recs` de la TUI, adaptada al look "cabina de proyección"
- * definido en DESIGN.md.
+ * Vista `View::Recs` de la TUI, adaptada al look "cabina de proyección".
  *
  * - Grid uniforme de posters. Bajo cada card: solo título + año.
  *   Nada de rating dot verde ni contadores decorativos.

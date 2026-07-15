@@ -280,5 +280,3 @@ cargo tauri dev --features gui
 Feature flag `gui` es opt-in (default `[]`) para que `cargo build`
 compile CLI-only sin webkit ni `ui/dist`. El CI valida el CLI en cada
 PR; la GUI se valida en `release.yml`.
-
-Ver [CLAUDE.md](CLAUDE.md) para arquitectura y decisiones de diseño.
