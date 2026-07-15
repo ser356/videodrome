@@ -14,6 +14,11 @@ import {
  * 2. `showMagnet=false`: si hay stream activo, poll cada segundo a
  *    `stream_stats` y muestra progreso / peers / MiB/s.  Si no hay
  *    stream, muestra el mensaje de estado o un placeholder.
+ *
+ * Cuando el backend nos dice `alive=false` (VLC cerrado o el proceso
+ * murió) llamamos a `onPlayerDied` para que el padre haga el cleanup
+ * (parar librqbit, limpiar mensaje). Sin esto el panel se quedaba
+ * "Streaming" indefinidamente aunque el player estuviera cerrado.
  */
 export function StreamPanel({
   showMagnet,
@@ -21,12 +26,14 @@ export function StreamPanel({
   stream,
   message,
   onStopStream,
+  onPlayerDied,
 }: {
   showMagnet: boolean
   magnet?: string
   stream: StreamInfo | null
   message: string | null
   onStopStream: () => void
+  onPlayerDied: () => void
 }) {
   const [stats, setStats] = useState<StreamStats | null>(null)
 
@@ -36,9 +43,22 @@ export function StreamPanel({
     const poll = async () => {
       try {
         const s = await streamStats(stream.id)
-        if (!cancelled) setStats(s)
+        if (cancelled) return
+        setStats(s)
+        if (!s.alive) {
+          // VLC murió → backend ya se ha limpiado a sí mismo, avisamos
+          // al padre para tirar el stream state y parar el poll.
+          cancelled = true
+          onPlayerDied()
+        }
       } catch {
-        // fine, el handle puede haber muerto
+        // stream_stats devuelve error si el handle ya no está en el
+        // mapa (por ejemplo, la respuesta anterior con alive=false ya
+        // lo eliminó). Tratamos ese caso igual: player muerto.
+        if (!cancelled) {
+          cancelled = true
+          onPlayerDied()
+        }
       }
     }
     poll()
@@ -47,7 +67,7 @@ export function StreamPanel({
       cancelled = true
       window.clearInterval(id)
     }
-  }, [stream, showMagnet])
+  }, [stream, showMagnet, onPlayerDied])
 
   if (showMagnet) {
     return (

@@ -327,6 +327,15 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
                 setStreamMsg('Stream detenido.')
               }
             }}
+            onPlayerDied={() => {
+              // El backend ya se limpió a sí mismo cuando detectó que
+              // VLC murió, aquí solo tenemos que actualizar la UI.
+              if (stream) {
+                stopStream(stream.id).catch(() => {})
+              }
+              setStream(null)
+              setStreamMsg('Stream detenido: VLC cerrado.')
+            }}
           />
         </div>
       </main>
