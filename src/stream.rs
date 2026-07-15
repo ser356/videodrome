@@ -456,19 +456,15 @@ pub fn open_in_vlc(
         }
         #[cfg(target_os = "linux")]
         {
+            // Sin VLC en Linux no podemos abrir un stream local: xdg-open
+            // sobre http://127.0.0.1:... abriría el navegador, no un
+            // reproductor. Propagamos el error de spawn tal cual.
             let mut cmd = tokio::process::Command::new("vlc");
             cmd.arg(url);
             if let Some(a) = sub_arg.as_deref() {
                 cmd.arg(a);
             }
-            let vlc = cmd.spawn();
-            match vlc {
-                Ok(c) => Ok(c),
-                // Sin VLC en Linux no podemos abrir un stream local
-                // (xdg-open sobre http://127.0.0.1:... abriría el
-                // navegador, no un reproductor — inútil para vídeo).
-                Err(e) => Err(e),
-            }
+            cmd.spawn()
         }
         #[cfg(target_os = "windows")]
         {
