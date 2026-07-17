@@ -51,6 +51,15 @@ pub struct Torrent {
 
 #[derive(Debug, Clone, Default)]
 pub struct MovieQuery {
+    /// Tipo de contenido (película o serie). Poblado por el caller
+    /// desde `TmdbMovie.kind` — cambia la política de matching en
+    /// `search_all` (para películas, `is_tv_release ⇒ descartar`;
+    /// para series, aceptar episodio exacto / pack).
+    ///
+    /// Default `Movie` para no romper callers legacy que crean el
+    /// struct sin especificarlo.
+    #[allow(dead_code)]
+    pub kind: crate::tmdb::MediaKind,
     pub title: String,
     pub year: Option<u16>,
     pub imdb_id: Option<String>,
@@ -74,6 +83,15 @@ pub struct MovieQuery {
     /// pre-Fase-2 (`filter_by_token_overlap` en knaben.rs) queda
     /// desactivado para dejar TODOS los providers en el mismo embudo.
     pub title_variants: Vec<String>,
+    /// Temporada objetivo cuando `kind == Series`. `None` = película
+    /// o "cualquier temporada" (poco útil — la GUI siempre lo pone).
+    #[allow(dead_code)]
+    pub season: Option<u16>,
+    /// Episodio objetivo. `Some(N)` = episodio exacto. `None` con
+    /// `season = Some(S)` = pack de temporada completo. Ambos `None`
+    /// = pack de serie completo o película.
+    #[allow(dead_code)]
+    pub episode: Option<u16>,
 }
 
 impl MovieQuery {

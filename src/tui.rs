@@ -1024,6 +1024,9 @@ fn spawn_torrents(
                 tmdb_id: Some(tmdb_id),
                 original_language: original_language.clone(),
                 title_variants: Vec::new(),
+                kind: crate::tmdb::MediaKind::Movie,
+                season: None,
+                episode: None,
             };
             // min_seeders=1 en la TUI: los reportes de seeders de los
             // indexers son aproximados y filtrar por 3 pierde demasiadas
@@ -1047,6 +1050,9 @@ fn spawn_torrents(
                         tmdb_id: Some(tmdb_id),
                         original_language: original_language.clone(),
                         title_variants: Vec::new(),
+                        kind: crate::tmdb::MediaKind::Movie,
+                        season: None,
+                        episode: None,
                     };
                     let raw = torrents::search_all(&http, &providers, &ru_query, 3, 40)
                         .await
@@ -1123,6 +1129,9 @@ fn spawn_direct_search(
             tmdb_id: None,
             original_language: None,
             title_variants: Vec::new(),
+            kind: crate::tmdb::MediaKind::Movie,
+            season: None,
+            episode: None,
         };
         let _ = tx.send(TorrentEvent::Status(format!("Buscando \"{title}\"…")));
 

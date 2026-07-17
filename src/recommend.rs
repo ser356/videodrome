@@ -247,6 +247,7 @@ mod tests {
             release_date: None,
             poster_path: None,
             imdb_id: None,
+            kind: crate::tmdb::MediaKind::Movie,
         }
     }
 

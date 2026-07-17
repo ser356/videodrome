@@ -462,6 +462,9 @@ async fn dispatch(command: Commands) -> Result<()> {
                 tmdb_id,
                 original_language: None,
                 title_variants: Vec::new(),
+                kind: crate::tmdb::MediaKind::Movie,
+                season: None,
+                episode: None,
             };
 
             let providers = torrents::default_providers();

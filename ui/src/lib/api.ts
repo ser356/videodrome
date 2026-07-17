@@ -319,7 +319,7 @@ export async function fetchEmbeddedSubtitle(
   idx: number,
 ): Promise<string> {
   const base = streamUrl.replace(/\/video$/, '')
-  const r = await fetch(`${base}/subs/embedded/${idx}.vtt`)
+  const r = await fetch(`${base}/subs/embedded/${idx}`)
   if (r.status === 415) throw new Error('unsupported')
   if (!r.ok) throw new Error(`fetch embedded sub ${idx}: HTTP ${r.status}`)
   return r.text()

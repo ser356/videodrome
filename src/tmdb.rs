@@ -21,6 +21,19 @@ const SEARCH_CACHE_FILE: &str = "tmdb_search_cache.json";
 const VIEW_CACHE_FILE: &str = "tmdb_view_cache.json";
 #[cfg(feature = "gui")]
 const DETAILS_CACHE_FILE: &str = "tmdb_details_cache.json";
+/// Cache de `/tv/{id}` (detalles de serie): imdb_id, número de
+/// temporadas, mapa season_number → episode_count, etc. TTL largo:
+/// series canceladas o terminadas no cambian, y para series en
+/// emisión un TTL de 7 días es aceptable (el user refresca
+/// manualmente si añaden temporada nueva).
+#[cfg(feature = "gui")]
+const SERIES_DETAILS_CACHE_FILE: &str = "tmdb_series_details_cache.json";
+/// Cache de `/tv/{id}/season/{n}` (lista de episodios de una
+/// temporada). Cache pesada porque puede llegar a MB por temporada
+/// larga, pero perfectamente estable — los episodios ya emitidos no
+/// cambian. TTL largo igual que series details.
+#[cfg(feature = "gui")]
+const SEASON_CACHE_FILE: &str = "tmdb_season_cache.json";
 #[cfg(feature = "gui")]
 const LONG_CACHE_TTL_SECS: u64 = 7 * 24 * 3600;
 
@@ -49,6 +62,25 @@ pub struct TmdbMovie {
     /// cuando TMDB no está disponible.
     #[serde(default)]
     pub imdb_id: Option<String>,
+    /// Discriminador Movie/Series. Todos los endpoints
+    /// pre-series poblaban implícitamente `Movie`; para no romper
+    /// caches ni callers legacy usamos `#[serde(default)]` que da
+    /// `MediaKind::Movie`. `search_multi` sí lo rellena según
+    /// `media_type` de TMDB.
+    #[serde(default)]
+    pub kind: MediaKind,
+}
+
+/// Discriminador de tipo de contenido. Se serializa como
+/// `"movie"` / `"series"` para que sea directo de consumir desde
+/// TypeScript (matches el `media_type` de la API de TMDB salvo por
+/// el rename `tv` → `series`, más natural en el dominio del user).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    #[default]
+    Movie,
+    Series,
 }
 
 impl TmdbMovie {
@@ -220,6 +252,18 @@ pub struct TmdbClient<'a> {
     /// original_title, russian_title, language, runtime).
     #[cfg(feature = "gui")]
     details_cache: Mutex<HashMap<u64, Timestamped<MovieDetails>>>,
+    /// Cache de `/tv/{id}` — detalles de serie (imdb, temporadas,
+    /// idioma). Comparte semántica con `details_cache` (misma
+    /// política stale-serves-on-error).
+    #[cfg(feature = "gui")]
+    #[allow(dead_code)]
+    series_details_cache: Mutex<HashMap<u64, Timestamped<SeriesDetails>>>,
+    /// Cache de `/tv/{id}/season/{n}` — key compuesta `(tmdb_id,
+    /// season_number)`. Se usa `String` como key para round-trip
+    /// serde disco fácil (JSON no soporta tuplas como key).
+    #[cfg(feature = "gui")]
+    #[allow(dead_code)]
+    season_cache: Mutex<HashMap<String, Timestamped<Vec<SeriesEpisode>>>>,
 }
 
 impl<'a> TmdbClient<'a> {
@@ -234,6 +278,10 @@ impl<'a> TmdbClient<'a> {
             view_cache: Mutex::new(load_generic(VIEW_CACHE_FILE)),
             #[cfg(feature = "gui")]
             details_cache: Mutex::new(load_generic(DETAILS_CACHE_FILE)),
+            #[cfg(feature = "gui")]
+            series_details_cache: Mutex::new(load_generic(SERIES_DETAILS_CACHE_FILE)),
+            #[cfg(feature = "gui")]
+            season_cache: Mutex::new(load_generic(SEASON_CACHE_FILE)),
         }
     }
 
@@ -617,6 +665,7 @@ impl<'a> TmdbClient<'a> {
                     release_date: c.release_date,
                     poster_path: c.poster_path,
                     imdb_id: None,
+                    kind: MediaKind::Movie,
                 })
             })
             .collect();
@@ -990,6 +1039,342 @@ impl<'a> TmdbClient<'a> {
                 .collect(),
         }))
     }
+
+    // ── Series ────────────────────────────────────────────────────────
+
+    /// `GET /search/multi` — búsqueda de películas + series a la vez.
+    /// TMDB mezcla ambos en un solo array `results` etiquetados por
+    /// `media_type` (`movie`/`tv`/`person`). Descartamos `person` y
+    /// mapeamos `tv → MediaKind::Series`. El ranking (popularidad) ya
+    /// viene mezclado — no reordenamos.
+    ///
+    /// La misma política de cache que `search_movies` no se aplica
+    /// aquí por simplicidad: el caller (la GUI vía cache tsx) ya
+    /// hace su propio memo/dedupe entre búsquedas repetidas.
+    #[cfg(feature = "gui")]
+    #[allow(dead_code)]
+    pub async fn search_multi(&self, query: &str) -> Result<Vec<TmdbMovie>> {
+        // Response mixto: cada hit trae `media_type` que discrimina.
+        // Los campos también divergen: pelis usan `title`+`release_date`,
+        // series usan `name`+`first_air_date`. Deserializamos con un
+        // struct laxo que aceptа ambos y luego reconciliamos.
+        #[derive(Deserialize)]
+        struct MultiResp {
+            #[serde(default)]
+            results: Vec<MultiHit>,
+        }
+        #[derive(Deserialize)]
+        struct MultiHit {
+            #[serde(default)]
+            id: u64,
+            #[serde(default)]
+            media_type: String,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            release_date: Option<String>,
+            #[serde(default)]
+            first_air_date: Option<String>,
+            #[serde(default)]
+            vote_average: f32,
+            #[serde(default)]
+            popularity: f32,
+            #[serde(default)]
+            poster_path: Option<String>,
+        }
+
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = format!(
+            "{BASE_URL}/search/multi?query={}&language=es-ES&include_adult=true&page=1",
+            urlencoding::encode(q)
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.bearer_token)
+            .send()
+            .await
+            .with_context(|| "Error al llamar a TMDB /search/multi".to_string())?;
+        if !resp.status().is_success() {
+            anyhow::bail!("TMDB /search/multi devolvi\u{f3} {}", resp.status());
+        }
+        let body: MultiResp = resp
+            .json()
+            .await
+            .context("Error al parsear TMDB /search/multi")?;
+
+        let mut out = Vec::with_capacity(body.results.len());
+        for hit in body.results {
+            let kind = match hit.media_type.as_str() {
+                "movie" => MediaKind::Movie,
+                "tv" => MediaKind::Series,
+                _ => continue, // person u otro
+            };
+            let title = match kind {
+                MediaKind::Movie => hit.title.unwrap_or_default(),
+                MediaKind::Series => hit.name.unwrap_or_default(),
+            };
+            if title.is_empty() {
+                continue;
+            }
+            let release_date = match kind {
+                MediaKind::Movie => hit.release_date,
+                MediaKind::Series => hit.first_air_date,
+            };
+            out.push(TmdbMovie {
+                id: hit.id,
+                title,
+                vote_average: hit.vote_average,
+                popularity: hit.popularity,
+                release_date: release_date.filter(|s| !s.is_empty()),
+                poster_path: hit.poster_path,
+                imdb_id: None,
+                kind,
+            });
+        }
+        Ok(out)
+    }
+
+    /// `GET /tv/{id}` con append de external_ids + alternative_titles.
+    /// Cache disco 7d (`SERIES_DETAILS_CACHE_FILE`); stale-serves
+    /// cuando TMDB da error. Análogo a `get_movie_details`.
+    #[cfg(feature = "gui")]
+    #[allow(dead_code)]
+    pub async fn get_series_details(&self, tmdb_id: u64) -> Result<Option<SeriesDetails>> {
+        if let Some(cached) = get_fresh(
+            &self.series_details_cache.lock().unwrap(),
+            &tmdb_id,
+            LONG_CACHE_TTL_SECS,
+        ) {
+            return Ok(Some(cached));
+        }
+        match self.fetch_series_details_uncached(tmdb_id).await {
+            Ok(Some(details)) => {
+                let mut guard = self.series_details_cache.lock().unwrap();
+                guard.insert(
+                    tmdb_id,
+                    Timestamped {
+                        timestamp: now_unix(),
+                        value: details.clone(),
+                    },
+                );
+                save_generic(SERIES_DETAILS_CACHE_FILE, &guard);
+                Ok(Some(details))
+            }
+            Ok(None) => Ok(None),
+            Err(err) => {
+                if let Some(stale) = self
+                    .series_details_cache
+                    .lock()
+                    .unwrap()
+                    .get(&tmdb_id)
+                    .cloned()
+                {
+                    return Ok(Some(stale.value));
+                }
+                Err(err)
+            }
+        }
+    }
+
+    #[cfg(feature = "gui")]
+    async fn fetch_series_details_uncached(&self, tmdb_id: u64) -> Result<Option<SeriesDetails>> {
+        #[derive(Deserialize)]
+        struct Resp {
+            #[serde(default)]
+            id: u64,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            original_name: Option<String>,
+            #[serde(default)]
+            original_language: Option<String>,
+            #[serde(default)]
+            overview: Option<String>,
+            #[serde(default)]
+            first_air_date: Option<String>,
+            #[serde(default)]
+            poster_path: Option<String>,
+            #[serde(default)]
+            backdrop_path: Option<String>,
+            #[serde(default)]
+            number_of_seasons: u16,
+            #[serde(default)]
+            status: Option<String>,
+            #[serde(default)]
+            seasons: Vec<SeasonRaw>,
+            #[serde(default)]
+            external_ids: Option<ExternalIds>,
+        }
+        #[derive(Deserialize)]
+        struct SeasonRaw {
+            #[serde(default)]
+            season_number: u16,
+            #[serde(default)]
+            episode_count: u16,
+            #[serde(default)]
+            air_date: Option<String>,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            poster_path: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct ExternalIds {
+            #[serde(default)]
+            imdb_id: Option<String>,
+        }
+
+        let url = format!("{BASE_URL}/tv/{tmdb_id}?append_to_response=external_ids&language=es-ES");
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.bearer_token)
+            .send()
+            .await
+            .with_context(|| format!("Error al llamar a TMDB /tv/{tmdb_id}"))?;
+        if !resp.status().is_success() {
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            anyhow::bail!("TMDB /tv/{tmdb_id} devolvi\u{f3} {}", resp.status());
+        }
+        let body: Resp = resp
+            .json()
+            .await
+            .context("Error al parsear TMDB /tv details")?;
+
+        let name = body.name.filter(|s| !s.is_empty()).unwrap_or_default();
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let imdb_id = body
+            .external_ids
+            .and_then(|e| e.imdb_id)
+            .filter(|s| !s.is_empty() && s.starts_with("tt"));
+        let mut seasons: Vec<SeriesSeasonSummary> = body
+            .seasons
+            .into_iter()
+            .map(|s| SeriesSeasonSummary {
+                season_number: s.season_number,
+                episode_count: s.episode_count,
+                air_date: s.air_date.filter(|d| !d.is_empty()),
+                name: s.name.filter(|n| !n.is_empty()),
+                poster_path: s.poster_path,
+            })
+            .collect();
+        seasons.sort_by_key(|s| s.season_number);
+
+        Ok(Some(SeriesDetails {
+            id: body.id,
+            name,
+            original_name: body.original_name.filter(|s| !s.is_empty()),
+            imdb_id,
+            original_language: body.original_language.filter(|s| !s.is_empty()),
+            overview: body.overview.filter(|s| !s.is_empty()),
+            first_air_date: body.first_air_date.filter(|s| !s.is_empty()),
+            poster_path: body.poster_path,
+            backdrop_path: body.backdrop_path,
+            seasons,
+            number_of_seasons: body.number_of_seasons,
+            status: body.status.filter(|s| !s.is_empty()),
+        }))
+    }
+
+    /// `GET /tv/{id}/season/{n}` — lista de episodios. Cache 7d
+    /// (los episodios ya emitidos no cambian). Devuelve `Ok(vec![])`
+    /// si TMDB devuelve 404 (temporada inexistente).
+    #[cfg(feature = "gui")]
+    #[allow(dead_code)]
+    pub async fn get_season(&self, tmdb_id: u64, season: u16) -> Result<Vec<SeriesEpisode>> {
+        let key = format!("{tmdb_id}:{season}");
+        if let Some(cached) = get_fresh(
+            &self.season_cache.lock().unwrap(),
+            &key,
+            LONG_CACHE_TTL_SECS,
+        ) {
+            return Ok(cached);
+        }
+
+        #[derive(Deserialize)]
+        struct Resp {
+            #[serde(default)]
+            episodes: Vec<EpisodeRaw>,
+        }
+        #[derive(Deserialize)]
+        struct EpisodeRaw {
+            #[serde(default)]
+            season_number: u16,
+            #[serde(default)]
+            episode_number: u16,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            overview: Option<String>,
+            #[serde(default)]
+            air_date: Option<String>,
+            #[serde(default)]
+            still_path: Option<String>,
+            #[serde(default)]
+            runtime: Option<u32>,
+        }
+
+        let url = format!("{BASE_URL}/tv/{tmdb_id}/season/{season}?language=es-ES");
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.bearer_token)
+            .send()
+            .await
+            .with_context(|| format!("Error al llamar a TMDB /tv/{tmdb_id}/season/{season}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !resp.status().is_success() {
+            // Servir stale si lo hay, igual que las otras APIs.
+            if let Some(stale) = self.season_cache.lock().unwrap().get(&key).cloned() {
+                return Ok(stale.value);
+            }
+            anyhow::bail!(
+                "TMDB /tv/{tmdb_id}/season/{season} devolvi\u{f3} {}",
+                resp.status()
+            );
+        }
+        let body: Resp = resp
+            .json()
+            .await
+            .context("Error al parsear TMDB /tv/{tmdb_id}/season/{season}")?;
+
+        let episodes: Vec<SeriesEpisode> = body
+            .episodes
+            .into_iter()
+            .map(|e| SeriesEpisode {
+                season_number: e.season_number,
+                episode_number: e.episode_number,
+                name: e.name.filter(|n| !n.is_empty()),
+                overview: e.overview.filter(|o| !o.is_empty()),
+                air_date: e.air_date.filter(|d| !d.is_empty()),
+                still_path: e.still_path,
+                runtime: e.runtime.filter(|r| *r > 0),
+            })
+            .collect();
+
+        let mut guard = self.season_cache.lock().unwrap();
+        guard.insert(
+            key,
+            Timestamped {
+                timestamp: now_unix(),
+                value: episodes.clone(),
+            },
+        );
+        save_generic(SEASON_CACHE_FILE, &guard);
+        Ok(episodes)
+    }
 }
 
 /// Vista de detalle de una película para el modal de la GUI. Se
@@ -1052,6 +1437,85 @@ pub struct MovieDetails {
     /// se poblará.
     #[serde(default)]
     pub alt_titles: Vec<String>,
+}
+
+// ── Series: tipos del dominio ──────────────────────────────────────────────
+//
+// TmdbMovie ya cubre "resultado listable de TMDB" con el campo
+// `kind` — no duplicamos ese struct. Aquí solo lo específico de
+// series: detalles enriquecidos (imdb, temporadas, idioma) y
+// episodios de una temporada. Se serializa para cache disco.
+//
+// Todo el bloque queda gated por `feature = "gui"` porque los
+// métodos que los consumen (`get_series_details`, `get_season`,
+// `search_multi`) también lo están: la CLI/TUI aún no soporta
+// series, solo la GUI. Sin este gate salían warnings dead_code en
+// builds no-gui.
+
+#[cfg(feature = "gui")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesDetails {
+    pub id: u64,
+    /// Nombre localizado (según language de la petición).
+    pub name: String,
+    /// Nombre en el idioma original. Fallback a `name` si vacío.
+    pub original_name: Option<String>,
+    /// IMDb id DE LA SERIE (no del episodio). Es la clave para las
+    /// búsquedas por id en EZTV/Torznab (`tt` prefix incluido).
+    pub imdb_id: Option<String>,
+    /// Idioma original (`en`, `es`, `ja`…). Se propaga a MediaQuery
+    /// para el ranking multi-idioma del score.
+    pub original_language: Option<String>,
+    /// Sinopsis general. `None` si TMDB no la expone.
+    pub overview: Option<String>,
+    /// Fecha del primer episodio de la serie completa (`YYYY-MM-DD`).
+    /// Se usa como "año" en badges y como argumento para el matcher
+    /// de año cuando el user busca la serie por texto.
+    pub first_air_date: Option<String>,
+    /// Poster + backdrop (paths relativos TMDB o URL absoluta si
+    /// vienen de Cinemeta).
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+    /// Temporadas. Ordenadas por `season_number`. TMDB expone la
+    /// "Season 0" (specials) — la incluimos porque a veces la gente
+    /// quiere ver los especiales, aunque el default de la UI puede
+    /// ocultarla.
+    pub seasons: Vec<SeriesSeasonSummary>,
+    /// Número total de temporadas según TMDB (excluye specials).
+    pub number_of_seasons: u16,
+    /// Estado de emisión (`Returning Series`, `Ended`, `Canceled`,
+    /// `In Production`…). Se muestra en la UI como badge.
+    pub status: Option<String>,
+}
+
+/// Resumen de una temporada tal cual lo lista `/tv/{id}` en
+/// `seasons[]`. Sin lista de episodios (para eso está
+/// `get_season`) — solo lo que la UI necesita para pintar los
+/// tabs de selección de temporada.
+#[cfg(feature = "gui")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesSeasonSummary {
+    pub season_number: u16,
+    pub episode_count: u16,
+    pub air_date: Option<String>,
+    pub name: Option<String>,
+    pub poster_path: Option<String>,
+}
+
+/// Episodio individual dentro de una temporada. Datos mínimos para
+/// listar en la UI y para el matching de torrents por (S,E).
+#[cfg(feature = "gui")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesEpisode {
+    pub season_number: u16,
+    pub episode_number: u16,
+    pub name: Option<String>,
+    pub overview: Option<String>,
+    pub air_date: Option<String>,
+    pub still_path: Option<String>,
+    /// Runtime del episodio en minutos, cuando TMDB lo expone.
+    /// Los procedurals suelen tenerlo, las prestige a menudo no.
+    pub runtime: Option<u32>,
 }
 
 // ── Cinemeta (fallback anti-caída de TMDB) ─────────────────────────────────
@@ -1140,6 +1604,7 @@ pub async fn search_cinemeta_movies(http: &reqwest::Client, query: &str) -> Resu
                 release_date: year.map(|y| format!("{y}-01-01")),
                 poster_path: m.poster,
                 imdb_id: Some(m.id),
+                kind: MediaKind::Movie,
             }
         })
         .collect())

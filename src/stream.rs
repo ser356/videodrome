@@ -486,7 +486,7 @@ pub async fn start(magnet: String) -> Result<StreamHandle> {
         .route("/hls/playlist.m3u8", get(serve_hls_playlist))
         .route("/hls/{file}", get(serve_hls_segment))
         .route("/hls/audio", axum::routing::post(set_hls_audio))
-        .route("/subs/embedded/{idx}.vtt", get(serve_embedded_subtitle))
+        .route("/subs/embedded/{idx}", get(serve_embedded_subtitle))
         .layer(axum::middleware::from_fn(add_cors_headers))
         .with_state(state);
     #[cfg(not(feature = "gui"))]
@@ -1520,8 +1520,12 @@ async fn set_hls_audio(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /subs/embedded/<idx>.vtt` — extrae la pista de subtítulos
+/// `GET /subs/embedded/<idx>` — extrae la pista de subtítulos
 /// `<idx>` del contenedor y la devuelve como WebVTT text/plain UTF-8.
+///
+/// (Sin extensión `.vtt` en el path porque axum no permite mezclar
+/// literal + capture en el mismo segmento; el `Content-Type: text/vtt`
+/// del response identifica el formato.)
 ///
 /// Solo funciona con subs "de texto" (SRT/ASS/SSA). Los subs de
 /// imagen (PGS/DVBSUB/VobSub) NO se pueden convertir a VTT sin OCR;

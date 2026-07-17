@@ -668,6 +668,9 @@ async fn search_movies_tmdb(
                 tmdb_id: if m.id > 0 { Some(m.id) } else { None },
                 original_language: None,
                 title_variants: Vec::new(),
+                kind: crate::tmdb::MediaKind::Movie,
+                season: None,
+                episode: None,
             };
             let list = torrents::search_all(&http, &providers, &q, 0, 5).await;
             (idx, m, list.results.len() as u32)
@@ -928,6 +931,9 @@ async fn search_torrents_by_tmdb(
             tmdb_id: Some(tmdb_id),
             original_language: original_language.clone(),
             title_variants: filter_variants.clone(),
+            kind: crate::tmdb::MediaKind::Movie,
+            season: None,
+            episode: None,
         };
         let http = state.http.clone();
         let providers = providers.clone();
@@ -969,6 +975,9 @@ async fn search_torrents_by_tmdb(
                 tmdb_id: Some(tmdb_id),
                 original_language: original_language.clone(),
                 title_variants: Vec::new(),
+                kind: crate::tmdb::MediaKind::Movie,
+                season: None,
+                episode: None,
             };
             let ru_outcome = torrents::search_all(&state.http, &providers, &ru_q, 3, 40).await;
             providers_status = merge_provider_statuses(providers_status, ru_outcome.providers);
@@ -1025,6 +1034,9 @@ async fn search_torrents_direct(
         tmdb_id: None,
         original_language: None,
         title_variants: Vec::new(),
+        kind: crate::tmdb::MediaKind::Movie,
+        season: None,
+        episode: None,
     };
     let list = torrents::search_all(&state.http, &providers, &q, 3, 40).await;
     let result = TorrentSearchResult {
