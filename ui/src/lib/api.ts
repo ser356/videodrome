@@ -295,6 +295,36 @@ export function hlsUrl(streamUrl: string): string {
   return `${base}/hls/playlist.m3u8`
 }
 
+/** POST al backend para cambiar la pista de audio activa. El backend
+ * mata el ffmpeg job actual y purga los `.ts` de la pista anterior;
+ * el caller es responsable de reiniciar hls.js (o el `<video>`
+ * nativo) para que vuelva a pedir la playlist desde cero. `idx` es
+ * el ÍNDICE dentro del sub-array de audio de `MediaInfo.streams`
+ * (0-based, orden ffprobe).
+ *
+ * Devuelve 204 sin body; error como excepción del fetch. */
+export async function setAudioTrack(streamUrl: string, idx: number): Promise<void> {
+  const base = streamUrl.replace(/\/video$/, '')
+  const r = await fetch(`${base}/hls/audio?idx=${idx}`, { method: 'POST' })
+  if (!r.ok) throw new Error(`set audio track ${idx}: HTTP ${r.status}`)
+}
+
+/** Descarga el track de subtítulos embebido `idx` del contenedor
+ * como WebVTT text. `idx` es el sub-índice de `MediaInfo.streams`
+ * filtrado por `kind === 'subtitle'`. Solo funciona con subs de
+ * TEXTO (SRT/ASS/SSA); los bitmap (PGS/DVBSUB) devuelven 415 y el
+ * caller debería ocultar la pista del panel. */
+export async function fetchEmbeddedSubtitle(
+  streamUrl: string,
+  idx: number,
+): Promise<string> {
+  const base = streamUrl.replace(/\/video$/, '')
+  const r = await fetch(`${base}/subs/embedded/${idx}.vtt`)
+  if (r.status === 415) throw new Error('unsupported')
+  if (!r.ok) throw new Error(`fetch embedded sub ${idx}: HTTP ${r.status}`)
+  return r.text()
+}
+
 export const streamStats = (id: number) =>
   invoke<StreamStats>('stream_stats', { id })
 

@@ -9,6 +9,7 @@ import {
   CaretLeft,
   ClosedCaptioning,
   Gauge,
+  MusicNotes,
   Pause,
   Play,
   SpeakerHigh,
@@ -19,18 +20,21 @@ import {
 } from '@phosphor-icons/react'
 import {
   downloadSubtitle,
+  fetchEmbeddedSubtitle,
   formatSize,
   getMovieView,
   hlsUrl,
   probeStream,
   reportPosition,
   searchSubtitles,
+  setAudioTrack,
   startStreamHtml,
   stopStream,
   streamStats,
   subtitleToVtt,
   tmdbBackdrop,
   type MediaInfo,
+  type MediaStream,
   type StreamInfo,
   type StreamStats,
   type Subtitle,
@@ -350,13 +354,32 @@ export function Player() {
   // toggle desde el botón `Gauge` en la barra de controles, al lado
   // del botón de subs. Info-only, no bloquea la reproducción.
   const [statsPanelOpen, setStatsPanelOpen] = useState(false)
-  const [activeSub, setActiveSub] = useState<{
-    path: string
-    release: string
-    language: string
-  } | null>(
+
+  // Panel de pistas de audio (estilo Stremio). El botón aparece
+  // solo si el probe detecta MÁS DE UNA pista de audio en el
+  // contenedor. `activeAudioIdx` es el índice dentro del sub-array
+  // filtrado por `kind === 'audio'` (0-based); coincide con el
+  // `-map 0:a:<idx>` que el backend usa.
+  const [audioPanelOpen, setAudioPanelOpen] = useState(false)
+  const [activeAudioIdx, setActiveAudioIdx] = useState(0)
+  // `true` durante el cambio de pista: backend está purgando
+  // segmentos y respawneando ffmpeg. La UI pinta el StremioLoader
+  // mientras dura para que el user vea que "está cambiando", en vez
+  // de un playback frozen sin explicación.
+  const [audioSwitching, setAudioSwitching] = useState(false)
+  // Sub activo: unión discriminada entre "descargado de
+  // OpenSubtitles" (fichero local que el backend convierte a VTT)
+  // y "extraído del contenedor" (ffmpeg extrae la pista `idx` del
+  // torrent como VTT en un endpoint one-shot). Los dos casos se
+  // colapsan en el mismo `rawVtt` → mismo blob → mismo `<track>` en
+  // el `<video>`, así el resto del pipeline no cambia.
+  type ActiveSub =
+    | { source: 'openSubs'; path: string; release: string; language: string }
+    | { source: 'embedded'; idx: number; release: string; language: string }
+  const [activeSub, setActiveSub] = useState<ActiveSub | null>(
     state?.subPath
       ? {
+          source: 'openSubs',
           path: state.subPath,
           release: state.subRelease ?? 'Subs',
           language: 'es',
@@ -404,16 +427,19 @@ export function Player() {
     let cancelled = false
     ;(async () => {
       try {
-        const vtt = await subtitleToVtt(activeSub.path)
+        const vtt =
+          activeSub.source === 'openSubs'
+            ? await subtitleToVtt(activeSub.path)
+            : await fetchEmbeddedSubtitle(stream?.url ?? '', activeSub.idx)
         if (!cancelled) setRawVtt(vtt)
       } catch (e) {
-        console.warn('srt->vtt failed:', e)
+        console.warn('vtt fetch failed:', e)
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [activeSub])
+  }, [activeSub, stream])
 
   // Blob URL del VTT — ESTABLE mientras no cambie el sub. El shift
   // de timestamps por `subOffset` / `subSpeed` se hace in-place
@@ -539,6 +565,7 @@ export function Player() {
     try {
       const path = await downloadSubtitle(sub)
       setActiveSub({
+        source: 'openSubs',
         path,
         release: sub.release || sub.file_name || 'Sub',
         language: sub.language,
@@ -549,6 +576,21 @@ export function Player() {
     } finally {
       setSubDownloading(null)
     }
+  }
+
+  /** Selección de una pista de subs embebida en el contenedor. Se
+   * dispara desde el SubsPanel al pulsar en la sección "Del fichero".
+   * `idx` es el índice dentro del sub-array `kind === 'subtitle'` de
+   * `MediaInfo.streams`, que coincide con el `-map 0:s:<idx>` que
+   * usa el endpoint `/subs/embedded/<idx>.vtt` en el backend. */
+  const pickEmbeddedSub = (streamInfo: MediaStream, subIdx: number) => {
+    setActiveSub({
+      source: 'embedded',
+      idx: subIdx,
+      release: streamInfo.title || `Track #${subIdx + 1}`,
+      language: streamInfo.language || 'und',
+    })
+    setSubsPanelOpen(false)
   }
 
   const clearSub = () => {
@@ -868,6 +910,65 @@ export function Player() {
     )
   })()
 
+  // Listas derivadas del probe. `audioTracks` incluye todas las
+  // pistas de audio del contenedor (0..N-1). `embeddedSubs` filtra a
+  // los subs de texto (SRT/ASS/SSA); los bitmap (PGS/DVBSUB) se
+  // ocultan porque ffmpeg no puede convertirlos a VTT sin OCR.
+  const audioTracks: MediaStream[] = media
+    ? media.streams.filter((s) => s.kind === 'audio')
+    : []
+  const embeddedSubs: MediaStream[] = media
+    ? media.streams.filter(
+        (s) =>
+          s.kind === 'subtitle' &&
+          !isBitmapSubCodec(s.codec.toLowerCase()),
+      )
+    : []
+
+  // Ref que guarda "seek pendiente tras un cambio de pista de audio".
+  // El cambio dispara: (1) POST /hls/audio (backend purga + respawn),
+  // (2) el efecto hls.js se re-run porque `activeAudioIdx` cambia,
+  // (3) se monta un Hls nuevo con la misma URL de playlist (segmentos
+  // limpios), (4) `onLoadedMetadata` consume esta ref para restaurar
+  // `currentTime` y reanudar playback.
+  const postAudioSwitchSeekRef = useRef<{ time: number; play: boolean } | null>(
+    null,
+  )
+
+  const switchAudioTrack = useCallback(
+    async (newIdx: number) => {
+      if (!stream) return
+      if (newIdx === activeAudioIdx) return
+      const v = videoRef.current
+      if (!v) return
+      postAudioSwitchSeekRef.current = {
+        time: v.currentTime,
+        play: !v.paused,
+      }
+      setAudioSwitching(true)
+      setBuffering(true)
+      try {
+        v.pause()
+      } catch {
+        /* pause sync error, ignore */
+      }
+      try {
+        await setAudioTrack(stream.url, newIdx)
+      } catch (e) {
+        console.warn('setAudioTrack failed:', e)
+        setAudioSwitching(false)
+        postAudioSwitchSeekRef.current = null
+        return
+      }
+      setActiveAudioIdx(newIdx)
+      // El `useEffect` de hls.js observa `activeAudioIdx` en sus
+      // deps (ver más abajo) y se re-run: destroy + new Hls con el
+      // mismo URL; ffmpeg respawnea con `-map 0:a:<idx>` en la
+      // primera petición de segmento del hls.js nuevo.
+    },
+    [stream, activeAudioIdx],
+  )
+
   const videoSrc = stream && media
     ? canGoDirect
       ? stream.url
@@ -941,7 +1042,10 @@ export function Player() {
     if (v.src !== videoSrc) {
       v.src = videoSrc
     }
-  }, [videoSrc, needsHls])
+    // `activeAudioIdx` incluido para forzar re-run al cambiar pista:
+    // el backend ya purgó segmentos, hls.js necesita reconstruirse
+    // para pedir la playlist de cero.
+  }, [videoSrc, needsHls, activeAudioIdx])
 
   return (
     <div
@@ -1001,13 +1105,24 @@ export function Player() {
             setHasStartedPlayback(true)
           }}
           onLoadedMetadata={(e) => {
+            const v = e.currentTarget
+            // Prioridad: seek pendiente tras cambio de audio.
+            const pending = postAudioSwitchSeekRef.current
+            if (pending) {
+              v.currentTime = pending.time
+              postAudioSwitchSeekRef.current = null
+              setAudioSwitching(false)
+              if (pending.play) {
+                void v.play().catch(() => {})
+              }
+              return
+            }
             // Seek inicial de resume (`startSeconds > 0`). Aplica a
             // ambos modos porque el timeline del `<video>` es
             // tiempo absoluto en los dos: DIRECT usa Range sobre el
             // fichero completo; TRANSMUX usa un playlist VOD con
             // PTS absolutos vía `-output_ts_offset` en ffmpeg.
             if (state.startSeconds > 0) {
-              const v = e.currentTarget
               v.currentTime = state.startSeconds
             }
           }}
@@ -1041,18 +1156,19 @@ export function Player() {
 
       {/* Loader minimalista estilo Stremio: pantalla de arranque
           limpia con el backdrop de la peli de fondo (si TMDB nos lo
-          dio), título y un spinner. Se pinta en dos casos:
+          dio), título y un spinner. Se pinta en tres casos:
             1. Arranque: aún no hemos tenido ni un `playing` (falta
                `stream` o `hasStartedPlayback = false`).
             2. Seek: user movió la seekbar y estamos esperando que
                el buffer se rellene en el offset nuevo.
+            3. Cambio de pista de audio: backend está purgando
+               segmentos y respawneando ffmpeg → tapa la transición.
           Nada de MiB/s / ETA / peers — el user eligió reproducir
           esta peli, no quiere ver plumbing. Las stats siguen
           disponibles bajo demanda desde el botón `Gauge`. */}
-      {((!stream || !hasStartedPlayback) || seeking) && !error && (
-        <StremioLoader title={state.title} backdropUrl={backdropUrl} />
-      )}
-      {buffering && hasStartedPlayback && !seeking && !error && (
+      {(!stream || !hasStartedPlayback || seeking || audioSwitching) &&
+        !error && <StremioLoader title={state.title} backdropUrl={backdropUrl} />}
+      {buffering && hasStartedPlayback && !seeking && !audioSwitching && !error && (
         <div className="pointer-events-none absolute right-6 top-6">
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
         </div>
@@ -1171,6 +1287,26 @@ export function Player() {
             <Gauge size={18} weight={statsPanelOpen ? 'fill' : 'bold'} />
           </button>
 
+          {audioTracks.length > 1 && (
+            <button
+              onClick={() => setAudioPanelOpen((o) => !o)}
+              className={`flex h-9 items-center gap-1.5 rounded-full px-3 transition-colors ${
+                audioPanelOpen
+                  ? 'bg-accent/20 text-accent'
+                  : 'text-ink hover:bg-surface'
+              }`}
+              title="Pista de audio"
+              aria-pressed={audioPanelOpen}
+            >
+              <MusicNotes size={18} weight={audioPanelOpen ? 'fill' : 'bold'} />
+              {audioTracks[activeAudioIdx]?.language && (
+                <span className="text-[11px] font-medium uppercase">
+                  {audioTracks[activeAudioIdx].language}
+                </span>
+              )}
+            </button>
+          )}
+
           <button
             onClick={() => setSubsPanelOpen((o) => !o)}
             className={`flex h-9 items-center gap-1.5 rounded-full px-3 transition-colors ${
@@ -1202,21 +1338,43 @@ export function Player() {
         </div>
       </div>
 
-      {/* Panel lateral de subtítulos estilo Stremio. Tabs de idioma
-          arriba, lista de releases abajo. Se abre desde el botón CC.
-          Fuera del bloque de controles porque queremos que ocupe todo
-          el alto del player, no solo la franja del control bar. */}
+      {/* Panel lateral de subtítulos estilo Stremio. Sección
+          "Del fichero" arriba (subs embedded del contenedor
+          extraídos con ffmpeg), tabs de idioma de OpenSubtitles
+          abajo, lista de releases del idioma seleccionado. Se abre
+          desde el botón CC. Fuera del bloque de controles porque
+          queremos que ocupe todo el alto del player, no solo la
+          franja del control bar. */}
       {subsPanelOpen && (
         <SubsPanel
           subs={subsList}
           loading={subsLoading}
-          activeFileId={activeSub && activeSub.path
-            ? subsList?.find((s) => (s.release || s.file_name || '') === activeSub.release)?.file_id ?? null
-            : null}
+          activeFileId={
+            activeSub?.source === 'openSubs'
+              ? subsList?.find(
+                  (s) => (s.release || s.file_name || '') === activeSub.release,
+                )?.file_id ?? null
+              : null
+          }
           downloadingFileId={subDownloading}
           onPick={pickSub}
           onClear={clearSub}
           onClose={() => setSubsPanelOpen(false)}
+          embeddedSubs={embeddedSubs}
+          activeEmbeddedIdx={
+            activeSub?.source === 'embedded' ? activeSub.idx : null
+          }
+          onPickEmbedded={pickEmbeddedSub}
+        />
+      )}
+
+      {audioPanelOpen && (
+        <AudioPanel
+          tracks={audioTracks}
+          activeIdx={activeAudioIdx}
+          switching={audioSwitching}
+          onPick={switchAudioTrack}
+          onClose={() => setAudioPanelOpen(false)}
         />
       )}
 
@@ -1396,6 +1554,24 @@ function ffmpegInstallHint(): string {
   return 'Instala ffmpeg y asegúrate de que esté en el PATH.'
 }
 
+/** Detecta codecs de subtítulos de imagen (bitmap) que ffmpeg no
+ * puede convertir a WebVTT sin OCR. La UI oculta estas pistas del
+ * panel — si el user las eligiera, el endpoint `/subs/embedded/N.vtt`
+ * devolvería HTTP 415 y el error saldría por consola. Mejor no
+ * ofrecerlas. Lista basada en los codecs de subs de ffmpeg. */
+function isBitmapSubCodec(codec: string): boolean {
+  return (
+    codec === 'hdmv_pgs_subtitle' ||
+    codec === 'pgssub' ||
+    codec === 'pgs' ||
+    codec === 'dvd_subtitle' ||
+    codec === 'dvdsub' ||
+    codec === 'dvb_subtitle' ||
+    codec === 'dvbsub' ||
+    codec === 'xsub'
+  )
+}
+
 // ── Panel de subtítulos embebido en el player (estilo Stremio) ─────────────
 
 /** Nombre legible del idioma según código ISO 639-1 (`"es"`, `"en"`,
@@ -1417,6 +1593,106 @@ function languageLabel(code: string): string {
 }
 
 /**
+ * Panel lateral de pistas de audio. Análogo al `SubsPanel` pero más
+ * simple: solo una lista plana, sin tabs por idioma (los torrents
+ * multi-audio suelen tener 2-4 pistas, no cientos). Cada pista
+ * muestra idioma + codec + canales; el user pulsa una y el player:
+ *
+ *   1. Guarda `currentTime` + `paused` antes del switch.
+ *   2. POST `/hls/audio?idx=N` al backend → mata ffmpeg, purga
+ *      segmentos, guarda la selección.
+ *   3. El `useEffect` de hls.js se re-ejecuta al cambiar
+ *      `activeAudioIdx` → destroy + new Hls sobre la misma URL de
+ *      playlist → hls.js pide el manifest de cero y ffmpeg
+ *      respawnea con `-map 0:a:<idx>`.
+ *   4. `onLoadedMetadata` restaura `currentTime` y reanuda si
+ *      estaba playing.
+ *
+ * Durante la transición el `StremioLoader` tapa el `<video>` para
+ * que el user vea "cargando" y no un frame frozen.
+ */
+function AudioPanel({
+  tracks,
+  activeIdx,
+  switching,
+  onPick,
+  onClose,
+}: {
+  tracks: MediaStream[]
+  activeIdx: number
+  /** `true` mientras el backend está purgando + respawneando.
+   * Deshabilita clicks para evitar switches concurrentes. */
+  switching: boolean
+  onPick: (idx: number) => void
+  onClose: () => void
+}) {
+  return (
+    <div
+      className="absolute inset-y-0 right-0 z-30 flex w-full max-w-[420px] flex-col border-l border-hairline bg-black/95 backdrop-blur-lg"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <header className="flex items-center justify-between border-b border-hairline px-5 py-4">
+        <div>
+          <h2 className="text-[15px] font-semibold text-ink">Pista de audio</h2>
+          <p className="mt-0.5 text-[11px] text-muted">
+            {tracks.length} disponible{tracks.length === 1 ? '' : 's'}
+          </p>
+        </div>
+        <button
+          onClick={onClose}
+          className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-surface hover:text-ink"
+          aria-label="Cerrar"
+        >
+          <X size={16} weight="bold" />
+        </button>
+      </header>
+
+      <ul className="flex-1 divide-y divide-hairline-soft overflow-y-auto">
+        {tracks.map((t, idx) => {
+          const isActive = idx === activeIdx
+          // El label del track del contenedor suele traer info útil
+          // (ej: "English 5.1 Commentary"). Si no, componemos con
+          // idioma + codec.
+          const label =
+            t.title ||
+            [t.language ? languageLabel(t.language) : null, t.codec]
+              .filter(Boolean)
+              .join(' · ') ||
+            `Pista ${idx + 1}`
+          return (
+            <li key={`audio-${idx}`}>
+              <button
+                onClick={() => onPick(idx)}
+                disabled={switching || isActive}
+                className={`flex w-full items-start justify-between gap-3 px-5 py-3 text-left transition-colors ${
+                  isActive
+                    ? 'bg-accent/10'
+                    : 'hover:bg-surface disabled:opacity-50'
+                }`}
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13px] text-ink">{label}</p>
+                  <p className="mt-0.5 text-[11px] text-muted">
+                    {t.language ? languageLabel(t.language) : 'Idioma desconocido'}
+                    <span className="mx-1.5 text-dim">·</span>
+                    <span className="text-dim">{t.codec}</span>
+                  </p>
+                </div>
+                {isActive && (
+                  <span className="mt-0.5 text-[11px] font-medium text-accent">
+                    {switching ? 'Cargando…' : 'Activo'}
+                  </span>
+                )}
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+/**
  * Panel lateral con los subtítulos disponibles agrupados por idioma.
  * Tabs de idioma arriba (ordenadas por número de subs disponibles);
  * abajo, la lista de releases para el idioma seleccionado ordenados
@@ -1430,6 +1706,9 @@ function SubsPanel({
   onPick,
   onClear,
   onClose,
+  embeddedSubs,
+  activeEmbeddedIdx,
+  onPickEmbedded,
 }: {
   subs: Subtitle[] | null
   loading: boolean
@@ -1438,6 +1717,14 @@ function SubsPanel({
   onPick: (sub: Subtitle) => void
   onClear: () => void
   onClose: () => void
+  /** Subs embebidos (extraídos del contenedor con ffmpeg). Ya
+   * vienen filtrados por el caller para excluir bitmap (PGS/DVBSUB).
+   * Si está vacío, la sección "Del fichero" no se pinta. */
+  embeddedSubs: MediaStream[]
+  /** Índice activo dentro de `embeddedSubs` (0-based), o `null` si
+   * el sub activo no es embedded. */
+  activeEmbeddedIdx: number | null
+  onPickEmbedded: (stream: MediaStream, subIdx: number) => void
 }) {
   // Idiomas presentes en la lista + conteo. Se ordenan por count
   // descendente y luego alfabético → el idioma con más opciones
@@ -1479,7 +1766,7 @@ function SubsPanel({
       <header className="flex items-center justify-between border-b border-hairline px-5 py-4">
         <div>
           <h2 className="text-[15px] font-semibold text-ink">Subtítulos</h2>
-          {activeFileId != null && (
+          {(activeFileId != null || activeEmbeddedIdx != null) && (
             <button
               onClick={onClear}
               className="mt-0.5 text-[11px] text-muted hover:text-ink"
@@ -1497,20 +1784,67 @@ function SubsPanel({
         </button>
       </header>
 
+      {/* Sección "Del fichero" — subs embedded del contenedor
+          (SRT/ASS/SSA extraídos con ffmpeg). Aparece SIEMPRE arriba
+          si hay pistas; el user ve las pistas nativas antes que las
+          descargadas, que es lo que hace Stremio. */}
+      {embeddedSubs.length > 0 && (
+        <div className="border-b border-hairline">
+          <p className="px-5 pt-3 text-[10px] uppercase tracking-[0.14em] text-dim">
+            Del fichero
+          </p>
+          <ul className="divide-y divide-hairline-soft">
+            {embeddedSubs.map((sub, idx) => {
+              const isActive = idx === activeEmbeddedIdx
+              const label = sub.title || `Pista ${idx + 1}`
+              return (
+                <li key={`emb-${idx}`}>
+                  <button
+                    onClick={() => onPickEmbedded(sub, idx)}
+                    className={`flex w-full items-start justify-between gap-3 px-5 py-3 text-left transition-colors ${
+                      isActive ? 'bg-accent/10' : 'hover:bg-surface'
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[13px] text-ink">{label}</p>
+                      <p className="mt-0.5 text-[11px] text-muted">
+                        {sub.language
+                          ? languageLabel(sub.language)
+                          : 'Idioma desconocido'}
+                        <span className="mx-1.5 text-dim">·</span>
+                        <span className="text-dim">{sub.codec}</span>
+                      </p>
+                    </div>
+                    {isActive && (
+                      <span className="mt-0.5 text-[11px] font-medium text-accent">
+                        Activo
+                      </span>
+                    )}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
+
       {loading && (
         <div className="flex flex-1 items-center justify-center">
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" />
         </div>
       )}
 
-      {!loading && (subs === null || subs.length === 0) && (
-        <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
-          <p className="text-[14px] text-body">Sin subtítulos disponibles.</p>
-          <p className="mt-1 text-[12px] text-muted">
-            OpenSubtitles no tiene resultados para este título.
-          </p>
-        </div>
-      )}
+      {!loading &&
+        (subs === null || subs.length === 0) &&
+        embeddedSubs.length === 0 && (
+          <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+            <p className="text-[14px] text-body">Sin subtítulos disponibles.</p>
+            <p className="mt-1 text-[12px] text-muted">
+              OpenSubtitles no tiene resultados para este título y el
+              contenedor no lleva subs embebidos.
+            </p>
+          </div>
+        )}
 
       {!loading && subs && subs.length > 0 && (
         <>

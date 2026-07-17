@@ -287,6 +287,12 @@ struct HlsState {
     /// transcodificación en curso (todos los segmentos pedidos
     /// están ya en disco).
     job: Option<HlsJob>,
+    /// Índice de stream de audio del INPUT que ffmpeg mapea a la
+    /// salida. `None` = ffmpeg auto-selecciona (0:a:0 por defecto).
+    /// Cuando el user cambia de pista vía `POST /hls/audio`, matamos
+    /// el job activo, purgamos segmentos y guardamos aquí la nueva
+    /// selección; el próximo respawn usa `-map 0:v:0 -map 0:a:<idx>`.
+    audio_idx: Option<usize>,
 }
 
 /// Job ffmpeg activo: proceso corriendo con `-ss <idx*4>` +
@@ -479,6 +485,8 @@ pub async fn start(magnet: String) -> Result<StreamHandle> {
         .route("/probe.json", get(serve_probe))
         .route("/hls/playlist.m3u8", get(serve_hls_playlist))
         .route("/hls/{file}", get(serve_hls_segment))
+        .route("/hls/audio", axum::routing::post(set_hls_audio))
+        .route("/subs/embedded/{idx}.vtt", get(serve_embedded_subtitle))
         .layer(axum::middleware::from_fn(add_cors_headers))
         .with_state(state);
     #[cfg(not(feature = "gui"))]
@@ -933,6 +941,7 @@ async fn ensure_hls_dir(state: &AppState) -> Result<PathBuf, (StatusCode, String
         dir: dir.clone(),
         _tempdir: tempdir,
         job: None,
+        audio_idx: None,
     });
     Ok(dir)
 }
@@ -1056,12 +1065,12 @@ async fn serve_hls_segment(
 async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, String)> {
     // Sacamos el job existente del guard con `.take()` para no
     // bloquear el mutex durante el kill (puede tardar decenas de ms).
-    let (old_job, dir) = {
+    let (old_job, dir, audio_idx) = {
         let mut guard = state.hls.lock().await;
         let hls = guard
             .as_mut()
             .expect("dir must be ensured before ensure_hls_job");
-        (hls.job.take(), hls.dir.clone())
+        (hls.job.take(), hls.dir.clone(), hls.audio_idx)
     };
     if let Some(mut old) = old_job {
         // Cancelar la Range GET del ffmpeg viejo contra `/video`:
@@ -1092,7 +1101,7 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
         warmup_librqbit_for_offset(state, start_seconds).await;
     }
 
-    let child = spawn_hls(state, &dir, idx).await?;
+    let child = spawn_hls(state, &dir, idx, audio_idx).await?;
     let mut guard = state.hls.lock().await;
     let hls = guard.as_mut().expect("dir");
     hls.job = Some(HlsJob {
@@ -1205,6 +1214,7 @@ async fn spawn_hls(
     state: &AppState,
     dir: &Path,
     idx: u64,
+    audio_idx: Option<usize>,
 ) -> Result<tokio::process::Child, (StatusCode, String)> {
     let bin = crate::ffmpeg::ffmpeg_binary().ok_or_else(|| {
         (
@@ -1239,6 +1249,21 @@ async fn spawn_hls(
         cmd.arg("-ss").arg(format!("{start_seconds}"));
     }
     cmd.arg("-i").arg(&input_url);
+    // Stream mapping: video default (0:v:0) + audio configurable.
+    // Sin `-map`, ffmpeg elige "best" según sus heurísticas (que
+    // en muchos MKV se traducen a picar la primera pista de audio,
+    // que a menudo NO es el idioma que el user quiere). Con `-map`
+    // explícito el user controla desde el panel de audio del player;
+    // sin selección, matcheamos el comportamiento previo (0:a:0).
+    cmd.arg("-map").arg("0:v:0");
+    match audio_idx {
+        Some(idx) => {
+            cmd.arg("-map").arg(format!("0:a:{idx}"));
+        }
+        None => {
+            cmd.arg("-map").arg("0:a:0?");
+        }
+    }
     // Video: siempre transcode a H.264 8-bit High single-slice. HLS
     // TS segments no soportan HEVC en Safari <14 y añade complejidad;
     // libx264 veryfast es suficiente para 1080p en cualquier M-series.
@@ -1416,6 +1441,179 @@ async fn ensure_probe(state: &AppState) -> Result<crate::ffmpeg::MediaInfo> {
     let info = crate::ffmpeg::probe(&url).await?;
     *guard = Some(info.clone());
     Ok(info)
+}
+
+/// `POST /hls/audio?idx=<N>` — cambia la pista de audio activa del
+/// stream HLS transmux. `N` es el índice del stream de audio en el
+/// input tal cual lo reporta ffprobe (`MediaInfo.streams` filtrado
+/// por `kind == "audio"`, orden original).
+///
+/// Semántica: mata el ffmpeg job actual (si lo hay), purga los
+/// segmentos `.ts` producidos con la pista anterior, y guarda la
+/// nueva selección en `HlsState.audio_idx`. La próxima petición de
+/// segmento respawnea ffmpeg con `-map 0:v:0 -map 0:a:<idx>`.
+///
+/// El frontend debe:
+///   1. Guardar `currentTime` antes del POST.
+///   2. Esperar el 204.
+///   3. `hls.destroy()` + `new Hls().loadSource(playlist)` de nuevo,
+///      y hacer seek al `currentTime` guardado en `onCanPlay`.
+///
+/// Si se pide un idx igual al actual, es no-op (retorna 204 sin
+/// tocar nada).
+#[cfg(feature = "gui")]
+#[derive(serde::Deserialize)]
+struct AudioSwitchQuery {
+    idx: usize,
+}
+
+#[cfg(feature = "gui")]
+async fn set_hls_audio(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<AudioSwitchQuery>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // Asegura que el HlsState existe (aunque no haya empezado el
+    // playback aún: el user puede abrir el panel de audio y cambiar
+    // antes de darle a play).
+    let _ = ensure_hls_dir(&state).await?;
+
+    let (old_job, dir, changed) = {
+        let mut guard = state.hls.lock().await;
+        let hls = guard.as_mut().expect("hls state ensured");
+        let changed = hls.audio_idx != Some(q.idx);
+        if !changed {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        hls.audio_idx = Some(q.idx);
+        (hls.job.take(), hls.dir.clone(), changed)
+    };
+
+    if let Some(mut old) = old_job {
+        // Igual que en `ensure_hls_job` — cancelar la Range GET del
+        // ffmpeg viejo antes de matarlo, para que librqbit libere
+        // el FileStream inmediatamente.
+        {
+            let mut req_guard = state.active_request.lock().await;
+            if let Some((token, _)) = req_guard.take() {
+                token.cancel();
+            }
+        }
+        let _ = old.child.kill().await;
+        let _ = old.child.wait().await;
+    }
+
+    // Purgar los `.ts` producidos con la pista anterior. Si no lo
+    // hacemos, hls.js pediría un segmento que existe en disco (con
+    // audio viejo) → mezcla de audios entre segmentos consecutivos.
+    if changed {
+        if let Ok(iter) = std::fs::read_dir(&dir) {
+            for entry in iter.flatten() {
+                let name = entry.file_name();
+                let s = name.to_string_lossy();
+                if s.starts_with("seg-") && (s.ends_with(".ts") || s.ends_with(".ts.tmp")) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /subs/embedded/<idx>.vtt` — extrae la pista de subtítulos
+/// `<idx>` del contenedor y la devuelve como WebVTT text/plain UTF-8.
+///
+/// Solo funciona con subs "de texto" (SRT/ASS/SSA). Los subs de
+/// imagen (PGS/DVBSUB/VobSub) NO se pueden convertir a VTT sin OCR;
+/// ffmpeg falla y devolvemos 415 Unsupported Media Type para que el
+/// frontend los oculte del panel de subs.
+///
+/// El `idx` es el índice del stream de subs en el input tal cual lo
+/// reporta ffprobe (0..N-1 dentro del filter `-map 0:s:<idx>`).
+///
+/// Spawn one-shot (no persistente): abre input, extrae el stream,
+/// pipea a stdout, muere. Coste ≈ 200-500ms para subs de peli
+/// completa. El player cachea el VTT en un Blob del navegador, así
+/// que solo se llama una vez por selección.
+#[cfg(feature = "gui")]
+async fn serve_embedded_subtitle(
+    State(state): State<AppState>,
+    axum::extract::Path(idx): axum::extract::Path<usize>,
+) -> Result<Response, (StatusCode, String)> {
+    let bin = crate::ffmpeg::ffmpeg_binary().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "ffmpeg no encontrado".to_string(),
+    ))?;
+    let input_url = format!("http://{}/video", state.local_addr);
+
+    let output = tokio::process::Command::new(bin)
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-nostdin")
+        .arg("-i")
+        .arg(&input_url)
+        // El input `/video` puede tardar en dar los primeros bytes
+        // si el torrent está frío; `-analyzeduration` alto ayuda a
+        // que ffmpeg no se rinda antes de encontrar la pista.
+        .arg("-analyzeduration")
+        .arg("60M")
+        .arg("-probesize")
+        .arg("50M")
+        .arg("-map")
+        .arg(format!("0:s:{idx}"))
+        .arg("-c:s")
+        .arg("webvtt")
+        .arg("-f")
+        .arg("webvtt")
+        .arg("-")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("spawn ffmpeg: {e}"),
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Bitmap subs → ffmpeg da "Subtitle encoding currently only
+        // possible from text to text or bitmap to bitmap". Distinguir
+        // con un 415 al frontend para que oculte esta pista.
+        let unsupported = stderr.contains("only possible")
+            || stderr.contains("bitmap")
+            || stderr.contains("Filter graph");
+        let code = if unsupported {
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        return Err((code, format!("ffmpeg extraction failed: {stderr}")));
+    }
+
+    // Sanidad: el output debe empezar por `WEBVTT` (o \ufeff+WEBVTT)
+    // para ser un track válido. Si no, ffmpeg devolvió algo raro
+    // aunque saliese con status 0.
+    let body = output.stdout;
+    let head: String = body.iter().take(16).map(|&b| b as char).collect();
+    if !head.contains("WEBVTT") {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "output no es WebVTT".to_string(),
+        ));
+    }
+
+    let mut resp = Response::new(body.into());
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/vtt; charset=utf-8".parse().unwrap(),
+    );
+    Ok(resp)
 }
 
 /// Handle del reproductor externo (VLC). Contiene:
