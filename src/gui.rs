@@ -1412,7 +1412,7 @@ async fn search_subtitles(
     // file_id es único en OpenSubtitles.
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut merged: Vec<Subtitle> = Vec::with_capacity(hash_subs.len() + catalog_subs.len());
-    for s in hash_subs.into_iter().chain(catalog_subs.into_iter()) {
+    for s in hash_subs.into_iter().chain(catalog_subs) {
         if seen.insert(s.file_id) {
             merged.push(s);
         }

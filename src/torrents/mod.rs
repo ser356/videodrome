@@ -284,6 +284,7 @@ fn titles_match(variant: &str, candidate: &str) -> bool {
 /// varias pasadas dieron OK, sumamos los `hits` y nos quedamos con el
 /// `elapsed_ms` máximo (para reflejar el coste total honesto). Los
 /// providers exclusivos de una lista se propagan tal cual.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub fn merge_provider_statuses(
     mut base: Vec<ProviderStatus>,
     extra: Vec<ProviderStatus>,

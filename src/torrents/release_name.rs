@@ -16,7 +16,7 @@
 //!
 //! No usamos crate externo (`torrent-name-parser` sería la opción
 //! natural, pero para este alcance basta con una pasada tokenizada
-//! + un puñado de constantes). Si en el futuro necesitamos cubrir
+//! y un puñado de constantes). Si en el futuro necesitamos cubrir
 //! más edge cases (anime con brackets, series con títulos raros),
 //! se puede portar sin cambiar la API pública (`ParsedRelease`).
 
@@ -199,18 +199,18 @@ pub fn parse(raw: &str) -> ParsedRelease {
 
     // Release year = último año antes del primer tag técnico. Si no
     // hay tag técnico, el último año a secas. Si no hay años, None.
+    // (`rfind` recorre desde el final y corta en el primer match →
+    // O(k) en el peor caso, no O(n).)
     let release_year = scan
         .year_positions
         .iter()
-        .filter(|(pos, _)| *pos < tag_cut)
-        .last()
+        .rfind(|(pos, _)| *pos < tag_cut)
         .or_else(|| scan.year_positions.last())
         .map(|(_, y)| *y);
     let year_cut = scan
         .year_positions
         .iter()
-        .filter(|(pos, _)| *pos < tag_cut)
-        .last()
+        .rfind(|(pos, _)| *pos < tag_cut)
         .map(|(pos, _)| *pos)
         .unwrap_or(tokens.len());
 
@@ -280,7 +280,7 @@ pub fn normalize_title(s: &str) -> String {
 /// `match_tag` sabe mirar tanto el token completo como el prefijo
 /// antes del primer `-` para cubrir ambos casos.
 fn tokenize(s: &str) -> Vec<String> {
-    s.split(|c: char| matches!(c, '.' | '_' | ' ' | '[' | ']' | '(' | ')'))
+    s.split(['.', '_', ' ', '[', ']', '(', ')'])
         .filter(|t| !t.is_empty())
         .map(|t| t.to_string())
         .collect()

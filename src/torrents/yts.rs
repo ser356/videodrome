@@ -112,44 +112,7 @@ impl TorrentProvider for Yts {
             urlencoding::encode(&query_term)
         );
 
-        // Iteramos hosts en orden hasta que uno responda 200 con JSON
-        // válido. Guardamos el último error para propagarlo si TODOS
-        // fallan — `ProviderStatus` lo mostrará al user como
-        // `yts ✗ <motivo>` (típicamente "DNS/timeout" cuando el ISP
-        // filtra `yts.mx`).
-        let mut last_err: Option<anyhow::Error> = None;
-        let resp: YtsResponse = 'hosts: loop {
-            for host in YTS_HOSTS {
-                let url = format!("{host}{path}");
-                let attempt = tokio::time::timeout(YTS_HOST_TIMEOUT, async {
-                    http.get(&url)
-                        .header(reqwest::header::USER_AGENT, YTS_BROWSER_UA)
-                        .header(reqwest::header::ACCEPT, "application/json")
-                        .send()
-                        .await
-                        .with_context(|| format!("Error de red hacia {host}"))?
-                        .error_for_status()
-                        .with_context(|| format!("{host} devolvi\u{f3} error HTTP"))?
-                        .json::<YtsResponse>()
-                        .await
-                        .with_context(|| format!("Error al parsear respuesta de {host}"))
-                })
-                .await;
-                match attempt {
-                    Ok(Ok(parsed)) => break 'hosts parsed,
-                    Ok(Err(e)) => {
-                        last_err = Some(e);
-                    }
-                    Err(_elapsed) => {
-                        last_err = Some(anyhow::anyhow!("{host}: timeout (>2s)"));
-                    }
-                }
-            }
-            // Ninguno respondió — devolvemos el último error como
-            // provider error (no anyhow!bail dentro del loop para
-            // conservar el chain del último context útil).
-            return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("YTS: sin hosts alcanzables")));
-        };
+        let resp = fetch_from_any_host(http, &path).await?;
 
         // YTS puede devolver varias películas con títulos parecidos
         // ("Alien", "Aliens", "Alien 3"…). Antes se pusheaban torrents
@@ -210,4 +173,40 @@ fn norm_title(s: &str) -> String {
         .filter(|w| !(w.len() == 4 && w.chars().all(|c| c.is_ascii_digit())))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Prueba cada host de `YTS_HOSTS` en orden hasta que uno responda
+/// 200 con JSON válido, y devuelve el `YtsResponse` parseado.
+/// Si todos fallan, propaga el último error (el `ProviderStatus`
+/// lo mostrará como `yts ✗ <motivo>`). Extraído de `search` en
+/// una fn aparte por el clippy `never_loop` — el bucle exterior
+/// del original solo iteraba una vez (siempre `break 'hosts` o
+/// `return Err`), y clippy lo detecta como código muerto.
+async fn fetch_from_any_host(http: &reqwest::Client, path: &str) -> Result<YtsResponse> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for host in YTS_HOSTS {
+        let url = format!("{host}{path}");
+        let attempt = tokio::time::timeout(YTS_HOST_TIMEOUT, async {
+            http.get(&url)
+                .header(reqwest::header::USER_AGENT, YTS_BROWSER_UA)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .await
+                .with_context(|| format!("Error de red hacia {host}"))?
+                .error_for_status()
+                .with_context(|| format!("{host} devolvi\u{f3} error HTTP"))?
+                .json::<YtsResponse>()
+                .await
+                .with_context(|| format!("Error al parsear respuesta de {host}"))
+        })
+        .await;
+        match attempt {
+            Ok(Ok(parsed)) => return Ok(parsed),
+            Ok(Err(e)) => last_err = Some(e),
+            Err(_elapsed) => {
+                last_err = Some(anyhow::anyhow!("{host}: timeout (>2s)"));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("YTS: sin hosts alcanzables")))
 }
