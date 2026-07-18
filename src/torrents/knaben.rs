@@ -66,26 +66,35 @@ impl TorrentProvider for Knaben {
         // porque los grupos usan el otro año. Buscamos solo el título y
         // filtramos por año ±1 después.
         //
-        // Lanzamos los dos search_type en paralelo (100% = exact match,
-        // score = fuzzy). Antes eran secuenciales (score solo se
-        // consultaba si 100% venía vacío), lo que perdía hits: releases
-        // con puntuación rara que sí aparecerían con fuzzy pero que 100%
-        // devolvía como 1-2 hits basura que impedían el fallback.
-        // Merge + dedup por infohash resuelve ambos problemas y añade
-        // ~10-20% de recall sin coste de latencia (misma latencia que
-        // 100% solo, gracias al paralelismo).
-        let (exact, fuzzy) = tokio::join!(
-            knaben_query(http, &q.title, "100%"),
-            knaben_query(http, &q.title, "score"),
-        );
+        // Para SERIES generamos hasta 3 queries paralelas con las
+        // variantes que los grupos scene usan realmente:
+        //   * "Title SxxEyy" — episodio exacto
+        //   * "Title Sxx"    — season packs (o releases del pack completo)
+        //   * "Title Season N" — packs de HDTV/WEB que etiquetan largo
+        // Merge por infohash. NUNCA solo el título — el filtro central
+        // tira el 95% pero el recall de las queries específicas es muy
+        // superior a un título a secas.
+        //
+        // Para PELÍCULAS: 100% (exact) + score (fuzzy) en paralelo
+        // sobre el título, como hasta ahora.
+        let queries: Vec<(String, &'static str)> =
+            if matches!(q.kind, crate::tmdb::MediaKind::Series) {
+                series_query_variants(&q.title, q.season, q.episode)
+                    .into_iter()
+                    .map(|s| (s, "100%"))
+                    .collect()
+            } else {
+                vec![(q.title.clone(), "100%"), (q.title.clone(), "score")]
+            };
+
+        let futs = queries
+            .into_iter()
+            .map(|(query, st)| async move { knaben_query(http, &query, st).await });
+        let results = futures::future::join_all(futs).await;
 
         let mut merged: Vec<KnabenHit> = Vec::new();
         let mut seen = std::collections::HashSet::<String>::new();
-        for hit in exact
-            .into_iter()
-            .flatten()
-            .chain(fuzzy.into_iter().flatten())
-        {
+        for hit in results.into_iter().flatten().flatten() {
             // Dedup por hash (o por título si el hash no vino).
             let key = hit
                 .hash
@@ -105,6 +114,22 @@ impl TorrentProvider for Knaben {
         // por token queda desactivado a propósito: era la fuente
         // principal de los homónimos que se colaban.
         Ok(hits_to_torrents(merged))
+    }
+}
+
+/// Genera variantes de query textual para una serie según qué
+/// season/episode traiga la MovieQuery. Los grupos scene etiquetan
+/// las mismas releases con formas distintas (SxxEyy, Sxx, "Season N"),
+/// así que un query único deja fuera el resto.
+fn series_query_variants(title: &str, season: Option<u16>, episode: Option<u16>) -> Vec<String> {
+    let t = title.trim();
+    match (season, episode) {
+        (Some(s), Some(e)) => vec![
+            format!("{} S{:02}E{:02}", t, s, e),
+            format!("{} S{:02}", t, s),
+        ],
+        (Some(s), None) => vec![format!("{} S{:02}", t, s), format!("{} Season {}", t, s)],
+        (None, _) => vec![t.to_string()],
     }
 }
 
@@ -312,5 +337,26 @@ mod tests {
         let a: std::collections::HashSet<String> = tokenize("Play Dead");
         let b: std::collections::HashSet<String> = tokenize("Deadly.Visitor");
         assert_eq!(a.intersection(&b).count(), 0);
+    }
+
+    #[test]
+    fn series_variants_episode_produces_sxxexx_and_sxx() {
+        let v = series_query_variants("Fargo", Some(2), Some(3));
+        assert_eq!(v, vec!["Fargo S02E03".to_string(), "Fargo S02".to_string()]);
+    }
+
+    #[test]
+    fn series_variants_season_pack_produces_sxx_and_season_n() {
+        let v = series_query_variants("Fargo", Some(2), None);
+        assert_eq!(
+            v,
+            vec!["Fargo S02".to_string(), "Fargo Season 2".to_string()]
+        );
+    }
+
+    #[test]
+    fn series_variants_no_season_falls_back_to_title() {
+        let v = series_query_variants("Fargo", None, None);
+        assert_eq!(v, vec!["Fargo".to_string()]);
     }
 }

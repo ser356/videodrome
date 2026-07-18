@@ -105,6 +105,12 @@ impl TorrentProvider for Yts {
     }
 
     async fn search(&self, http: &reqwest::Client, q: &MovieQuery) -> Result<Vec<Torrent>> {
+        // YTS es solo cine. Para queries de serie devolvemos vacío
+        // en silencio (no error) para no ensuciar el ProviderStatus
+        // con un fallo que en realidad es "fuera de scope".
+        if matches!(q.kind, crate::tmdb::MediaKind::Series) {
+            return Ok(Vec::new());
+        }
         // Preferimos IMDb ID (mucho más preciso). Si no, caemos al título.
         let query_term = q.imdb_id.clone().unwrap_or_else(|| q.title.clone());
         let path = format!(

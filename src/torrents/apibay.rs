@@ -51,49 +51,83 @@ impl TorrentProvider for Apibay {
         // query (los grupos etiquetan el año de estreno del país
         // original y no el USA que TMDB reporta). Filtramos por año
         // ±1 después.
-        let query = q.title.trim().to_string();
+        //
+        // Series: mismas variantes que Knaben (SxxEyy / Sxx / "Season N")
+        // en paralelo, dedup por infohash. La categoría paraguas 200
+        // ya cubre TV shows (205/208), no hay que cambiarla.
+        let queries: Vec<String> = if matches!(q.kind, crate::tmdb::MediaKind::Series) {
+            apibay_series_variants(&q.title, q.season, q.episode)
+        } else {
+            vec![q.title.trim().to_string()]
+        };
 
-        let url = format!(
-            "{BASE}?q={}&cat={CATEGORY_VIDEO}",
-            urlencoding::encode(&query)
-        );
-
-        let resp = http
-            .get(&url)
-            .send()
-            .await
-            .context("Error de red hacia apibay")?;
-
-        if !resp.status().is_success() {
-            anyhow::bail!("apibay devolvió {}", resp.status());
-        }
-
-        let hits: Vec<ApibayHit> = resp
-            .json()
-            .await
-            .context("Error al parsear respuesta de apibay")?;
-
-        Ok(hits
+        let futs = queries
             .into_iter()
-            .filter(|h| h.info_hash != EMPTY_HASH && !h.info_hash.is_empty())
-            .filter_map(|h| {
-                let seeders = h.seeders.parse::<u32>().ok()?;
-                let leechers = h.leechers.parse::<u32>().unwrap_or(0);
-                let size_bytes = h.size.parse::<u64>().unwrap_or(0);
-                let quality = quality_from_title(&h.name);
-                let magnet = build_magnet(&h.info_hash, &h.name);
-                Some(Torrent {
-                    title: h.name,
-                    magnet,
-                    size_bytes,
-                    seeders,
-                    leechers,
-                    quality,
-                    source: "apibay".to_string(),
-                    match_kind: crate::torrents::MatchKind::default(),
-                    infohash: h.info_hash.to_ascii_uppercase(),
-                })
-            })
-            .collect())
+            .map(|query| async move { apibay_query(http, &query).await });
+        let results = futures::future::join_all(futs).await;
+
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut out: Vec<Torrent> = Vec::new();
+        for hit in results.into_iter().flatten().flatten() {
+            if hit.info_hash == EMPTY_HASH || hit.info_hash.is_empty() {
+                continue;
+            }
+            let hash_up = hit.info_hash.to_ascii_uppercase();
+            if !seen.insert(hash_up.clone()) {
+                continue;
+            }
+            let Some(seeders) = hit.seeders.parse::<u32>().ok() else {
+                continue;
+            };
+            let leechers = hit.leechers.parse::<u32>().unwrap_or(0);
+            let size_bytes = hit.size.parse::<u64>().unwrap_or(0);
+            let quality = quality_from_title(&hit.name);
+            let magnet = build_magnet(&hit.info_hash, &hit.name);
+            out.push(Torrent {
+                title: hit.name,
+                magnet,
+                size_bytes,
+                seeders,
+                leechers,
+                quality,
+                source: "apibay".to_string(),
+                match_kind: crate::torrents::MatchKind::default(),
+                infohash: hash_up,
+            });
+        }
+        Ok(out)
     }
+}
+
+/// Variantes de query para series en apibay — mismo criterio que
+/// knaben::series_query_variants, se mantienen separadas por si algún
+/// backend prefiere distinta forma en el futuro.
+fn apibay_series_variants(title: &str, season: Option<u16>, episode: Option<u16>) -> Vec<String> {
+    let t = title.trim();
+    match (season, episode) {
+        (Some(s), Some(e)) => vec![
+            format!("{} S{:02}E{:02}", t, s, e),
+            format!("{} S{:02}", t, s),
+        ],
+        (Some(s), None) => vec![format!("{} S{:02}", t, s), format!("{} Season {}", t, s)],
+        (None, _) => vec![t.to_string()],
+    }
+}
+
+async fn apibay_query(http: &reqwest::Client, query: &str) -> Result<Vec<ApibayHit>> {
+    let url = format!(
+        "{BASE}?q={}&cat={CATEGORY_VIDEO}",
+        urlencoding::encode(query)
+    );
+    let resp = http
+        .get(&url)
+        .send()
+        .await
+        .context("Error de red hacia apibay")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("apibay devolvió {}", resp.status());
+    }
+    resp.json::<Vec<ApibayHit>>()
+        .await
+        .context("Error al parsear respuesta de apibay")
 }

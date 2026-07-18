@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub mod apibay;
+pub mod eztv;
 pub mod knaben;
 pub mod release_name;
 pub mod torznab;
@@ -609,6 +610,7 @@ fn language_multiplier(hint: AudioHint) -> f64 {
 pub fn default_providers() -> Vec<Arc<dyn TorrentProvider>> {
     let mut providers: Vec<Arc<dyn TorrentProvider>> = vec![
         Arc::new(yts::Yts),
+        Arc::new(eztv::Eztv),
         Arc::new(knaben::Knaben),
         Arc::new(apibay::Apibay),
     ];

@@ -83,17 +83,30 @@ impl TorrentProvider for Torznab {
         // Torznab espera el ID sin el prefijo "tt".
         //
         // Estrategia:
-        //   1. Si tenemos `imdb_id`, intentar `t=movie&imdbid=<id>`.
-        //   2. Si el server devuelve HTTP error (algunos Jackett /
-        //      Prowlarr viejos no exponen `movie` caps), caer a
-        //      `t=search&q=<title>`.
-        //   3. Sin `imdb_id`, ir directamente a `t=search`.
+        //   * Series: `t=tvsearch&imdbid=<id>&season=S[&ep=E]` — la
+        //     vía canónica en Torznab para episodios. Si el indexer
+        //     no soporta tvsearch caps, cae a `t=search&q="title SxxEyy"`.
+        //   * Película con imdb: `t=movie&imdbid=<id>`, fallback a
+        //     `t=search&q=title`.
+        //   * Sin imdb: `t=search&q=title` (o con "SxxEyy" si serie).
         //
         // Política unificada con Knaben/Apibay: el año NUNCA va en la
         // query — los grupos etiquetan el año del estreno original y
         // no el USA que TMDB reporta, así "Funny Games 2008" devuelve
         // basura.
-        let body = if let Some(id) = q.imdb_id.as_deref() {
+        let is_series = matches!(q.kind, crate::tmdb::MediaKind::Series);
+        let body = if is_series {
+            // Query textual de fallback: "Title SxxEyy" o "Title Sxx".
+            let text_query = build_series_query(&q.title, q.season, q.episode);
+            let imdb = q.imdb_id.as_deref().map(|s| s.trim_start_matches("tt"));
+            match self
+                .fetch_tv(http, &text_query, imdb, q.season, q.episode)
+                .await
+            {
+                Ok(body) => body,
+                Err(_tv_err) => self.fetch(http, "search", &text_query, None).await?,
+            }
+        } else if let Some(id) = q.imdb_id.as_deref() {
             match self
                 .fetch(
                     http,
@@ -203,5 +216,55 @@ impl Torznab {
             .text()
             .await
             .context("Error al leer respuesta de Torznab")
+    }
+
+    /// Pega al endpoint `t=tvsearch` de Torznab con IMDb + season/ep
+    /// cuando aplique. Es la ruta canónica para series y la de mayor
+    /// precisión con Jackett/Prowlarr. Sin `ep`, devuelve todos los
+    /// releases de la temporada (episodios y season packs).
+    async fn fetch_tv(
+        &self,
+        http: &reqwest::Client,
+        query: &str,
+        imdbid: Option<&str>,
+        season: Option<u16>,
+        episode: Option<u16>,
+    ) -> Result<String> {
+        let mut url = format!(
+            "{}?t=tvsearch&apikey={}&q={}",
+            self.url.trim_end_matches('?'),
+            urlencoding::encode(&self.apikey),
+            urlencoding::encode(query),
+        );
+        if let Some(id) = imdbid {
+            url.push_str("&imdbid=");
+            url.push_str(id);
+        }
+        if let Some(s) = season {
+            url.push_str(&format!("&season={}", s));
+        }
+        if let Some(e) = episode {
+            url.push_str(&format!("&ep={}", e));
+        }
+
+        http.get(&url)
+            .send()
+            .await
+            .context("Error de red hacia Torznab")?
+            .error_for_status()
+            .context("Torznab devolvi\u{f3} error HTTP")?
+            .text()
+            .await
+            .context("Error al leer respuesta de Torznab")
+    }
+}
+
+/// Construye el query textual de fallback para series:
+/// `"Title S02E03"`, `"Title S02"` o `"Title"` según qué venga.
+fn build_series_query(title: &str, season: Option<u16>, episode: Option<u16>) -> String {
+    match (season, episode) {
+        (Some(s), Some(e)) => format!("{} S{:02}E{:02}", title.trim(), s, e),
+        (Some(s), None) => format!("{} S{:02}", title.trim(), s),
+        _ => title.trim().to_string(),
     }
 }
