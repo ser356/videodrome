@@ -2912,10 +2912,56 @@ async fn log_hls_requests(req: axum::extract::Request, next: axum::middleware::N
 #[cfg(feature = "gui")]
 async fn serve_probe(
     State(state): State<AppState>,
-) -> Result<axum::Json<crate::ffmpeg::MediaInfo>, (StatusCode, String)> {
-    let mut info = ensure_probe(&state)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+) -> Result<axum::Json<crate::ffmpeg::MediaInfo>, Response> {
+    let mut info = match ensure_probe(&state).await {
+        Ok(info) => info,
+        Err(e) => {
+            // Rama estructurada: timeout de ffprobe → 504 +
+            // `{reason:"probe_stalled", bytes:0, elapsed_s:N}`.
+            // El frontend distingue así "swarm sin seeders" (mensaje
+            // "prueba otro release", botón Volver → lista de
+            // torrents) de "ffmpeg roto" (mensaje "comprueba
+            // ffmpeg"). Antes el timeout se hundía en un 500 con
+            // mensaje libre y el frontend no podía diferenciar.
+            if let Some(stalled) = e.downcast_ref::<crate::ffmpeg::ProbeStalled>() {
+                tracing::warn!(
+                    target: "probe",
+                    reason = "probe_stalled",
+                    elapsed_s = stalled.elapsed_s,
+                    "returning 504"
+                );
+                let body = format!(
+                    r#"{{"reason":"probe_stalled","bytes":0,"elapsed_s":{}}}"#,
+                    stalled.elapsed_s
+                );
+                let resp = Response::builder()
+                    .status(StatusCode::GATEWAY_TIMEOUT)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap_or_else(|_| Response::new(Body::empty()));
+                return Err(resp);
+            }
+            // Fallo real de ffprobe/ffmpeg (binario ausente, JSON
+            // corrupto, permission denied, exit != 0…): log con
+            // causa a nivel `error!` y 500 genérico. El frontend
+            // mantiene su mensaje "comprueba ffmpeg" en este caso.
+            // `?e` usa el Debug de `anyhow::Error` que imprime la
+            // cadena completa (`Caused by: …`), a diferencia de
+            // `%e` que se queda con el mensaje más externo.
+            tracing::error!(
+                target: "probe",
+                error = ?e,
+                "probe failed"
+            );
+            let msg = e.to_string();
+            let resp = Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from(msg))
+                .unwrap_or_else(|_| Response::new(Body::empty()));
+            return Err(resp);
+        }
+    };
     // Audit §4: `direct_playable` se calcula por request con las
     // caps del cliente EN VIGOR (no las que había cuando se pobló
     // el `cached_probe`). Si el frontend registra caps DESPUÉS del

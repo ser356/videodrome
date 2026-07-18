@@ -270,6 +270,8 @@ export const en: Record<string, string> = {
   'player.hlsFatal': 'HLS failure ({{type}}/{{details}}). Try switching the player to VLC in Settings.',
   'player.swarmStalled':
     'The torrent is downloading at {{speed}} with {{peers}} peers ({{pct}}% complete). The swarm cannot sustain enough bandwidth for playback. Try another release with more seeders, or open the link in VLC from Settings.',
+  'player.probeStalled':
+    'This torrent is not downloading (0 B in {{elapsed}} s), it probably has no active seeders. Try another release from the list.',
   'player.videoFailed': 'Could not play this movie in the embedded player. Try switching to VLC from Settings.',
   'player.ffmpegMissing':
     'ffmpeg is not available. {{hint}} Alternative: switch the player to VLC in Settings.',

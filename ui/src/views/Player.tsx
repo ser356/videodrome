@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import Hls from 'hls.js'
@@ -26,6 +26,7 @@ import {
   getPreferences,
   hlsUrl,
   probeStream,
+  ProbeStalledError,
   reportPosition,
   searchSubtitles,
   setAudioTrack,
@@ -122,6 +123,28 @@ export function Player() {
   const [stream, setStream] = useState<StreamInfo | null>(null)
   const [media, setMedia] = useState<MediaInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** Ruta a la que apunta el botón "Volver" cuando estamos en
+   * pantalla de error. Los errores por swarm muerto
+   * (`probe_stalled` del backend, `swarm_stalled` de los segmentos
+   * HLS) fijan aquí la ruta de la lista de torrents del título para
+   * que el user pueda elegir OTRO release sin tener que navegar a
+   * mano. Para errores "reales" (ffmpeg missing, HLS unsupported,
+   * MediaError code 4) se deja `null` → cae al `nav(-1)` clásico. */
+  const [errorBackTo, setErrorBackTo] = useState<string | null>(null)
+  /** Ruta canónica de la lista de torrents del título actual —
+   * derivada de `state.tmdbId` + episodio/temporada cuando aplica.
+   * `null` si no tenemos tmdbId (flujo directo por magnet, TUI):
+   * en ese caso `handleBack` cae al `nav(-1)` estándar, que en la
+   * práctica también lleva a Torrents porque es la página anterior
+   * en la historia de navegación normal. */
+  const torrentsRoute = useMemo<string | null>(() => {
+    const s = state
+    if (!s?.tmdbId) return null
+    if (s.isSeries && s.season != null && s.episode != null) {
+      return `/torrents/series/${s.tmdbId}?season=${s.season}&episode=${s.episode}`
+    }
+    return `/torrents/tmdb/${s.tmdbId}?title=${encodeURIComponent(s.title)}`
+  }, [state])
   /** `true` cuando el `<video>` con `src=/video` (path DIRECT) dio
    *  `MEDIA_ERR_SRC_NOT_SUPPORTED`. En ese caso reescribimos
    *  `canGoDirect` a `false` para el siguiente render → el effect
@@ -328,24 +351,42 @@ export function Player() {
         const info = await probeStream(stream.url)
         if (!cancelled) setMedia(info)
       } catch (e) {
-        // Probe puede fallar por: ffmpeg/ffprobe no instalado,
-        // timeout, o CSP bloqueando 127.0.0.1. Sin `media` el
-        // <video> nunca se monta (videoSrc = null) → onError nunca
-        // dispara → spinner infinito. Hay que decidirle al user.
-        if (!cancelled) {
-          const msg = String(e)
-          const looksLikeMissingFfmpeg = /ffmpeg/i.test(msg)
-          setError(
-            looksLikeMissingFfmpeg
-              ? t('player.ffmpegMissing', { hint: ffmpegInstallHint(t) })
-              : t('player.probeFailed', { err: msg }),
-          )
+        // Probe puede fallar por: swarm sin seeders (backend firma
+        // `probe_stalled` con 504+JSON → ProbeStalledError),
+        // ffmpeg/ffprobe no instalado, timeout, CSP bloqueando
+        // 127.0.0.1. Sin `media` el <video> nunca se monta
+        // (videoSrc = null) → onError nunca dispara → spinner
+        // infinito. Hay que decidirle al user.
+        if (cancelled) return
+        if (e instanceof ProbeStalledError) {
+          // Firma clara de "este torrent no tiene seeders vivos":
+          // mensaje específico + botón Volver → lista de torrents
+          // del título. Antes esto se ocultaba bajo el mensaje
+          // genérico "comprueba ffmpeg", que era engañoso — el
+          // binario está OK, el problema es el swarm.
+          setError(t('player.probeStalled', { elapsed: String(e.elapsedS) }))
+          setErrorBackTo(torrentsRoute)
+          return
         }
+        const msg = String(e)
+        const looksLikeMissingFfmpeg = /ffmpeg/i.test(msg)
+        setError(
+          looksLikeMissingFfmpeg
+            ? t('player.ffmpegMissing', { hint: ffmpegInstallHint(t) })
+            : t('player.probeFailed', { err: msg }),
+        )
       }
     })()
     return () => {
       cancelled = true
     }
+    // `stream` es el disparador real; `t` y `torrentsRoute` los
+    // usamos en el catch pero son estables durante la vida del
+    // componente (t re-genera cadena vacía tras cambio de locale,
+    // y torrentsRoute depende de `state` que nunca cambia mid-vida
+    // de la view — un mount nuevo se crea al navegar). Añadirlos
+    // al array re-dispararía el probe sin motivo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stream])
 
   // Backdrop de TMDB para el StremioLoader. Se pide UNA vez al
@@ -892,6 +933,18 @@ export function Player() {
         await stopStream(id).catch(() => {})
       })()
     }
+    // Errores por swarm muerto → volvemos EXPLÍCITAMENTE a la lista
+    // de torrents del título (calculada desde `state.tmdbId` +
+    // series/episodio) para que el user pueda elegir otro release,
+    // en vez de un `nav(-1)` ciego que — si la historia tiene ruido
+    // — puede dejar al user en Home o en Recomendaciones sin acceso
+    // directo a los otros torrents que ya había mirado.
+    // Para errores "reales" (ffmpeg roto, MediaError code 4) el
+    // `errorBackTo` es null → mantenemos el `nav(-1)` clásico.
+    if (errorBackTo) {
+      nav(errorBackTo, { replace: true })
+      return
+    }
     nav(-1)
   }
 
@@ -1107,6 +1160,14 @@ export function Player() {
                   pct: (stall.downloaded_pct ?? 0).toFixed(1),
                 }),
               )
+              // Simétrico a `probe_stalled`: si el swarm muere a
+              // mitad de peli, el fix accionable es cambiar de
+              // release; que Volver lleve a la lista, no atrás sin
+              // más. Sin este override un enjambre que se queda sin
+              // seeders acabaría mostrando el mensaje correcto pero
+              // con un botón que devuelve a Home / Recs / donde
+              // sea, y el user tenía que re-navegar a mano.
+              setErrorBackTo(torrentsRoute)
               return
             }
           } catch {
@@ -1129,7 +1190,10 @@ export function Player() {
     }
     // `activeAudioIdx` incluido para forzar re-run al cambiar pista:
     // el backend ya purgó segmentos, hls.js necesita reconstruirse
-    // para pedir la playlist de cero.
+    // para pedir la playlist de cero. `t` y `torrentsRoute` son
+    // estables durante la vida del componente y solo se leen en el
+    // catch fatal — meterlos en el array re-crearía hls.js sin motivo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoSrc, needsHls, activeAudioIdx])
 
   return (

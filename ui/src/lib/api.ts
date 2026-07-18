@@ -437,10 +437,51 @@ export interface MediaStream {
 
 /** Consulta el endpoint `/probe.json` del stream local. `streamUrl` es
  * la URL que devuelve `start_stream_html` (que apunta a `/video`);
- * probe se sirve desde el mismo host/port. */
+ * probe se sirve desde el mismo host/port.
+ *
+ * Errores posibles:
+ *   - `ProbeStalledError`: backend devolvió 504 + JSON
+ *     `{reason:"probe_stalled", bytes, elapsed_s}` — ffprobe se
+ *     rindió tras 20 s sin cabecera. Firma clara de "swarm sin
+ *     seeders": el player pinta mensaje y botón "Volver a torrents
+ *     del título" en vez del genérico "comprueba ffmpeg".
+ *   - `Error` genérico: 500 (ffprobe/ffmpeg roto), 4xx, red caída.
+ *     El player lo mapea al mensaje "ffmpeg missing" heurístico
+ *     que existía antes. */
+export class ProbeStalledError extends Error {
+  readonly reason = 'probe_stalled'
+  readonly bytes: number
+  readonly elapsedS: number
+  constructor(bytes: number, elapsedS: number) {
+    super(`probe_stalled: 0 B in ${elapsedS}s`)
+    this.name = 'ProbeStalledError'
+    this.bytes = bytes
+    this.elapsedS = elapsedS
+  }
+}
+
 export async function probeStream(streamUrl: string): Promise<MediaInfo> {
   const base = streamUrl.replace(/\/video$/, '')
   const r = await fetch(`${base}/probe.json`)
+  if (r.status === 504) {
+    // Rama estructurada `probe_stalled` del backend. El body es JSON
+    // con `bytes` (siempre 0 hoy) + `elapsed_s`. Si falla el parse
+    // (raro — el backend controla el body), caemos al Error genérico
+    // para no ocultar información al log de la consola.
+    try {
+      const body = (await r.json()) as {
+        reason?: string
+        bytes?: number
+        elapsed_s?: number
+      }
+      if (body.reason === 'probe_stalled') {
+        throw new ProbeStalledError(body.bytes ?? 0, body.elapsed_s ?? 0)
+      }
+    } catch (e) {
+      if (e instanceof ProbeStalledError) throw e
+      throw new Error(`probe 504 (body no parseable): ${e}`)
+    }
+  }
   if (!r.ok) throw new Error(`probe ${r.status}`)
   return (await r.json()) as MediaInfo
 }

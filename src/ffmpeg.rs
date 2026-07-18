@@ -331,6 +331,43 @@ pub enum StreamKind {
     Other,
 }
 
+/// Timeout defensivo para `ffprobe` contra `/video`. Si librqbit
+/// está descargando un swarm muerto (o el moov está al final del
+/// fichero sin priorizar) `ffprobe` se queda leyendo para siempre.
+/// 20 s es holgado para cabeceras MP4/MKV con Range OK y corto para
+/// no hacer esperar al user cuando de verdad no va a llegar. La
+/// constante es pública para que el frontend/tests puedan citar el
+/// valor sin hardcodearlo por otro lado.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Error marker que emite `probe()` cuando el timeout de 20 s salta
+/// sin que ffprobe llegue a producir output. `serve_probe` en
+/// `stream.rs` hace `downcast_ref::<ProbeStalled>()` sobre el error
+/// devuelto por `ensure_probe` para responder con 504 + JSON
+/// estructurado (`{ "reason": "probe_stalled", ... }`) en vez de
+/// un 500 genérico — el frontend distingue así "swarm sin seeders"
+/// (mensaje "prueba otro release") de "ffprobe reventó" (mensaje
+/// "comprueba ffmpeg").
+#[derive(Debug)]
+pub struct ProbeStalled {
+    /// Segundos de deadline que se agotaron sin que ffprobe
+    /// devolviera nada. Hoy siempre es `PROBE_TIMEOUT.as_secs()`
+    /// pero se propaga explícito para que el frontend lo pinte.
+    pub elapsed_s: u64,
+}
+
+impl std::fmt::Display for ProbeStalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "probe_stalled: ffprobe no recibió cabecera en {} s (swarm sin seeders o moov inaccesible)",
+            self.elapsed_s
+        )
+    }
+}
+
+impl std::error::Error for ProbeStalled {}
+
 /// Corre `ffprobe -v error -print_format json -show_streams -show_format
 /// <url>` y parsea el JSON. `url` es normalmente el endpoint HTTP local
 /// del stream de librqbit — ffprobe lo consume vía Range requests y solo
@@ -356,11 +393,10 @@ pub async fn probe(url: &str) -> Result<MediaInfo> {
     .kill_on_drop(true);
     cmd.hide_console();
 
-    // Timeout defensivo: si librqbit está descargando un swarm muerto
-    // (o el moov está al final del fichero sin priorizar), ffprobe se
-    // queda leyendo `/video` para siempre. 20 s es holgado para
-    // cabeceras de MP4/MKV con Range OK, corto para no hacer esperar
-    // al user cuando de verdad no va a llegar.
+    // Timeout defensivo: ver `PROBE_TIMEOUT` (20 s) — si librqbit
+    // está bajando un swarm muerto o el moov está al final del
+    // fichero sin priorizar, ffprobe se queda leyendo `/video`
+    // para siempre.
     //
     // El `spawn` + `wait_with_output` (en vez de `.output()` a secas)
     // permite que, al hacer timeout, el `Child` se drope dentro del
@@ -368,18 +404,25 @@ pub async fn probe(url: &str) -> Result<MediaInfo> {
     // proceso real. Con el shim de Scoop resuelto en `locate_bin`,
     // ese kill ahora sí alcanza al ffprobe.exe destino.
     let child = cmd.spawn().context("Error al spawnear ffprobe")?;
-    let out = match tokio::time::timeout(Duration::from_secs(20), child.wait_with_output()).await {
+    let out = match tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output()).await {
         Ok(res) => res.context("Error al esperar ffprobe")?,
         Err(_) => {
+            let elapsed_s = started.elapsed().as_secs();
             tracing::warn!(
                 target: "probe",
                 url = %url,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "timeout 20s — descarga del inicio del fichero no avanza"
+                elapsed_s,
+                "timeout — descarga del inicio del fichero no avanza"
             );
-            bail!(
-                "no se pudo analizar el v\u{ed}deo: la descarga del inicio del fichero no avanza (timeout ffprobe 20s)"
-            );
+            // Marker error explícito: `serve_probe` hace downcast a
+            // este tipo para devolver 504 + JSON estructurado en vez
+            // de un 500 genérico. El frontend usa ese JSON para
+            // distinguir "swarm sin seeders" de "ffprobe/ffmpeg
+            // roto" y pintar mensajes distintos + botón "Volver a
+            // torrents del título".
+            return Err(anyhow::Error::from(ProbeStalled {
+                elapsed_s: PROBE_TIMEOUT.as_secs(),
+            }));
         }
     };
     if !out.status.success() {

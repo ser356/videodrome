@@ -268,6 +268,8 @@ export const es: Record<string, string> = {
   'player.hlsFatal': 'Fallo de HLS ({{type}}/{{details}}). Prueba a cambiar el reproductor a VLC en Ajustes.',
   'player.swarmStalled':
     'El torrent está descargando a {{speed}} con {{peers}} peers ({{pct}}% completo). El enjambre no da suficiente ancho de banda para reproducir. Prueba otro release con más seeders, o abre el enlace en VLC desde Ajustes.',
+  'player.probeStalled':
+    'Este torrent no está descargando (0 B en {{elapsed}} s), probablemente no tiene seeders activos. Prueba otro release de la lista.',
   'player.videoFailed': 'No se pudo reproducir esta película en el player. Prueba a cambiar el reproductor a VLC desde Ajustes.',
   'player.ffmpegMissing':
     'ffmpeg no está disponible. {{hint}} Alternativa: cambia el reproductor a VLC en Ajustes.',
