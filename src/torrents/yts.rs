@@ -154,6 +154,7 @@ impl TorrentProvider for Yts {
                 leechers: t.peers,
                 quality: Some(t.quality),
                 source: "yts".to_string(),
+                match_kind: crate::torrents::MatchKind::default(),
                 infohash: t.hash.to_ascii_uppercase(),
             });
         }

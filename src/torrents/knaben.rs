@@ -240,6 +240,7 @@ fn hits_to_torrents(hits: Vec<KnabenHit>) -> Vec<Torrent> {
             leechers,
             quality,
             source: "knaben".to_string(),
+            match_kind: crate::torrents::MatchKind::default(),
             infohash,
         });
     }

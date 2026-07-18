@@ -43,10 +43,38 @@ pub struct Torrent {
     /// pero se cambió a `String` en la Fase 4a del audit para poder
     /// deserializar desde el caché de disco (`torrent_search_cache.json`).
     pub source: String,
+    /// Cómo matchea este release contra la query (episodio suelto,
+    /// pack de temporada, pack de serie, película). Se rellena en
+    /// `search_all` tras parsear el nombre con `release_name::parse`
+    /// y comparar con `query.kind/season/episode`. Sirve para:
+    ///   * pintar un badge en la UI ("E03" / "Pack S01" / …)
+    ///   * modular el score final (`match_multiplier` en `score()`)
+    #[serde(default)]
+    pub match_kind: MatchKind,
     /// Infohash extraído del magnet (para dedupe). No se serializa al JSON
     /// para no ensuciar la salida.
     #[serde(skip)]
     pub infohash: String,
+}
+
+/// Cómo un release matchea contra la query. Por defecto `Movie`
+/// (equivale a "no aplica el mundo de series"), lo que preserva el
+/// comportamiento pre-audit para películas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    /// Película o compat legacy — sin distinción de series.
+    #[default]
+    Movie,
+    /// Episodio exacto: parsed.season==query.season y
+    /// parsed.episode==query.episode.
+    Episode,
+    /// Pack de temporada completa: parsed.season matchea la pedida,
+    /// sin episodio en el nombre, o frase "Season N".
+    SeasonPack,
+    /// Pack de serie completa: frases "Complete Series",
+    /// "Complete Collection", "Mini-Series", etc.
+    SeriesPack,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -292,6 +320,74 @@ fn titles_match(variant: &str, candidate: &str) -> bool {
     false
 }
 
+/// Decide si un release matchea la query y con qué categoría
+/// (`MatchKind`). Devuelve `None` para descartar; `Some(mk)` para
+/// aceptar y etiquetar.
+///
+/// Reglas:
+/// * `query.kind == Movie`:
+///     - Rechaza cualquier serie (`parsed.is_tv()` o phrase pack
+///       detectada por `is_tv_release`). Comportamiento pre-audit.
+///     - Acepta lo demás como `MatchKind::Movie`.
+/// * `query.kind == Series`:
+///     - Con `episode` pedido: acepta si `parsed.season == query.season
+///       && parsed.episode == query.episode` (Episode), o si el
+///       release es season pack de esa temporada (SeasonPack), o
+///       si es series pack (SeriesPack). Rechaza episodios de otra
+///       temporada/episodio.
+///     - Sin `episode` (buscando pack de temporada): acepta season
+///       pack de la temporada pedida (SeasonPack) y series pack
+///       (SeriesPack). Los episodios sueltos se rechazan — el user
+///       pidió pack, no episodios sueltos.
+///     - Sin `season` ni `episode` (serie entera): acepta season
+///       pack de CUALQUIER temporada y series pack. Rechaza
+///       episodios sueltos (no sabemos cuál quería).
+///     - Películas del universo de la serie (parsed sin S/E) se
+///       rechazan siempre — el filtro de título por variantes ya
+///       los evita a nivel de query, pero por si algún homónimo
+///       cuela, aquí se cae.
+fn classify_match(
+    query: &MovieQuery,
+    parsed: &release_name::ParsedRelease,
+    raw_title: &str,
+) -> Option<MatchKind> {
+    let is_series_pack_phrase =
+        is_tv_release(raw_title) && parsed.season.is_none() && parsed.episode.is_none();
+
+    match query.kind {
+        crate::tmdb::MediaKind::Movie => {
+            if parsed.is_tv() || is_tv_release(raw_title) {
+                None
+            } else {
+                Some(MatchKind::Movie)
+            }
+        }
+        crate::tmdb::MediaKind::Series => {
+            match (query.season, query.episode) {
+                // Episodio específico
+                (Some(qs), Some(qe)) => match (parsed.season, parsed.episode) {
+                    (Some(ps), Some(pe)) if ps == qs && pe == qe => Some(MatchKind::Episode),
+                    (Some(ps), None) if ps == qs => Some(MatchKind::SeasonPack),
+                    _ if is_series_pack_phrase => Some(MatchKind::SeriesPack),
+                    _ => None,
+                },
+                // Pack de temporada
+                (Some(qs), None) => match (parsed.season, parsed.episode) {
+                    (Some(ps), None) if ps == qs => Some(MatchKind::SeasonPack),
+                    _ if is_series_pack_phrase => Some(MatchKind::SeriesPack),
+                    _ => None,
+                },
+                // Serie entera (sin season)
+                (None, _) => match (parsed.season, parsed.episode) {
+                    (Some(_), None) => Some(MatchKind::SeasonPack),
+                    _ if is_series_pack_phrase => Some(MatchKind::SeriesPack),
+                    _ => None,
+                },
+            }
+        }
+    }
+}
+
 /// Combina dos vectores de `ProviderStatus` colapsando por nombre.
 /// Se usa cuando `search_all` se llama varias veces con distintos
 /// títulos (ej: primary + english + russian en `search_torrents_by_tmdb`)
@@ -375,14 +471,15 @@ pub async fn search_all(
     // Fase 2b — todos los filtros de matching viven ahora aquí, no
     // en los providers individuales. Pipeline por release:
     //   1. `release_name::parse` sobre el título → `ParsedRelease`
-    //   2. TV/series → skip si `parsed.is_tv()` o si la heurística
-    //      antigua (`is_tv_release`) captura el phrase pack.
-    //   3. Año: si el query trae `year`, exigimos que el `parsed.year`
-    //      esté a ±1 (o que no haya año — no discriminamos entonces).
-    //   4. Título: si el query trae `title_variants` no-vacío,
-    //      exigimos que `normalize_title(parsed.title)` matchee al
-    //      menos una variante. Vacío = compatibilidad legacy (sin
-    //      filtro; el resto de heurísticas hacen su trabajo).
+    //   2. `classify_match` decide contra `query.kind/season/episode`:
+    //      * Movie: rechaza series (parsed.is_tv o phrase pack).
+    //      * Series: acepta episodio exacto / season pack / series
+    //        pack — con `MatchKind` etiquetado en el `Torrent`.
+    //   3. Año: si el query trae `year`, exigimos `parsed.year` ±1.
+    //      (Para episodios el año casi nunca aparece en el release;
+    //      `parsed.year = None` se acepta automáticamente.)
+    //   4. Título: si `title_variants` no-vacío, exigimos que
+    //      `normalize_title(parsed.title)` matchee al menos una.
     //   5. Trash quality (CAM/TS/SCR) y tamaño absurdo — sin cambios.
     let variants_normalized: Vec<String> = query
         .title_variants
@@ -395,15 +492,16 @@ pub async fn search_all(
     let mut statuses: Vec<ProviderStatus> = Vec::with_capacity(providers.len());
     while let Some((items, status)) = futs.next().await {
         statuses.push(status);
-        for t in items {
+        for mut t in items {
             if t.infohash.is_empty() || t.seeders < min_seeders {
                 continue;
             }
             let parsed = release_name::parse(&t.title);
-            // ── TV filter (parser + phrase fallback)
-            if parsed.is_tv() || is_tv_release(&t.title) {
+            // ── Match por kind (Fase 2a — audit series)
+            let Some(mk) = classify_match(query, &parsed, &t.title) else {
                 continue;
-            }
+            };
+            t.match_kind = mk;
             // ── Year filter (parsed vs query, tolerancia ±1)
             if let (Some(target), Some(got)) = (query.year, parsed.year) {
                 if (target as i32 - got as i32).unsigned_abs() > 1 {
@@ -460,11 +558,13 @@ pub async fn search_all(
     }
 }
 
-/// score = seeders * peso_calidad * peso_idioma.
-/// Prioriza calidad razonable sin descartar releases con muchos seeders
-/// aunque sean 720p/SD, y ANTEPONE audio original / multi a los doblajes
-/// (los rusos de RuTracker son numerosos y saturan la lista si no se
-/// castigan).
+/// score = seeders * peso_calidad * peso_idioma * peso_match_kind.
+///
+/// El multiplicador de `match_kind` (Fase 2a — audit series) pondera
+/// preferencia por episodios sueltos sobre packs sin romper la
+/// dominancia por seeders: un pack con 500 seeders sigue ganando a
+/// un episodio con 3, pero con seeders iguales el episodio se
+/// prefiere. Para películas es siempre 1.0 (no hay distinción).
 fn score(t: &Torrent, original_language: Option<&str>) -> f64 {
     let q_weight = match t.quality.as_deref() {
         Some(q) if q.contains("2160") || q.eq_ignore_ascii_case("4k") => 1.00,
@@ -475,7 +575,20 @@ fn score(t: &Torrent, original_language: Option<&str>) -> f64 {
     };
     let hint = classify_audio(&t.title, original_language);
     let lang_weight = language_multiplier(hint);
-    (t.seeders as f64) * q_weight * lang_weight
+    let m_weight = match_kind_multiplier(t.match_kind);
+    (t.seeders as f64) * q_weight * lang_weight * m_weight
+}
+
+/// Peso del `MatchKind` en el score. Episodios exactos ganan a
+/// season packs, y estos a series packs. Movie (compat) queda en
+/// 1.0 para no alterar el score de películas.
+fn match_kind_multiplier(mk: MatchKind) -> f64 {
+    match mk {
+        MatchKind::Movie => 1.00,
+        MatchKind::Episode => 1.00,
+        MatchKind::SeasonPack => 0.80,
+        MatchKind::SeriesPack => 0.50,
+    }
 }
 
 /// Peso de idioma en el score. `Original` y `Multi` son deseables (audio
@@ -1172,6 +1285,147 @@ mod tests {
         assert_eq!(
             classify_audio("Брат 1997 BDRip 1080p", Some("en")),
             AudioHint::Dubbed("ru")
+        );
+    }
+
+    // ── Fase 2a audit series: matching por kind ────────────────────────
+
+    fn mq_movie() -> MovieQuery {
+        MovieQuery {
+            kind: crate::tmdb::MediaKind::Movie,
+            title: "Fargo".to_string(),
+            ..MovieQuery::default()
+        }
+    }
+
+    fn mq_series_episode(s: u16, e: u16) -> MovieQuery {
+        MovieQuery {
+            kind: crate::tmdb::MediaKind::Series,
+            title: "Fargo".to_string(),
+            season: Some(s),
+            episode: Some(e),
+            ..MovieQuery::default()
+        }
+    }
+
+    fn mq_series_season_pack(s: u16) -> MovieQuery {
+        MovieQuery {
+            kind: crate::tmdb::MediaKind::Series,
+            title: "Fargo".to_string(),
+            season: Some(s),
+            episode: None,
+            ..MovieQuery::default()
+        }
+    }
+
+    #[test]
+    fn movie_query_rejects_tv_releases() {
+        // Fargo la peli (1996) vs Fargo la serie: si buscamos peli,
+        // el episodio S02E03 SE RECHAZA aunque el título matchee.
+        let q = mq_movie();
+        let p = release_name::parse("Fargo.S02E03.1080p.WEB-DL.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo.S02E03.1080p.WEB-DL.x264-GRP"),
+            None
+        );
+    }
+
+    #[test]
+    fn movie_query_accepts_movie_release() {
+        let q = mq_movie();
+        let p = release_name::parse("Fargo.1996.1080p.BluRay.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo.1996.1080p.BluRay.x264-GRP"),
+            Some(MatchKind::Movie)
+        );
+    }
+
+    #[test]
+    fn series_episode_query_matches_exact_episode() {
+        let q = mq_series_episode(2, 3);
+        let p = release_name::parse("Fargo.S02E03.1080p.WEB-DL.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo.S02E03.1080p.WEB-DL.x264-GRP"),
+            Some(MatchKind::Episode)
+        );
+    }
+
+    #[test]
+    fn series_episode_query_accepts_season_pack_as_container() {
+        // Pidiendo S02E03 y encontrando un pack de S02 completa: OK,
+        // ese pack contiene el episodio (se elegirá el file dentro
+        // del pack en Fase 3).
+        let q = mq_series_episode(2, 3);
+        let p = release_name::parse("Fargo.S02.1080p.WEB-DL.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo.S02.1080p.WEB-DL.x264-GRP"),
+            Some(MatchKind::SeasonPack)
+        );
+    }
+
+    #[test]
+    fn series_episode_query_rejects_other_season_episode() {
+        // Pidiendo S02E03, un release S03E01 NO cuenta.
+        let q = mq_series_episode(2, 3);
+        let p = release_name::parse("Fargo.S03E01.1080p.WEB-DL.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo.S03E01.1080p.WEB-DL.x264-GRP"),
+            None
+        );
+    }
+
+    #[test]
+    fn series_episode_query_rejects_other_season_pack() {
+        let q = mq_series_episode(2, 3);
+        let p = release_name::parse("Fargo.S01.1080p.WEB-DL.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo.S01.1080p.WEB-DL.x264-GRP"),
+            None
+        );
+    }
+
+    #[test]
+    fn series_episode_query_accepts_complete_series_pack() {
+        let q = mq_series_episode(2, 3);
+        let p = release_name::parse("Fargo.Complete.Series.1080p.WEB-DL.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo Complete Series 1080p WEB-DL x264-GRP"),
+            Some(MatchKind::SeriesPack)
+        );
+    }
+
+    #[test]
+    fn series_season_pack_query_rejects_single_episodes() {
+        // Si el user pide pack, no le sirve un episodio suelto — no
+        // le vamos a preguntar cuál del pack quería, ya lo dijo
+        // (todos).
+        let q = mq_series_season_pack(2);
+        let p = release_name::parse("Fargo.S02E03.1080p.WEB-DL.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo.S02E03.1080p.WEB-DL.x264-GRP"),
+            None
+        );
+    }
+
+    #[test]
+    fn series_season_pack_query_matches_pack() {
+        let q = mq_series_season_pack(2);
+        let p = release_name::parse("Fargo.S02.1080p.WEB-DL.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo.S02.1080p.WEB-DL.x264-GRP"),
+            Some(MatchKind::SeasonPack)
+        );
+    }
+
+    #[test]
+    fn series_query_rejects_movie_homonym() {
+        // "Fargo 1996" (peli) NO debe matchear la query de serie.
+        // parsed.is_tv() = false, is_series_pack_phrase = false → None.
+        let q = mq_series_episode(2, 3);
+        let p = release_name::parse("Fargo.1996.1080p.BluRay.x264-GRP");
+        assert_eq!(
+            classify_match(&q, &p, "Fargo.1996.1080p.BluRay.x264-GRP"),
+            None
         );
     }
 }

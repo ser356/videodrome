@@ -90,6 +90,7 @@ impl TorrentProvider for Apibay {
                     leechers,
                     quality,
                     source: "apibay".to_string(),
+                    match_kind: crate::torrents::MatchKind::default(),
                     infohash: h.info_hash.to_ascii_uppercase(),
                 })
             })

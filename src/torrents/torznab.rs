@@ -162,6 +162,7 @@ impl TorrentProvider for Torznab {
                 leechers,
                 quality,
                 source: "torznab".to_string(),
+                match_kind: crate::torrents::MatchKind::default(),
                 infohash,
             });
         }
