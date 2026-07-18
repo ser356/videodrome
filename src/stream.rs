@@ -49,6 +49,7 @@ use axum::routing::get;
 use axum::Router;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, SessionOptions,
+    SessionPersistenceConfig,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -65,6 +66,20 @@ use crate::winutil::HideConsoleExt;
 
 const LAST_USED_FILE: &str = ".last_used";
 const RESUME_FILE: &str = "resume.json";
+
+/// Subdirectorio (dentro de `<cache>/streams/<infohash>/`) donde
+/// librqbit persiste su estado por-torrent para fastresume: el
+/// `session.json` (índice) + `<hash>.bitv` (bitfield de piezas
+/// completadas) + `<hash>.torrent` (metainfo). Sin esto, cada
+/// apertura del mismo torrent re-hashea el fichero entero antes de
+/// hacer NADA (audit §1: ~20 s para 10.5 GiB, proporcional al
+/// tamaño → ~2 min en un remux UHD de 60 GB).
+///
+/// Colocarlo DENTRO del dir del infohash es intencional:
+/// `clear_all()` y `prune()` borran ese dir por completo, así que
+/// el estado se limpia solo cuando limpiamos la caché. Sin trabajo
+/// extra ni riesgo de fastresume apuntando a ficheros ya borrados.
+const LIBRQBIT_SESSION_SUBDIR: &str = ".session";
 
 // ── Client capabilities (audit §4) ────────────────────────────
 //
@@ -437,6 +452,13 @@ struct HlsJob {
     /// decidir si el job actual puede servirlo (dentro de la
     /// ventana) o hay que reiniciar en el idx pedido.
     start_idx: u64,
+    /// Cancela la tarea de warm-up asociada al job (audit §2). El
+    /// warm-up corre en paralelo con ffmpeg (NUNCA bloquea el spawn)
+    /// y su único efecto secundario es la priorización de piezas en
+    /// librqbit. Cuando reemplazamos el job (seek fuera de ventana o
+    /// audio switch), cancelamos también su warm-up para no dejar un
+    /// FileStream vivo compitiendo con el del nuevo ffmpeg.
+    warmup_cancel: Option<CancellationToken>,
 }
 
 /// Duración fija de cada segmento HLS, en segundos. Debe coincidir
@@ -745,14 +767,45 @@ pub async fn start_with_target(
     // already in use" hasta que el proceso se reiniciaba.
     let cancel = CancellationToken::new();
 
+    // Persistencia por-torrent (audit §1): solo cuando tenemos
+    // infohash y por tanto caché en disco. Sin esto, cada apertura
+    // re-hashea el fichero entero antes de servir nada (~20 s por
+    // 10.5 GiB, proporcional al tamaño). Con esto + `fastresume:
+    // true`, librqbit reutiliza el `.bitv` de la sesión anterior y
+    // salta el re-check. En magnets efímeros (sin infohash → tempdir)
+    // no tiene sentido: al drop se borra todo igual.
+    //
+    // El folder vive DENTRO del dir del infohash → `clear_all` y
+    // `prune` lo limpian con el resto de la entrada sin trabajo
+    // extra ni riesgo de fastresume huérfano.
+    let persistence = if infohash.is_some() {
+        let folder = data_dir.join(LIBRQBIT_SESSION_SUBDIR);
+        if let Err(e) = std::fs::create_dir_all(&folder) {
+            tracing::warn!(
+                target: "torrent",
+                error = %e,
+                dir = %folder.display(),
+                "no se pudo crear el dir de persistencia; fallback a re-check completo"
+            );
+            None
+        } else {
+            Some(SessionPersistenceConfig::Json {
+                folder: Some(folder),
+            })
+        }
+    } else {
+        None
+    };
+    let fastresume = persistence.is_some();
+
     let session = Session::new_with_opts(
         data_dir.clone(),
         SessionOptions {
             // No queremos que la sesión reutilice puertos DHT/estado entre
             // arranques — cada stream es efímero.
             disable_dht_persistence: true,
-            // Tampoco queremos que persista la lista de torrents.
-            persistence: None,
+            persistence,
+            fastresume,
             cancellation_token: Some(cancel.clone()),
             ..Default::default()
         },
@@ -1759,12 +1812,30 @@ async fn serve_hls_segment(
         }
     }
 
-    // Deadline generoso: el spawn en frío de un job en offset alto
-    // puede tardar decenas de segundos (librqbit tiene que bajar las
-    // piezas correspondientes al `-ss` con peers regulares). 60s
-    // deja margen sin dejar al user esperando eternamente.
+    // Deadline sensible al progreso (audit §3.a). Dos condiciones
+    // de salida:
+    //
+    //   * HARD_DEADLINE (120 s): tope duro. Si tras 2 min no ha
+    //     aparecido el .ts, algo está muy mal y devolvemos 504.
+    //
+    //   * STALL_TIMEOUT (15 s sin progreso de descarga): si la
+    //     telemetría de librqbit reporta CERO bytes nuevos durante
+    //     15 s seguidos, respondemos 503 con JSON detallado —
+    //     `{reason:"swarm_stalled", downloaded_pct, speed_bps,
+    //     peers}`. El frontend distingue esto de un error genérico
+    //     y pinta un mensaje honesto ("descarga a X kB/s, prueba
+    //     otro release o VLC").
+    //
+    // Mientras haya progreso (aunque sea lento), esperamos:
+    // reproduce lo mismo que VLC hace con enjambres modestos. El
+    // usuario ve el overlay de arranque con la velocidad real.
+    const HARD_DEADLINE_SECS: u64 = 120;
+    const STALL_TIMEOUT_SECS: u64 = 15;
     let started_at = tokio::time::Instant::now();
-    let deadline = started_at + std::time::Duration::from_secs(60);
+    let hard_deadline = started_at + std::time::Duration::from_secs(HARD_DEADLINE_SECS);
+    let initial_stats = state.handle.stats();
+    let mut last_progress_bytes = initial_stats.progress_bytes;
+    let mut last_progress_at = started_at;
     let mut logged_wait = false;
     loop {
         // Fast path: el fichero .ts existe. Con `-hls_flags temp_file`,
@@ -1816,17 +1887,75 @@ async fn serve_hls_segment(
             ensure_hls_job(&state, idx).await?;
         }
 
-        if tokio::time::Instant::now() >= deadline {
+        // Snapshot de progreso: si librqbit sigue bajando bytes,
+        // reseteamos el reloj de stall. `progress_bytes` cuenta
+        // TODO el fichero, no solo las piezas del segmento — es OK:
+        // basta con que el swarm dé cualquier bit para saber que
+        // está vivo.
+        let stats = state.handle.stats();
+        if stats.progress_bytes > last_progress_bytes {
+            last_progress_bytes = stats.progress_bytes;
+            last_progress_at = tokio::time::Instant::now();
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= hard_deadline {
             tracing::warn!(
                 target: "hls",
                 file = %file,
                 idx,
-                "TIMEOUT: segmento no disponible tras 60s"
+                elapsed_s = started_at.elapsed().as_secs(),
+                "TIMEOUT: hard deadline reached"
             );
             return Err((
                 StatusCode::GATEWAY_TIMEOUT,
-                format!("segmento {file} no disponible tras 60s"),
+                format!("segmento {file} no disponible tras {HARD_DEADLINE_SECS}s"),
             ));
+        }
+        if last_progress_at.elapsed().as_secs() >= STALL_TIMEOUT_SECS {
+            // Swarm stalled: cero bytes en 15 s. Reportar con
+            // datos reales (velocidad, peers, %) para que el
+            // frontend pinte un error honesto.
+            let down_mbps = state
+                .handle
+                .live()
+                .map(|l| l.down_speed_estimator().mbps())
+                .unwrap_or(0.0);
+            let live_peers = stats
+                .live
+                .as_ref()
+                .map(|l| l.snapshot.peer_stats.live as u32)
+                .unwrap_or(0);
+            let downloaded_pct = if stats.total_bytes > 0 {
+                (stats.progress_bytes as f64 / stats.total_bytes as f64) * 100.0
+            } else {
+                0.0
+            };
+            let speed_bps = (down_mbps * 1024.0 * 1024.0) as u64;
+            tracing::warn!(
+                target: "hls",
+                file = %file,
+                idx,
+                elapsed_s = started_at.elapsed().as_secs(),
+                stalled_s = last_progress_at.elapsed().as_secs(),
+                down_mbps = format!("{down_mbps:.2}"),
+                peers = live_peers,
+                downloaded_pct = format!("{downloaded_pct:.1}"),
+                "swarm_stalled"
+            );
+            let body = format!(
+                r#"{{"reason":"swarm_stalled","downloaded_pct":{:.2},"speed_bps":{},"peers":{},"stalled_s":{}}}"#,
+                downloaded_pct,
+                speed_bps,
+                live_peers,
+                last_progress_at.elapsed().as_secs()
+            );
+            let resp = Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            return Ok(resp);
         }
         // Log de progreso una única vez tras 5s de espera para
         // detectar spawns lentos sin ensuciar la consola en el caso
@@ -1894,6 +2023,14 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
         )
     };
     if let Some(mut old) = old_job {
+        // Cancelar el warmup del job viejo ANTES del kill: el warmup
+        // mantiene un FileStream abierto contra librqbit, y librqbit
+        // reparte el ancho de banda entre TODOS los FileStreams
+        // activos. Si sobrevive al respawn, el nuevo ffmpeg se lleva
+        // la mitad de la velocidad efectiva.
+        if let Some(token) = old.warmup_cancel.as_ref() {
+            token.cancel();
+        }
         // Cancelar la Range GET del ffmpeg viejo contra `/video`:
         // axum cierra el body → librqbit libera el FileStream → las
         // piezas priorizadas se liberan para el nuevo.
@@ -1921,13 +2058,36 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
         );
     }
 
-    // Warm-up de librqbit: si el idx pedido corresponde a un offset
-    // alto y las piezas están frías, priorizamos su descarga ANTES
-    // de que ffmpeg haga su primer read. Reduce el tiempo hasta el
-    // primer segmento típico de 60s → 15-30s en pelis pesadas.
-    if start_seconds > 5.0 {
-        warmup_librqbit_for_offset(state, start_seconds).await;
-    }
+    // Warm-up EN PARALELO (audit §2): NO bloqueamos el spawn de
+    // ffmpeg. Antes ejecutábamos el warmup síncronamente antes del
+    // spawn — 24 s de serialización pura en el peor caso, con
+    // ffmpeg parado sin razón (ffmpeg lee por HTTP, esperaría esos
+    // mismos bytes en paralelo con la descarga en cuanto arranque).
+    //
+    // La tarea corre concurrentemente y su único efecto es la
+    // priorización de piezas en librqbit; nadie la espera. Se
+    // cancela al reemplazar el job (arriba) para no dejar
+    // FileStreams huérfanos compitiendo con el nuevo ffmpeg.
+    let warmup_cancel = if start_seconds > 5.0 {
+        let token = CancellationToken::new();
+        let token_task = token.clone();
+        let state_task = state.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = token_task.cancelled() => {
+                    tracing::info!(
+                        target: "warmup",
+                        start_seconds,
+                        "cancelled (job replaced or stream dropped)"
+                    );
+                }
+                _ = warmup_librqbit_for_offset(&state_task, start_seconds) => {}
+            }
+        });
+        Some(token)
+    } else {
+        None
+    };
 
     let child = spawn_hls(state, &dir, idx, audio_idx, mode, start_seconds).await?;
     // Detección de fallo temprano: si el argv es inválido
@@ -1943,7 +2103,11 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
         Ok(Some(status)) if !status.success() => {
             // Muerte inmediata con error. Marcamos el HlsState
             // como fatal para que las siguientes requests devuelvan
-            // 500 sin respawnear.
+            // 500 sin respawnear. Cancelamos también el warm-up
+            // huérfano para no dejar el FileStream vivo.
+            if let Some(token) = warmup_cancel.as_ref() {
+                token.cancel();
+            }
             let msg = format!(
                 "ffmpeg exited with {} in <500ms (probablemente filter/codec no soportado)",
                 status
@@ -1969,6 +2133,7 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
     hls.job = Some(HlsJob {
         child,
         start_idx: idx,
+        warmup_cancel,
     });
     Ok(())
 }

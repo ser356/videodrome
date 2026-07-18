@@ -1066,13 +1066,15 @@ export function Player() {
         return
       }
       const hls = new Hls({
-        // VOD con segmentos bajo demanda: subir el timeout de carga
-        // de fragmento por encima del peor caso de "ffmpeg
-        // arrancando en frío" (serve_hls_segment espera hasta 30s
-        // en el backend).
-        fragLoadingTimeOut: 45_000,
+        // VOD con segmentos bajo demanda con progress-sensitive
+        // deadline en el backend (audit §3.a): hard 120s, o 15s sin
+        // progreso → 503 swarm_stalled. hls.js debe esperar al
+        // backend (una sola fuente de verdad) → subimos los
+        // timeouts por encima del hard deadline para que un abort
+        // por timeout de hls.js NUNCA gane la carrera al backend.
+        fragLoadingTimeOut: 130_000,
         manifestLoadingTimeOut: 20_000,
-        // Reintentos: piezas frías de librqbit pueden dar 404/wait
+        // Reintentos: piezas frías de librqbit pueden dar 503/wait
         // legítimo. hls.js aborta por defecto en 3 intentos.
         fragLoadingMaxRetry: 6,
       })
@@ -1080,12 +1082,37 @@ export function Player() {
       hls.attachMedia(v)
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return
-        // Mapeamos los fatales al mismo canal de error del player.
-        // Si es de tipo NETWORK (típicamente 404 tras muchos
-        // reintentos) o MEDIA (transmux fallido), damos un mensaje
-        // útil. `startLoad()` recupera algunos NETWORK / MEDIA no
-        // fatales — pero cuando llega `fatal: true` no hay vuelta.
+        // Backend firmó `swarm_stalled` (503 + JSON con datos
+        // reales) → pintamos error honesto con velocidad y peers.
+        // Cualquier otro fatal → mensaje genérico.
         console.warn('[hls] fatal', data.type, data.details)
+        const resp = data.response
+        if (resp && resp.code === 503) {
+          try {
+            const raw =
+              typeof resp.data === 'string'
+                ? resp.data
+                : new TextDecoder().decode(resp.data as ArrayBuffer)
+            const stall = JSON.parse(raw) as {
+              reason?: string
+              downloaded_pct?: number
+              speed_bps?: number
+              peers?: number
+            }
+            if (stall.reason === 'swarm_stalled') {
+              setError(
+                t('player.swarmStalled', {
+                  speed: formatSpeed(stall.speed_bps ?? 0),
+                  peers: String(stall.peers ?? 0),
+                  pct: (stall.downloaded_pct ?? 0).toFixed(1),
+                }),
+              )
+              return
+            }
+          } catch {
+            /* fallthrough al mensaje genérico */
+          }
+        }
         setError(t('player.hlsFatal', { type: data.type, details: data.details }))
       })
       return () => {
@@ -1246,11 +1273,17 @@ export function Player() {
                el buffer se rellene en el offset nuevo.
             3. Cambio de pista de audio: backend está purgando
                segmentos y respawneando ffmpeg → tapa la transición.
-          Nada de MiB/s / ETA / peers — el user eligió reproducir
-          esta peli, no quiere ver plumbing. Las stats siguen
-          disponibles bajo demanda desde el botón `Gauge`. */}
-      {(!stream || !hasStartedPlayback || seeking || audioSwitching) &&
-        !error && <StremioLoader title={state.title} backdropUrl={backdropUrl} />}
+          Durante el arranque incluye speed / peers para que el user
+          sepa que el enjambre está descargando (audit §3.b) — en
+          seek / audio switch se omite (los datos ya están arriba
+          en la barra, y esas transiciones son cortas). */}
+      {(!stream || !hasStartedPlayback || seeking || audioSwitching) && !error && (
+        <StremioLoader
+          title={state.title}
+          backdropUrl={backdropUrl}
+          stats={!hasStartedPlayback && !seeking && !audioSwitching ? stats : null}
+        />
+      )}
       {buffering && hasStartedPlayback && !seeking && !audioSwitching && !error && (
         <div className="pointer-events-none absolute right-6 top-6">
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
@@ -2070,9 +2103,13 @@ function SubsPanel({
  * Loader minimalista al estilo Stremio: fondo con el backdrop de la
  * peli (o negro plano si no lo tenemos) + gradiente que oscurece el
  * centro-inferior para dar contraste al título + spinner sutil bajo
- * él. Nada de estadísticas de descarga durante el arranque — el
- * usuario ya eligió la peli y no quiere ver plumbing del protocolo.
- * Las stats siguen accesibles bajo demanda desde el botón `Gauge`.
+ * él.
+ *
+ * Cuando recibe `stats` (fase arranque), añade una línea con
+ * velocidad / peers / % descargado / ETA — audit §3.b: el user tiene
+ * que saber que la descarga sigue viva y a qué ritmo mientras el
+ * backend espera piezas del enjambre. Sin `stats` (seek / audio
+ * switch) queda como antes: título + spinner.
  *
  * Se reutiliza para dos estados:
  *   - Arranque inicial (torrent + probe + primer buffer HLS).
@@ -2093,10 +2130,17 @@ function SubsPanel({
 function StremioLoader({
   title,
   backdropUrl,
+  stats,
 }: {
   title: string
   backdropUrl: string | null
+  stats?: StreamStats | null
 }) {
+  const bytesPerSec = stats ? stats.down_mbps * 1024 * 1024 : 0
+  const hasProgress = stats != null && stats.total_bytes > 0
+  const pct = hasProgress
+    ? (stats!.progress_bytes / stats!.total_bytes) * 100
+    : null
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden bg-black">
       {backdropUrl && (
@@ -2126,9 +2170,37 @@ function StremioLoader({
             Cargando<LoadingDots />
           </span>
         </div>
+        {stats && (
+          <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-1 text-[12px] tabular-nums text-body/80 drop-shadow-[0_1px_4px_rgba(0,0,0,0.9)]">
+            <span>{formatSpeed(bytesPerSec)}</span>
+            <span className="text-dim">·</span>
+            <span>{stats.live_peers} peers</span>
+            {pct != null && (
+              <>
+                <span className="text-dim">·</span>
+                <span>{pct.toFixed(1)}%</span>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
+}
+
+/**
+ * Formatea bytes/s en la unidad adecuada (B, KiB, MiB, GiB por
+ * segundo). Usado por el StremioLoader durante arranque y por el
+ * mensaje de `swarm_stalled` para que el user vea numeros humanos.
+ */
+function formatSpeed(bps: number): string {
+  if (bps <= 0) return '0 B/s'
+  const kib = bps / 1024
+  if (kib < 1024) return `${kib.toFixed(0)} KiB/s`
+  const mib = kib / 1024
+  if (mib < 1024) return `${mib.toFixed(2)} MiB/s`
+  const gib = mib / 1024
+  return `${gib.toFixed(2)} GiB/s`
 }
 
 /**

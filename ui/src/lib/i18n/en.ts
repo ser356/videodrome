@@ -268,6 +268,8 @@ export const en: Record<string, string> = {
   'player.stat.downloaded': 'Downloaded',
   'player.hlsUnsupported': 'Your browser/webview does not support HLS. Switch the player to VLC in Settings.',
   'player.hlsFatal': 'HLS failure ({{type}}/{{details}}). Try switching the player to VLC in Settings.',
+  'player.swarmStalled':
+    'The torrent is downloading at {{speed}} with {{peers}} peers ({{pct}}% complete). The swarm cannot sustain enough bandwidth for playback. Try another release with more seeders, or open the link in VLC from Settings.',
   'player.videoFailed': 'Could not play this movie in the embedded player. Try switching to VLC from Settings.',
   'player.ffmpegMissing':
     'ffmpeg is not available. {{hint}} Alternative: switch the player to VLC in Settings.',

@@ -88,7 +88,7 @@ problemas) en [docs/WINDOWS.md](docs/WINDOWS.md).
 ### Linux · tarball CLI
 
 ```bash
-curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.1-linux-x86_64.tar.gz | tar -xz
+curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.2-linux-x86_64.tar.gz | tar -xz
 sudo mv videodrome /usr/local/bin/
 sudo apt install ffmpeg  # o el gestor que uses (dnf/pacman)
 ```
