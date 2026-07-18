@@ -90,6 +90,15 @@ interface PlayerState {
   subRelease: string | null
   /** Segundo de arranque para reanudar. `0` = empezar de cero. */
   startSeconds: number
+  /** Metadata de episodio (§7 audit). Cuando `isSeries` es true y
+   * viene `season`/`episode`, el Player:
+   *   - selecciona el fichero correcto dentro de packs (backend),
+   *   - filtra subs por parent_imdb+S+E,
+   *   - persiste resume con clave file_id compuesta y episode meta,
+   *   - habilita el botón "siguiente episodio". */
+  season?: number | null
+  episode?: number | null
+  isSeries?: boolean
 }
 
 const CONTROLS_HIDE_MS = 2500
@@ -185,11 +194,18 @@ export function Player() {
     const d = durationRef.current
     if (id == null || d == null || d <= 0) return
     try {
-      await reportPosition(id, t, d)
+      // §6 audit series: acompañamos con episode meta cuando aplica
+      // para que el backend guarde tmdb_id/season/episode dentro de
+      // la entrada del resume — habilita el "continuar viendo" y el
+      // "siguiente episodio" sin re-parsear el nombre del fichero.
+      const s = state?.isSeries ? (state.season ?? null) : null
+      const e = state?.isSeries ? (state.episode ?? null) : null
+      const tid = state?.isSeries ? (state.tmdbId ?? null) : null
+      await reportPosition(id, t, d, s, e, tid)
     } catch {
       /* best-effort */
     }
-  }, [])
+  }, [state])
 
   // Timer: reporta cada 15s mientras haya stream Y duración conocida.
   // Cuando la peli acaba (o se ve el 95%+), el backend borra el
@@ -244,7 +260,14 @@ export function Player() {
     let localStream: StreamInfo | null = null
     ;(async () => {
       try {
-        const info = await startStreamHtml(state.magnet)
+        // §4 audit series: si el user viene del flujo de serie
+        // pasamos S/E → el backend selecciona el fichero del
+        // episodio dentro del pack (`select_file`).
+        const info = await startStreamHtml(
+          state.magnet,
+          state.isSeries ? (state.season ?? null) : null,
+          state.isSeries ? (state.episode ?? null) : null,
+        )
         if (cancelled) {
           await stopStream(info.id).catch(() => {})
           return
@@ -401,7 +424,17 @@ export function Player() {
     // asociado para calcular el hash OpenSubtitles del fichero de
     // vídeo y buscar subs SYNC-VERIFIED (match exacto de release).
     // Si el hash no da resultados, cae a imdb_id/query como antes.
-    searchSubtitles(stream.id, state?.imdbId ?? null, state?.title ?? null)
+    searchSubtitles(
+      stream.id,
+      state?.imdbId ?? null,
+      state?.title ?? null,
+      undefined,
+      // §5 audit series: parent_imdb_id + season + episode habilita
+      // la ruta canónica de OpenSubtitles para subs de episodio,
+      // en vez de basarse solo en query textual con SxxEyy.
+      state?.isSeries ? (state.season ?? null) : null,
+      state?.isSeries ? (state.episode ?? null) : null,
+    )
       .then((subs) => {
         if (!cancelled) setSubsList(subs)
       })
@@ -415,7 +448,7 @@ export function Player() {
     return () => {
       cancelled = true
     }
-  }, [stream, state?.imdbId, state?.title])
+  }, [stream, state?.imdbId, state?.title, state?.isSeries, state?.season, state?.episode])
 
   // VTT raw (texto original tal cual sale del backend).
   const [rawVtt, setRawVtt] = useState<string | null>(null)
@@ -1219,6 +1252,12 @@ export function Player() {
         <div className="min-w-0 flex-1">
           <p className="truncate text-[15px] font-medium text-ink">
             {state.title}
+            {state.isSeries && state.season != null && state.episode != null && (
+              <span className="ml-2 text-[12px] font-normal text-muted">
+                · S{String(state.season).padStart(2, '0')}E
+                {String(state.episode).padStart(2, '0')}
+              </span>
+            )}
           </p>
           {state.subRelease && (
             <p className="truncate text-[12px] text-muted">
@@ -1226,6 +1265,33 @@ export function Player() {
             </p>
           )}
         </div>
+        {state.isSeries &&
+          state.tmdbId != null &&
+          state.season != null &&
+          state.episode != null &&
+          duration != null &&
+          duration > 0 &&
+          currentTime / duration > 0.9 && (
+            <button
+              onClick={() => {
+                // §6 audit: "siguiente episodio" — dispara una
+                // navegación al Torrents/series con E+1. La ruta ya
+                // reutilizará la caché de sesión torrent del pack si
+                // es el mismo magnet, así que la transición es rápida.
+                const nextEp = state.episode! + 1
+                void reportPositionNow().finally(() => {
+                  nav(
+                    `/torrents/series/${state.tmdbId}?season=${state.season}&episode=${nextEp}`,
+                    { replace: true },
+                  )
+                })
+              }}
+              className="rounded-full border border-accent bg-accent/10 px-3 py-1.5 text-[12px] font-semibold text-accent hover:bg-accent/20"
+              title="Siguiente episodio"
+            >
+              Siguiente episodio →
+            </button>
+          )}
       </div>
 
       {/* Gradiente inferior + control bar */}

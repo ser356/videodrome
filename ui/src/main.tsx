@@ -10,6 +10,7 @@ import { Player } from './views/Player'
 import { Recommendations } from './views/Recommendations'
 import { Search } from './views/Search'
 import { SearchResults } from './views/SearchResults'
+import { SeriesDetail } from './views/SeriesDetail'
 import { Settings } from './views/Settings'
 import { Torrents } from './views/Torrents'
 
@@ -33,8 +34,10 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/search" element={<Search />} />
         <Route path="/search/results" element={<SearchResults />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/series/:tmdbId" element={<SeriesDetail />} />
         <Route path="/torrents/tmdb/:tmdbId" element={<Torrents mode="tmdb" />} />
         <Route path="/torrents/search" element={<Torrents mode="direct" />} />
+        <Route path="/torrents/series/:tmdbId" element={<Torrents mode="series" />} />
         <Route path="/player" element={<Player />} />
       </Routes>
     </BrowserRouter>

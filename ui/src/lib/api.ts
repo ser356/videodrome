@@ -25,6 +25,9 @@ export interface Movie {
   /// `id === 0` este campo lleva el IMDb id y la GUI enruta por texto
   /// directo en vez de por TMDB.
   imdb_id?: string | null
+  /** Discriminador movie/series. Default `movie` para compat con
+   * caches viejos y consumidores que solo esperaban pelis. */
+  kind?: 'movie' | 'series'
 }
 
 export interface Recommendation {
@@ -58,6 +61,10 @@ export interface Torrent {
   source: string
   /** ISO 639-1 (`en`, `es`, `ru`…) o marcador (`multi`, `unknown`, `dub`, `orig`). */
   audio: string
+  /** Cómo matchea contra la query: `movie` (pre-audit), `episode`,
+   * `season_pack`, `series_pack`. La UI pinta un badge acorde
+   * (E03 / Pack S01 / Serie completa). */
+  match_kind: 'movie' | 'episode' | 'season_pack' | 'series_pack'
 }
 
 export interface TorrentSearchResult {
@@ -220,6 +227,76 @@ export interface MovieHit extends Movie {
 export const searchMoviesTmdb = (query: string) =>
   invoke<MovieHit[]>('search_movies_tmdb', { query })
 
+// -------- Series --------
+
+export interface SeriesSeasonSummary {
+  season_number: number
+  episode_count: number
+  air_date: string | null
+  name: string | null
+  poster_path: string | null
+}
+
+export interface SeriesDetails {
+  id: number
+  name: string
+  original_name: string | null
+  imdb_id: string | null
+  original_language: string | null
+  overview: string | null
+  first_air_date: string | null
+  poster_path: string | null
+  backdrop_path: string | null
+  seasons: SeriesSeasonSummary[]
+  number_of_seasons: number
+  status: string | null
+}
+
+export interface SeriesEpisode {
+  season_number: number
+  episode_number: number
+  name: string | null
+  overview: string | null
+  air_date: string | null
+  still_path: string | null
+  runtime: number | null
+}
+
+export const getSeriesView = (tmdbId: number) =>
+  invoke<SeriesDetails | null>('get_series_view', { tmdbId })
+
+export const getSeriesSeason = (tmdbId: number, season: number) =>
+  invoke<SeriesEpisode[]>('get_series_season', { tmdbId, season })
+
+/** Búsqueda de torrents para un episodio (o pack de temporada, si
+ * `episode = null`) de una serie. Backend construye variantes de
+ * título y consulta providers series-aware (EZTV, Torznab tvsearch,
+ * knaben/apibay con SxxEyy). */
+export const searchTorrentsSeries = (
+  tmdbId: number,
+  season: number,
+  episode: number | null,
+) =>
+  invoke<TorrentSearchResult>('search_torrents_series', {
+    tmdbId,
+    season,
+    episode,
+  })
+
+/** Info por-fichero de un torrent (para picker manual cuando la
+ * heurística S+E no matchee — packs con numeración de anime, etc.). */
+export interface TorrentFileInfo {
+  file_id: number
+  name: string
+  size: number
+  season: number | null
+  episode: number | null
+  is_video: boolean
+}
+
+export const listTorrentFiles = (magnet: string) =>
+  invoke<TorrentFileInfo[]>('list_torrent_files', { magnet })
+
 export const openMagnet = (magnet: string) =>
   invoke<void>('open_magnet', { magnet })
 
@@ -229,19 +306,30 @@ export const startStreamWithSub = (
   magnet: string,
   subPath: string | null,
   resumeSeconds: number | null = null,
+  season: number | null = null,
+  episode: number | null = null,
 ) =>
   invoke<StreamInfo>('start_stream_with_sub', {
     magnet,
     subPath,
     resumeSeconds,
+    season,
+    episode,
   })
 
 /** Arranca el stream en modo player HTML: solo librqbit + HTTP server,
  * no spawnea VLC. La URL devuelta apunta a `/video` (raw file); si
  * `direct_playable=true` el player la usa tal cual, si no consume
- * `/hls/playlist.m3u8` (véase `hlsUrl`). */
-export const startStreamHtml = (magnet: string) =>
-  invoke<StreamInfo>('start_stream_html', { magnet })
+ * `/hls/playlist.m3u8` (véase `hlsUrl`).
+ *
+ * `season`/`episode`: cuando el magnet es un season pack de una
+ * serie, seleccionan el fichero del episodio dentro del torrent
+ * (§4 audit series). Ambos juntos o ninguno. */
+export const startStreamHtml = (
+  magnet: string,
+  season: number | null = null,
+  episode: number | null = null,
+) => invoke<StreamInfo>('start_stream_html', { magnet, season, episode })
 
 /** `true` si ffmpeg + ffprobe están en PATH. */
 export const ffmpegAvailable = () => invoke<boolean>('ffmpeg_available')
@@ -347,24 +435,41 @@ export interface Resume {
   seconds: number | null
   duration_seconds: number | null
   updated_at: number
+  /** Metadata de episodio si el resume es de una serie. `null` para
+   * pelis o entradas legacy. */
+  season?: number | null
+  episode?: number | null
 }
 
-export const getResume = (magnet: string) =>
-  invoke<Resume | null>('get_resume', { magnet })
+export const getResume = (
+  magnet: string,
+  season: number | null = null,
+  episode: number | null = null,
+) => invoke<Resume | null>('get_resume', { magnet, season, episode })
 
 /** Reporta la posición absoluta del `<video>` al backend para que la
  * persista en `resume.json`. Se invoca cada ~15s durante la
  * reproducción y en el cleanup del player. Si `seconds/duration_seconds`
- * supera el 95%, el backend borra el resume (peli terminada). */
+ * supera el 95%, el backend borra el resume (peli terminada).
+ *
+ * `season`/`episode`/`tmdbId` (opcionales): metadata que se guarda
+ * con la entrada para habilitar "continuar viendo" y "siguiente
+ * episodio" (§6 audit). */
 export const reportPosition = (
   streamId: number,
   seconds: number,
   durationSeconds: number,
+  season: number | null = null,
+  episode: number | null = null,
+  tmdbId: number | null = null,
 ) =>
   invoke<void>('report_position', {
     streamId,
     seconds,
     durationSeconds,
+    season,
+    episode,
+    tmdbId,
   })
 
 // -------- Subtitles --------
@@ -377,11 +482,15 @@ export const searchSubtitles = (
   imdbId: string | null,
   query: string | null,
   languages?: string,
+  season: number | null = null,
+  episode: number | null = null,
 ) =>
   invoke<Subtitle[]>('search_subtitles', {
     streamId,
     imdbId,
     query,
+    season,
+    episode,
     languages,
   })
 

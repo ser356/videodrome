@@ -15,6 +15,7 @@ import {
   openMagnet,
   searchTorrentsByTmdb,
   searchTorrentsDirect,
+  searchTorrentsSeries,
   startStreamWithSub,
   stopStream,
   type ProviderStatus,
@@ -29,16 +30,24 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  * Vista `View::Torrents` de la TUI. Recibe `mode` por props:
  * - `tmdb`: viene de Recs, hace `search_torrents_by_tmdb` con detalles TMDB.
  * - `direct`: viene de Search, hace `search_torrents_direct` con la query.
+ * - `series`: viene de SeriesDetail; lee season/episode de la URL y
+ *   dispara `search_torrents_series`. §7 audit series.
  *
  * Hotkeys:
  *   j/k mover · Enter proyectar (pregunta por subs → stream) ·
  *   s abre magnet en cliente BT externo · m toggle panel ·
  *   b Esc volver
  */
-export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
+export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
   const nav = useNavigate()
   const { tmdbId } = useParams<{ tmdbId?: string }>()
   const [params] = useSearchParams()
+  // Series: season/episode desde la URL. En mode !== 'series' quedan
+  // como null y no participan en ninguna llamada.
+  const seasonParam = params.get('season')
+  const episodeParam = params.get('episode')
+  const season = seasonParam ? Number(seasonParam) : null
+  const episode = episodeParam ? Number(episodeParam) : null
 
   const [result, setResult] = useState<TorrentSearchResult | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -110,6 +119,17 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
         .then(setResult)
         .catch((e) => setError(String(e)))
         .finally(() => setLoading(false))
+    } else if (mode === 'series') {
+      const id = Number(tmdbId ?? '')
+      if (!Number.isFinite(id) || !season) {
+        setError('Faltan tmdbId o temporada en la URL.')
+        setLoading(false)
+        return
+      }
+      searchTorrentsSeries(id, season, episode)
+        .then(setResult)
+        .catch((e) => setError(String(e)))
+        .finally(() => setLoading(false))
     } else {
       const q = params.get('q') ?? ''
       searchTorrentsDirect(q)
@@ -117,7 +137,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
         .catch((e) => setError(String(e)))
         .finally(() => setLoading(false))
     }
-  }, [mode, tmdbId, params])
+  }, [mode, tmdbId, params, season, episode])
 
   useEffect(() => {
     runSearch()
@@ -162,13 +182,13 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     // resume viven en la view `/player`. Torrents queda como
     // seleccionador de fuente; el streaming lo arranca el propio Player.
     if (useHtml) {
-      // `tmdbId` viaja al Player solo en modo tmdb (viene de Recs
-      // o Search). El Player lo usa para pedir el backdrop al
-      // arrancar y pintarlo detrás del loader al estilo Stremio.
-      // En modo direct (búsqueda por texto) no lo tenemos → el
-      // loader cae a fondo negro sin backdrop.
+      // `tmdbId` viaja al Player solo en modo tmdb/series (viene de
+      // Recs, Search o SeriesDetail). El Player lo usa para pedir el
+      // backdrop al arrancar y pintarlo detrás del loader al estilo
+      // Stremio. En modo direct no lo tenemos → fondo negro sin
+      // backdrop.
       const tmdbIdNum =
-        mode === 'tmdb' && tmdbId ? Number(tmdbId) : null
+        (mode === 'tmdb' || mode === 'series') && tmdbId ? Number(tmdbId) : null
       nav('/player', {
         state: {
           magnet: current.magnet,
@@ -178,6 +198,14 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
           subPath,
           subRelease,
           startSeconds: resumeSeconds ?? 0,
+          // Series: season/episode viajan al Player para que
+          //   - seleccione el fichero correcto dentro de packs,
+          //   - filtre subs por episodio,
+          //   - persista resume con la clave file_id compuesta,
+          //   - habilite el botón "siguiente episodio".
+          season: mode === 'series' ? season : null,
+          episode: mode === 'series' ? episode : null,
+          isSeries: mode === 'series',
         },
       })
       return
@@ -198,7 +226,13 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
       setStream(null)
     }
     try {
-      const info = await startStreamWithSub(current.magnet, subPath, resumeSeconds)
+      const info = await startStreamWithSub(
+        current.magnet,
+        subPath,
+        resumeSeconds,
+        mode === 'series' ? season : null,
+        mode === 'series' ? episode : null,
+      )
       setStream(info)
       const subNote = subRelease ? `  \u00b7  sub: ${subRelease}` : ''
       const resumeNote = resumeSeconds
@@ -232,7 +266,14 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     if (!current) return
     let resume: Resume | null = null
     try {
-      resume = await getResume(current.magnet)
+      // Series: pasamos S/E → backend filtra a la entrada de ese
+      // episodio dentro del store multi-file. Si no hay match
+      // (nunca reproducido), devuelve null y saltamos el prompt.
+      resume = await getResume(
+        current.magnet,
+        mode === 'series' ? season : null,
+        mode === 'series' ? episode : null,
+      )
     } catch {
       // Backend falla leyendo el resume → empezar limpio.
       resume = null
@@ -300,11 +341,18 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     setSel((i) => (i + delta + n) % n)
   }
 
-  const backTo = mode === 'tmdb' ? '/recs' : '/search'
+  const backTo =
+    mode === 'tmdb'
+      ? '/recs'
+      : mode === 'series'
+        ? tmdbId
+          ? `/series/${tmdbId}`
+          : '/search'
+        : '/search'
   const goBack = () => {
     // En modo tmdb el user puede venir de /recs o de /search/results.
     // history.back respeta ambos flujos sin acoplar la vista al origen.
-    if (mode === 'tmdb' && window.history.length > 1) {
+    if ((mode === 'tmdb' || mode === 'series') && window.history.length > 1) {
       nav(-1)
     } else {
       nav(backTo)
@@ -334,7 +382,13 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   })
 
   const label = result?.title
-    ? `${result.title}${result.year ? ` (${result.year})` : ''}`
+    ? `${result.title}${result.year ? ` (${result.year})` : ''}${
+        mode === 'series' && season
+          ? episode
+            ? ` · S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
+            : ` · Temporada ${season}`
+          : ''
+      }`
     : mode === 'direct'
       ? params.get('q') ?? ''
       : ''
@@ -563,7 +617,10 @@ const TorrentRow = ({
       </span>
       <span className="text-right tabular-nums text-good">↑{t.seeders}</span>
       <span className="text-right tabular-nums text-danger">↓{t.leechers}</span>
-      <span className="text-info">{t.quality ?? '?'}</span>
+      <span className="text-info">
+        {t.quality ?? '?'}
+        <MatchKindBadge kind={t.match_kind} />
+      </span>
       <span
         className="inline-flex items-center gap-1 text-[12px] text-body"
         title={flag.label}
@@ -575,6 +632,33 @@ const TorrentRow = ({
       </span>
       <span className="text-[11px] text-dim">{t.source}</span>
     </li>
+  )
+}
+
+/** Badge visual del `match_kind` del release. Muestra el tipo de
+ * paquete cuando el user busca series: episodio suelto, pack de
+ * temporada, o pack de serie completa. Para movies queda invisible
+ * (el default `movie` no necesita distinción). §7 audit series. */
+function MatchKindBadge({ kind }: { kind: Torrent['match_kind'] }) {
+  if (kind === 'movie') return null
+  const label =
+    kind === 'episode'
+      ? 'EP'
+      : kind === 'season_pack'
+        ? 'PACK'
+        : 'SERIE'
+  const cls =
+    kind === 'episode'
+      ? 'border-good/40 text-good'
+      : kind === 'season_pack'
+        ? 'border-warn/40 text-warn'
+        : 'border-info/40 text-info'
+  return (
+    <span
+      className={`ml-2 rounded-sm border ${cls} px-1 py-0 text-[9px] font-semibold uppercase tracking-wide`}
+    >
+      {label}
+    </span>
   )
 }
 

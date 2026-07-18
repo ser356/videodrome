@@ -55,6 +55,12 @@ export function SearchResults() {
 
   const openTorrents = (m: MovieHit) => {
     const y = m.release_date?.slice(0, 4)
+    // Serie: la ruta correcta es /series/:id (SeriesDetail), donde
+    // el user elige temporada/episodio antes de ver torrents.
+    if (m.kind === 'series' && m.id) {
+      nav(`/series/${m.id}?title=${encodeURIComponent(m.title)}`)
+      return
+    }
     // Fallback de Cinemeta: no hay TMDB id → no podemos usar la ruta
     // `/torrents/tmdb/:id` (dispararía `get_movie_details(0)`). Vamos a
     // búsqueda directa por título+año, que no depende de TMDB.
@@ -198,7 +204,7 @@ function MovieCard({
             </div>
           )}
           <span className="absolute right-2 top-2 rounded-full border border-accent/40 bg-canvas/80 px-2 py-0.5 text-[10px] font-semibold text-accent backdrop-blur-sm">
-            ▾ {movie.torrent_count}
+            {movie.kind === 'series' ? 'SERIE' : `▾ ${movie.torrent_count}`}
           </span>
         </div>
         <div className="mt-3 flex items-baseline justify-between gap-2">
