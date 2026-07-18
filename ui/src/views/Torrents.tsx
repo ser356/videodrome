@@ -470,6 +470,8 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
                   ref={(el: HTMLLIElement | null) => { rowsRef.current[i] = el }}
                   t={t}
                   active={i === sel}
+                  targetSeason={mode === 'series' ? season : null}
+                  targetEpisode={mode === 'series' ? episode : null}
                   onClick={() => {
                     setSel(i)
                     // Un solo clic lanza el flujo (pregunta subs → stream).
@@ -590,16 +592,35 @@ const TorrentRow = ({
   ref,
   t,
   active,
+  targetSeason,
+  targetEpisode,
   onClick,
   onContextMenu,
 }: {
   ref: (el: HTMLLIElement | null) => void
   t: Torrent
   active: boolean
+  /** Cuando el user vino del flujo de serie con episodio pedido,
+   * (S,E) — se pinta un chip `S02E03` delante del release name en
+   * los packs para dejar claro que "aunque el release es un pack,
+   * al proyectar te llevas ESE episodio". */
+  targetSeason: number | null
+  targetEpisode: number | null
   onClick: () => void
   onContextMenu: (x: number, y: number) => void
 }) => {
   const flag = audioFlag(t.audio)
+  // Sólo tiene sentido el chip si el user pidió un episodio concreto
+  // Y el release es pack (los episodios sueltos ya se identifican con
+  // su propio nombre + badge EP). Series-pack también gana el chip
+  // porque el user perdería el foco si sólo viera "Complete Series".
+  const showEpisodeChip =
+    targetSeason != null &&
+    targetEpisode != null &&
+    (t.match_kind === 'season_pack' || t.match_kind === 'series_pack')
+  const episodeLabel = showEpisodeChip
+    ? `S${String(targetSeason).padStart(2, '0')}E${String(targetEpisode).padStart(2, '0')}`
+    : null
   return (
     <li
       ref={ref}
@@ -617,7 +638,19 @@ const TorrentRow = ({
       >
         {active ? '▶' : ''}
       </span>
-      <span className="truncate">{t.title}</span>
+      <span className="flex min-w-0 items-center gap-2">
+        {episodeLabel && (
+          <span
+            className="shrink-0 rounded-sm border border-accent/50 bg-accent/10 px-1.5 py-0 text-[10px] font-semibold tracking-wide text-accent"
+            title={`Proyectarás este episodio dentro del pack`}
+          >
+            {episodeLabel}
+          </span>
+        )}
+        <span className={`truncate ${episodeLabel ? 'text-muted' : ''}`}>
+          {t.title}
+        </span>
+      </span>
       <span className="text-right tabular-nums text-warn">
         {formatSize(t.size_bytes)}
       </span>
