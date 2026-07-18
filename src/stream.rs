@@ -57,6 +57,12 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+// El trait solo se usa en spawns Windows y en helpers gui-only
+// (spawn_hls, serve_embedded_subtitle). En la build CLI/TUI puro
+// para macOS/Linux queda sin call sites y warnaría `unused_imports`.
+#[allow(unused_imports)]
+use crate::winutil::HideConsoleExt;
+
 const LAST_USED_FILE: &str = ".last_used";
 const RESUME_FILE: &str = "resume.json";
 
@@ -214,7 +220,7 @@ pub async fn compute_moviehash(
     match tokio::time::timeout(std::time::Duration::from_secs(10), fut).await {
         Ok(res) => res,
         Err(_) => {
-            eprintln!("[subs] compute_moviehash timeout at 10s (peers lentos)");
+            tracing::warn!(target: "subs", "compute_moviehash timeout at 10s (peers lentos)");
             None
         }
     }
@@ -254,7 +260,7 @@ impl Drop for StreamHandle {
                     entry_r.updated_at = now_unix();
                     store.files.insert(key, entry_r);
                     if let Err(e) = write_store_atomic(&path, &store) {
-                        eprintln!("[resume] Drop: atomic write failed: {e}");
+                        tracing::warn!(target: "resume", error = %e, "Drop: atomic write failed");
                     }
                 }
             }
@@ -287,7 +293,14 @@ struct AppState {
     /// cancelamos. Para consumidores secuenciales (VLC, ffmpeg-HLS) el
     /// intervalo entre seeks reales es de segundos, muy por encima del
     /// umbral.
-    active_request: Arc<tokio::sync::Mutex<Option<(CancellationToken, tokio::time::Instant)>>>,
+    active_request: Arc<tokio::sync::Mutex<Option<(u64, CancellationToken, tokio::time::Instant)>>>,
+    /// Contador atómico de peticiones a `/video` en la vida del
+    /// stream. Se incrementa una vez por request y el valor se usa
+    /// como `req_id` en el log (`req#N`) y en el slot
+    /// `active_request` para poder loguear `cancelled_prev=<id>` sin
+    /// pasar el id de forma explícita entre handlers. Overflow real
+    /// después de 2^64 peticiones — ~584 años a 1e9 req/s.
+    request_counter: Arc<AtomicU64>,
     /// Compartido con `StreamHandle`. Se actualiza en cada Range con
     /// start explícito (fetch_max) para trackear la posición de
     /// reproducción alcanzada — usada para persistir `resume.json`.
@@ -811,6 +824,7 @@ pub async fn start_with_target(
         file_id,
         file_len,
         active_request: Arc::new(tokio::sync::Mutex::new(None)),
+        request_counter: Arc::new(AtomicU64::new(0)),
         max_seek: Arc::new(AtomicU64::new(0)),
         local_addr: addr,
         #[cfg(feature = "gui")]
@@ -840,6 +854,70 @@ pub async fn start_with_target(
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async move { cancel_task.cancelled().await })
             .await;
+    });
+
+    // Telemetría periódica al log (audit): cada 5 s, mientras el stream
+    // esté vivo, emitimos progreso + velocidad de librqbit + peers +
+    // playhead. Firma esperada del bug (probe atascado con descarga
+    // activa): `down_mbps > 0` sostenido mientras `req#N` no llega a
+    // su `done`.
+    //
+    // NIVEL `debug`: 12 líneas/min ≈ 720 líneas/hora reventarían el
+    // presupuesto de <200 líneas info de una reproducción típica. El
+    // audit da explícitamente esta escape hatch ("si se supera,
+    // degradar telemetría a `debug`"). Para reproducir el bug del
+    // probe, el usuario ejecuta con `VIDEODROME_LOG_LEVEL=debug`.
+    // La tarea se apaga cuando `cancel` se dispara al drop del
+    // `StreamHandle`.
+    let telemetry_handle = handle.clone();
+    let telemetry_max_seek = max_seek.clone();
+    let telemetry_cancel = cancel.clone();
+    let telemetry_file_len = file_len;
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Primer tick es inmediato; lo consumimos para que el primer
+        // log llegue a los 5 s reales, no al startup (evita ruido en
+        // el arranque donde librqbit aún no tiene stats).
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                _ = telemetry_cancel.cancelled() => return,
+                _ = ticker.tick() => {}
+            }
+            let stats = telemetry_handle.stats();
+            let down_mbps = telemetry_handle
+                .live()
+                .map(|l| l.down_speed_estimator().mbps())
+                .unwrap_or(0.0);
+            let live_peers = stats
+                .live
+                .as_ref()
+                .map(|l| l.snapshot.peer_stats.live as u32)
+                .unwrap_or(0);
+            let progress_pct = if stats.total_bytes > 0 {
+                (stats.progress_bytes as f64 / stats.total_bytes as f64) * 100.0
+            } else {
+                0.0
+            };
+            let playhead = telemetry_max_seek.load(Ordering::Relaxed);
+            let playhead_pct = if telemetry_file_len > 0 {
+                (playhead as f64 / telemetry_file_len as f64) * 100.0
+            } else {
+                0.0
+            };
+            tracing::debug!(
+                target: "torrent",
+                down_mbps = format!("{down_mbps:.2}"),
+                peers = live_peers,
+                progress_mb = stats.progress_bytes / 1_048_576,
+                total_mb = stats.total_bytes / 1_048_576,
+                progress_pct = format!("{progress_pct:.1}"),
+                playhead_mb = playhead / 1_048_576,
+                playhead_pct = format!("{playhead_pct:.1}"),
+                "telemetry"
+            );
+        }
     });
 
     let url = format!("http://{addr}/video");
@@ -927,10 +1005,26 @@ async fn serve_video(
     }
 
     let content_length = end - start + 1;
-    eprintln!(
-        "[video] Range {start}-{end} ({} MB, {:.1}% of file)",
-        content_length / 1_048_576,
-        (start as f64 / state.file_len as f64) * 100.0
+    // Asigna un id monótono a esta request. Se usa como campo `req`
+    // en TODOS los logs de `/video` para poder correlacionar (a) qué
+    // request cancela a qué otra, y (b) cuántos bytes llegó a
+    // entregar cada una antes de morir vs. cerrarse por EOF.
+    let req_id = state.request_counter.fetch_add(1, Ordering::Relaxed);
+    let range_desc = match range {
+        Some((Some(s), Some(e))) => format!("{s}-{e}"),
+        Some((Some(s), None)) => format!("{s}-"),
+        Some((None, Some(n))) => format!("-{n}"),
+        _ => "full".to_string(),
+    };
+    tracing::info!(
+        target: "video",
+        req = req_id,
+        range = %range_desc,
+        start,
+        end,
+        bytes = content_length,
+        pct = format!("{:.1}", (start as f64 / state.file_len as f64) * 100.0),
+        "range in"
     );
 
     // Cancela la petición HTTP anterior antes de arrancar la nueva. Así
@@ -956,21 +1050,45 @@ async fn serve_video(
     let request_token = CancellationToken::new();
     if !is_suffix_range {
         let mut guard = state.active_request.lock().await;
+        let now = tokio::time::Instant::now();
+        let decision: &'static str;
+        let mut cancelled_prev: Option<u64> = None;
         let should_cancel_prev = guard
             .as_ref()
-            .map(|(_, started)| started.elapsed().as_millis() >= BURST_WINDOW_MS)
+            .map(|(_, _, started)| started.elapsed().as_millis() >= BURST_WINDOW_MS)
             .unwrap_or(false);
-        let now = tokio::time::Instant::now();
         if should_cancel_prev {
-            if let Some((prev, _)) = guard.replace((request_token.clone(), now)) {
+            if let Some((prev_id, prev, _)) = guard.replace((req_id, request_token.clone(), now)) {
                 prev.cancel();
+                cancelled_prev = Some(prev_id);
+                decision = "cancelled_prev";
+            } else {
+                decision = "slot_empty";
             }
+        } else if guard.is_some() {
+            // Coexistimos con el burst. Sobrescribimos el slot con el
+            // nuestro para que la SIGUIENTE cancele a esta si llega
+            // después del burst window.
+            *guard = Some((req_id, request_token.clone(), now));
+            decision = "coexist_burst";
         } else {
-            // No cancelamos (burst reciente o no había previa). Sobrescribimos
-            // el slot con el nuestro para que la SIGUIENTE cancele a esta
-            // si llega después del burst window.
-            *guard = Some((request_token.clone(), now));
+            *guard = Some((req_id, request_token.clone(), now));
+            decision = "slot_empty";
         }
+        tracing::info!(
+            target: "video",
+            req = req_id,
+            decision,
+            cancelled_prev,
+            "active_request"
+        );
+    } else {
+        tracing::info!(
+            target: "video",
+            req = req_id,
+            decision = "suffix_skip",
+            "active_request"
+        );
     }
 
     // Crea un stream nuevo por request (librqbit gestiona la prioridad de
@@ -997,7 +1115,14 @@ async fn serve_video(
     };
     let raw = tokio_util::io::ReaderStream::with_capacity(limited, 64 * 1024);
     let cancel_fut = async move { request_token.cancelled().await };
-    let stream = futures::stream::StreamExt::take_until(raw, Box::pin(cancel_fut));
+    let cut = futures::stream::StreamExt::take_until(raw, Box::pin(cancel_fut));
+    // Instrumentación: envolvemos el stream para contar bytes
+    // entregados y loguear una línea al final que distingue
+    // "fin natural (EOF)" de "cancelado por otra request". El log
+    // es el emparejamiento del `range in` de arriba: sin él no se
+    // puede reconstruir del debug.log si una request colgada llegó
+    // a entregar algo o murió en seco.
+    let stream = TracedResponseStream::new(cut, req_id, content_length);
     let body = Body::from_stream(stream);
 
     let status = if range.is_some() {
@@ -1080,6 +1205,95 @@ fn parse_range(v: &str) -> Option<(Option<u64>, Option<u64>)> {
         return None;
     }
     Some((start_val, end_val))
+}
+
+/// Wrapper de stream de respuesta que cuenta bytes entregados y loguea
+/// UNA línea al final: `done` (EOF natural, alcanzó `content_length`)
+/// o `cancelled` (`take_until` cortó por token o el cliente cerró la
+/// conexión).
+///
+/// Instrumentación del audit: sin esto no se puede saber, del
+/// `debug.log`, si una request `/video` que quedó colgada llegó a
+/// entregar algo antes de morir. Empareja con el `range in` que emite
+/// `serve_video` al entrar.
+struct TracedResponseStream<S> {
+    inner: S,
+    req_id: u64,
+    delivered: u64,
+    expected: u64,
+    finished: bool,
+}
+
+impl<S> TracedResponseStream<S> {
+    fn new(inner: S, req_id: u64, expected: u64) -> Self {
+        Self {
+            inner,
+            req_id,
+            delivered: 0,
+            expected,
+            finished: false,
+        }
+    }
+}
+
+impl<S, E> futures::stream::Stream for TracedResponseStream<S>
+where
+    S: futures::stream::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
+{
+    type Item = Result<bytes::Bytes, E>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let poll = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+        if let std::task::Poll::Ready(ref item) = poll {
+            match item {
+                Some(Ok(b)) => {
+                    self.delivered += b.len() as u64;
+                }
+                Some(Err(_)) => {
+                    // Error del stream (IO, etc.). Se loguea en Drop
+                    // como cancelled — no distinguimos IO error de
+                    // cancelación aquí, la firma en el log es la misma
+                    // "no llegó a servir todo".
+                }
+                None => {
+                    self.finished = true;
+                    let complete = self.delivered >= self.expected;
+                    tracing::info!(
+                        target: "video",
+                        req = self.req_id,
+                        bytes = self.delivered,
+                        expected = self.expected,
+                        outcome = if complete { "eof" } else { "eof_short" },
+                        "request done"
+                    );
+                }
+            }
+        }
+        poll
+    }
+}
+
+impl<S> Drop for TracedResponseStream<S> {
+    fn drop(&mut self) {
+        if !self.finished {
+            // Se dropea sin haber emitido `Ready(None)`: el stream fue
+            // cortado por `take_until` (cancelación de request) o el
+            // cliente cerró la conexión antes del EOF. Esta es la firma
+            // del bug del audit: request que se queda colgada sin haber
+            // llegado al final.
+            tracing::info!(
+                target: "video",
+                req = self.req_id,
+                bytes = self.delivered,
+                expected = self.expected,
+                outcome = "cancelled",
+                "request done"
+            );
+        }
+    }
 }
 
 // ── HLS: playlist estático + segmentos on-demand ──────────────────────────
@@ -1174,12 +1388,13 @@ async fn serve_hls_playlist(
         playlist.push_str(&format!("#EXTINF:{dur:.5},\nseg-{i:05}.ts\n"));
     }
     playlist.push_str("#EXT-X-ENDLIST\n");
-    if std::env::var("VIDEODROME_DEBUG").is_ok() {
-        eprintln!(
-            "[hls] playlist emitted: mode={mode:?} n={} target={target_duration}s",
-            segments.len()
-        );
-    }
+    tracing::debug!(
+        target: "hls",
+        mode = ?mode,
+        segments = segments.len(),
+        target_duration,
+        "playlist emitted"
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
@@ -1300,12 +1515,13 @@ async fn ensure_hls_dir(state: &AppState) -> Result<PathBuf, (StatusCode, String
         .tempdir()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tempdir: {e}")))?;
     let dir = tempdir.path().to_path_buf();
-    eprintln!(
-        "[hls] init: mode={:?} segments={} duration={:.2}s dir={}",
-        mode,
-        segments.len(),
-        duration,
-        dir.display()
+    tracing::info!(
+        target: "hls",
+        mode = ?mode,
+        segments = segments.len(),
+        duration_s = format!("{duration:.2}"),
+        dir = %dir.display(),
+        "init"
     );
     let mut guard = state.hls.lock().await;
     // Doble check: si otra request lo llenó mientras estábamos
@@ -1367,25 +1583,25 @@ async fn decide_mode_and_segments(
         QualityMode::Copy => match try_build_copy_grid(info, caps, url).await {
             Ok(grid) if !grid.is_empty() => (HlsMode::Copy, grid),
             Ok(_) => {
-                eprintln!("[hls] pref=Copy pero grid vacía → fallback transcode");
+                tracing::info!(target: "hls", "pref=Copy pero grid vacía → fallback transcode");
                 (HlsMode::Transcode, transcode_grid)
             }
             Err(e) => {
-                eprintln!("[hls] pref=Copy falló ({e}) → fallback transcode");
+                tracing::info!(target: "hls", error = %e, "pref=Copy falló → fallback transcode");
                 (HlsMode::Transcode, transcode_grid)
             }
         },
         QualityMode::Auto => match try_build_copy_grid(info, caps, url).await {
             Ok(grid) if !grid.is_empty() => {
-                eprintln!("[hls] auto → COPY viable ({} segments)", grid.len());
+                tracing::info!(target: "hls", segments = grid.len(), "auto → COPY viable");
                 (HlsMode::Copy, grid)
             }
             Ok(_) => {
-                eprintln!("[hls] auto → grid vacía, transcode");
+                tracing::info!(target: "hls", "auto → grid vacía, transcode");
                 (HlsMode::Transcode, transcode_grid)
             }
             Err(e) => {
-                eprintln!("[hls] auto → copy no viable ({e}), transcode");
+                tracing::info!(target: "hls", error = %e, "auto → copy no viable, transcode");
                 (HlsMode::Transcode, transcode_grid)
             }
         },
@@ -1601,7 +1817,12 @@ async fn serve_hls_segment(
         }
 
         if tokio::time::Instant::now() >= deadline {
-            eprintln!("[hls] TIMEOUT: segmento {file} (idx={idx}) no disponible tras 60s");
+            tracing::warn!(
+                target: "hls",
+                file = %file,
+                idx,
+                "TIMEOUT: segmento no disponible tras 60s"
+            );
             return Err((
                 StatusCode::GATEWAY_TIMEOUT,
                 format!("segmento {file} no disponible tras 60s"),
@@ -1611,9 +1832,11 @@ async fn serve_hls_segment(
         // detectar spawns lentos sin ensuciar la consola en el caso
         // rápido.
         if !logged_wait && started_at.elapsed().as_secs() >= 5 {
-            eprintln!(
-                "[hls] waiting for seg-{idx:05}.ts... {}s elapsed",
-                started_at.elapsed().as_secs()
+            tracing::info!(
+                target: "hls",
+                idx,
+                elapsed_s = started_at.elapsed().as_secs(),
+                "waiting for segment"
             );
             logged_wait = true;
         }
@@ -1676,17 +1899,25 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
         // piezas priorizadas se liberan para el nuevo.
         {
             let mut req_guard = state.active_request.lock().await;
-            if let Some((token, _)) = req_guard.take() {
+            if let Some((prev_id, token, _)) = req_guard.take() {
                 token.cancel();
+                tracing::info!(
+                    target: "hls",
+                    reason = "replaced",
+                    cancelled_prev = prev_id,
+                    "cancelling /video active_request before killing old ffmpeg"
+                );
             }
         }
         let kill_started = tokio::time::Instant::now();
         let _ = old.child.kill().await;
         let _ = old.child.wait().await;
-        eprintln!(
-            "[hls] killed old ffmpeg job (start_idx={}) in {}ms",
-            old.start_idx,
-            kill_started.elapsed().as_millis()
+        tracing::info!(
+            target: "hls",
+            start_idx = old.start_idx,
+            elapsed_ms = kill_started.elapsed().as_millis() as u64,
+            reason = "replaced",
+            "killed old ffmpeg job"
         );
     }
 
@@ -1717,7 +1948,7 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
                 "ffmpeg exited with {} in <500ms (probablemente filter/codec no soportado)",
                 status
             );
-            eprintln!("[hls] FATAL: {msg}");
+            tracing::error!(target: "hls", error = %msg, "FATAL");
             let mut guard = state.hls.lock().await;
             if let Some(hls) = guard.as_mut() {
                 hls.fatal_error = Some(msg.clone());
@@ -1764,7 +1995,7 @@ async fn warmup_librqbit_for_offset(state: &AppState, start_seconds: f64) {
         guard.as_ref().and_then(|p| p.duration_seconds)
     };
     let Some(duration) = duration else {
-        eprintln!("[warmup] skip: no duration cached yet");
+        tracing::info!(target: "warmup", "skip: no duration cached yet");
         return;
     };
     if duration <= 0.0 {
@@ -1772,19 +2003,23 @@ async fn warmup_librqbit_for_offset(state: &AppState, start_seconds: f64) {
     }
     let byte_offset = ((start_seconds / duration) * state.file_len as f64) as u64;
     let byte_offset = byte_offset.min(state.file_len.saturating_sub(1));
-    eprintln!(
-        "[warmup] priming librqbit at offset {byte_offset} ({:.1}%) for start={start_seconds}s",
-        (byte_offset as f64 / state.file_len as f64) * 100.0
+    let started = tokio::time::Instant::now();
+    tracing::info!(
+        target: "warmup",
+        byte_offset,
+        pct = format!("{:.1}", (byte_offset as f64 / state.file_len as f64) * 100.0),
+        start_seconds,
+        "priming librqbit"
     );
     let mut file_stream = match state.handle.clone().stream(state.file_id) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[warmup] librqbit stream failed: {e}");
+            tracing::warn!(target: "warmup", error = %e, "librqbit stream failed");
             return;
         }
     };
     if let Err(e) = file_stream.seek(SeekFrom::Start(byte_offset)).await {
-        eprintln!("[warmup] seek failed: {e}");
+        tracing::warn!(target: "warmup", error = %e, "seek failed");
         return;
     }
     // Read 1 byte para señalar a librqbit "prioriza esta pieza YA".
@@ -1797,10 +2032,31 @@ async fn warmup_librqbit_for_offset(state: &AppState, start_seconds: f64) {
     )
     .await;
     match read {
-        Ok(Ok(n)) => eprintln!("[warmup] primed {n} byte at offset {byte_offset}"),
-        Ok(Err(e)) => eprintln!("[warmup] read err: {e}"),
-        Err(_) => eprintln!("[warmup] read timeout at 3s (piezas frías, seguimos)"),
+        Ok(Ok(n)) => tracing::info!(
+            target: "warmup",
+            bytes = n,
+            byte_offset,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "primed"
+        ),
+        Ok(Err(e)) => tracing::warn!(target: "warmup", error = %e, "read err"),
+        Err(_) => tracing::warn!(
+            target: "warmup",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "read timeout at 3s (piezas frías, seguimos)"
+        ),
     }
+    // Al salir de la función, `file_stream` se dropea explícitamente.
+    // Crítico para el bug del audit: si el warmup mantuviera el stream
+    // vivo mientras ffprobe/ffmpeg piden otras piezas, la priorización
+    // de librqbit se repartiría en dos consumidores. Loguearlo para
+    // poder confirmar la hipótesis en el debug.log.
+    drop(file_stream);
+    tracing::info!(
+        target: "warmup",
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "stream released"
+    );
     // NB: NO tocamos `state.max_seek` aquí. Antes lo hacíamos
     // "para que la próxima Range GET real no resetee la prioridad",
     // pero `max_seek` NO influye en la priorización de piezas de
@@ -1861,7 +2117,7 @@ fn spawn_lru_evictor(
             }
             let head = playhead.load(Ordering::Relaxed);
             if let Err(e) = evict_once(&dir, budget_bytes, head).await {
-                eprintln!("[hls-evict] error: {e}");
+                tracing::warn!(target: "hls-evict", error = %e, "cycle error");
             }
         }
     })
@@ -1944,13 +2200,14 @@ fn evict_once_sync(dir: &Path, budget_bytes: u64, playhead_idx: u64) -> Result<(
         }
     }
     if removed > 0 {
-        eprintln!(
-            "[hls-evict] freed {} MB ({} segments) — head={} budget={} MB total_before={} MB",
-            freed / 1_048_576,
-            removed,
+        tracing::info!(
+            target: "hls-evict",
+            freed_mb = freed / 1_048_576,
+            segments = removed,
             head,
-            budget_bytes / 1_048_576,
-            total / 1_048_576
+            budget_mb = budget_bytes / 1_048_576,
+            total_before_mb = total / 1_048_576,
+            "evicted"
         );
     }
     Ok(())
@@ -2077,6 +2334,10 @@ async fn spawn_hls(
     let input_url = format!("http://{}/video", state.local_addr);
 
     let mut cmd = tokio::process::Command::new(bin);
+    // Windows: sin `CREATE_NO_WINDOW`, cada spawn de ffmpeg abriría
+    // una ventana `conhost.exe` visible mientras dure el transmux
+    // (y otra por cada respawn de segmento). No-op fuera de Windows.
+    cmd.hide_console();
     // Loglevel: `error` por defecto para no ensuciar la consola en
     // uso normal. Activable con `VIDEODROME_DEBUG=1` para ver
     // headers/decisiones de ffmpeg cuando hay que reproducir un bug.
@@ -2161,9 +2422,7 @@ async fn spawn_hls(
                               zscale=p=bt709,tonemap=tonemap=hable:desat=0,\
                               zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
                     cmd.arg("-vf").arg(vf);
-                    if std::env::var("VIDEODROME_DEBUG").is_ok() {
-                        eprintln!("[hls] HDR → zscale+tonemap Hable (calidad máxima)");
-                    }
+                    tracing::info!(target: "hls", "HDR → zscale+tonemap Hable (calidad máxima)");
                 } else {
                     // Sin zscale: naive downcast. `-pix_fmt
                     // yuv420p` (que ya está más abajo en el argv)
@@ -2171,9 +2430,10 @@ async fn spawn_hls(
                     // `-vf` porque cualquier cadena intermedia
                     // sin linealización produce peor resultado
                     // que la conversión directa.
-                    eprintln!(
-                        "[hls] HDR sin `zscale` (ffmpeg sin libzimg) — reproduzco en \
-                         SDR sin tonemap (colores lavados). Para calidad HDR→SDR real: \
+                    tracing::warn!(
+                        target: "hls",
+                        "HDR sin `zscale` (ffmpeg sin libzimg) — reproduzco en SDR sin \
+                         tonemap (colores lavados). Para calidad HDR→SDR real: \
                          `brew tap homebrew-ffmpeg/ffmpeg && brew install \
                          homebrew-ffmpeg/ffmpeg/ffmpeg` (compila con libzimg)."
                     );
@@ -2240,12 +2500,13 @@ async fn spawn_hls(
         cmd.arg("-c:a").arg("copy");
         // AAC en MPEG-TS: ffmpeg añade ADTS headers automáticamente
         // al copiar desde MP4/MKV. AC-3 / E-AC-3 / MP3 van directo.
-        if std::env::var("VIDEODROME_DEBUG").is_ok() {
-            eprintln!(
-                "[hls] audio: -c:a copy (src={:?} channels={:?} mode={:?})",
-                in_audio_codec, audio_channels, mode
-            );
-        }
+        tracing::debug!(
+            target: "hls",
+            src = ?in_audio_codec,
+            channels = ?audio_channels,
+            mode = ?mode,
+            "audio: -c:a copy"
+        );
     } else {
         // Audit §5: AAC con bitrate escalado por canales, SIN
         // forzar downmix. Bitrates elegidos para transparencia
@@ -2254,12 +2515,14 @@ async fn spawn_hls(
         //   * 3-6ch (5.1):        384k
         //   * 7+ch (7.1):         512k
         let aac_bitrate = aac_bitrate_for_channels(audio_channels);
-        if std::env::var("VIDEODROME_DEBUG").is_ok() {
-            eprintln!(
-                "[hls] audio: transcode aac {aac_bitrate} (src={:?} channels={:?} mode={:?})",
-                in_audio_codec, audio_channels, mode
-            );
-        }
+        tracing::debug!(
+            target: "hls",
+            src = ?in_audio_codec,
+            channels = ?audio_channels,
+            mode = ?mode,
+            bitrate = %aac_bitrate,
+            "audio: transcode aac"
+        );
         cmd.arg("-c:a").arg("aac").arg("-b:a").arg(aac_bitrate);
     }
     // Sin subs, sin data.
@@ -2302,13 +2565,22 @@ async fn spawn_hls(
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("[ffmpeg-hls] {line}");
+                // ffmpeg stderr → nivel `debug` (con `-loglevel error`
+                // solo emite lo importante). Al operar con
+                // `VIDEODROME_LOG_LEVEL=debug` el usuario ve el argv
+                // completo + errores por consola.
+                tracing::debug!(target: "ffmpeg-hls", "{line}");
             }
         });
     }
-    eprintln!(
-        "[hls] spawned ffmpeg: mode={mode:?} idx={idx} start={start_seconds}s dir={}",
-        dir.display()
+    tracing::info!(
+        target: "hls",
+        event = "spawn",
+        mode = ?mode,
+        idx,
+        start_seconds,
+        dir = %dir.display(),
+        "ffmpeg spawned"
     );
     Ok(child)
 }
@@ -2459,12 +2731,24 @@ async fn set_hls_audio(
         // el FileStream inmediatamente.
         {
             let mut req_guard = state.active_request.lock().await;
-            if let Some((token, _)) = req_guard.take() {
+            if let Some((prev_id, token, _)) = req_guard.take() {
                 token.cancel();
+                tracing::info!(
+                    target: "hls",
+                    reason = "audio_switch",
+                    cancelled_prev = prev_id,
+                    "cancelling /video active_request before killing old ffmpeg"
+                );
             }
         }
         let _ = old.child.kill().await;
         let _ = old.child.wait().await;
+        tracing::info!(
+            target: "hls",
+            start_idx = old.start_idx,
+            reason = "audio_switch",
+            "killed old ffmpeg job"
+        );
     }
 
     // Purgar los `.ts` producidos con la pista anterior. Si no lo
@@ -2515,39 +2799,43 @@ async fn serve_embedded_subtitle(
     ))?;
     let input_url = format!("http://{}/video", state.local_addr);
 
-    let output = tokio::process::Command::new(bin)
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-nostdin")
-        .arg("-i")
-        .arg(&input_url)
-        // El input `/video` puede tardar en dar los primeros bytes
-        // si el torrent está frío; `-analyzeduration` alto ayuda a
-        // que ffmpeg no se rinda antes de encontrar la pista.
-        .arg("-analyzeduration")
-        .arg("60M")
-        .arg("-probesize")
-        .arg("50M")
-        .arg("-map")
-        .arg(format!("0:s:{idx}"))
-        .arg("-c:s")
-        .arg("webvtt")
-        .arg("-f")
-        .arg("webvtt")
-        .arg("-")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|e| {
+    let output = {
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-nostdin")
+            .arg("-i")
+            .arg(&input_url)
+            // El input `/video` puede tardar en dar los primeros bytes
+            // si el torrent está frío; `-analyzeduration` alto ayuda a
+            // que ffmpeg no se rinda antes de encontrar la pista.
+            .arg("-analyzeduration")
+            .arg("60M")
+            .arg("-probesize")
+            .arg("50M")
+            .arg("-map")
+            .arg(format!("0:s:{idx}"))
+            .arg("-c:s")
+            .arg("webvtt")
+            .arg("-f")
+            .arg("webvtt")
+            .arg("-")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        // Windows: sin `CREATE_NO_WINDOW` este spawn one-shot
+        // parpadearía una consola cada vez que el user selecciona un
+        // sub embebido. No-op fuera de Windows.
+        cmd.hide_console();
+        cmd.output().await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("spawn ffmpeg: {e}"),
             )
-        })?;
+        })?
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2720,6 +3008,12 @@ pub fn open_in_vlc(
                     if let Some(a) = start_arg.as_deref() {
                         cmd.arg(a);
                     }
+                    // VLC.exe es subsistema GUI (no debería crear
+                    // consola), pero pasamos `CREATE_NO_WINDOW` por
+                    // consistencia con el resto de spawns Windows —
+                    // así si Windows cambia el subsistema en una
+                    // futura versión no nos pilla desprevenidos.
+                    cmd.hide_console();
                     cmd.spawn()
                 }
             }
@@ -2792,10 +3086,13 @@ async fn quit_vlc() {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = tokio::process::Command::new("taskkill")
-            .args(["/IM", "vlc.exe", "/T"])
-            .status()
-            .await;
+        // Sin `CREATE_NO_WINDOW` el propio `taskkill` parpadearía
+        // una consola cada vez que el user pulsa Detener con VLC
+        // como player.
+        let mut cmd = tokio::process::Command::new("taskkill");
+        cmd.args(["/IM", "vlc.exe", "/T"]);
+        cmd.hide_console();
+        let _ = cmd.status().await;
     }
 }
 
@@ -2983,9 +3280,11 @@ fn read_store(path: &Path) -> ResumeParse {
     let value: serde_json::Value = match serde_json::from_str(&data) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!(
-                "[resume] {} unparseable as JSON ({e}); preserving",
-                path.display()
+            tracing::warn!(
+                target: "resume",
+                path = %path.display(),
+                error = %e,
+                "unparseable as JSON; preserving"
             );
             return ResumeParse::Corrupt;
         }
@@ -2994,9 +3293,11 @@ fn read_store(path: &Path) -> ResumeParse {
         match serde_json::from_value::<ResumeStore>(value) {
             Ok(store) => ResumeParse::Store(store),
             Err(e) => {
-                eprintln!(
-                    "[resume] {} v2 parse failed ({e}); preserving",
-                    path.display()
+                tracing::warn!(
+                    target: "resume",
+                    path = %path.display(),
+                    error = %e,
+                    "v2 parse failed; preserving"
                 );
                 ResumeParse::Corrupt
             }
@@ -3009,9 +3310,11 @@ fn read_store(path: &Path) -> ResumeParse {
                 ResumeParse::Store(ResumeStore { files })
             }
             Err(e) => {
-                eprintln!(
-                    "[resume] {} legacy parse failed ({e}); preserving",
-                    path.display()
+                tracing::warn!(
+                    target: "resume",
+                    path = %path.display(),
+                    error = %e,
+                    "legacy parse failed; preserving"
                 );
                 ResumeParse::Corrupt
             }
@@ -3229,7 +3532,7 @@ fn save_position_in(
             if store.files.is_empty() {
                 let _ = std::fs::remove_file(&path);
             } else if let Err(e) = write_store_atomic(&path, &store) {
-                eprintln!("[resume] failed to persist store after completion: {e}");
+                tracing::warn!(target: "resume", error = %e, "failed to persist store after completion");
             }
         }
         return;
@@ -3247,7 +3550,7 @@ fn save_position_in(
     store.files.insert(key, entry_r);
 
     if let Err(e) = write_store_atomic(&path, &store) {
-        eprintln!("[resume] failed to persist position: {e}");
+        tracing::warn!(target: "resume", error = %e, "failed to persist position");
     }
 }
 

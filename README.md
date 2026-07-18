@@ -88,7 +88,7 @@ problemas) en [docs/WINDOWS.md](docs/WINDOWS.md).
 ### Linux · tarball CLI
 
 ```bash
-curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.0-linux-x86_64.tar.gz | tar -xz
+curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.1-linux-x86_64.tar.gz | tar -xz
 sudo mv videodrome /usr/local/bin/
 sudo apt install ffmpeg  # o el gestor que uses (dnf/pacman)
 ```
@@ -331,3 +331,34 @@ cargo tauri dev --features gui
 Feature flag `gui` es opt-in (default `[]`) para que `cargo build`
 compile CLI-only sin webkit ni `ui/dist`. El CI valida el CLI en cada
 PR; la GUI se valida en `release.yml`.
+
+---
+
+## Reportar bugs (logs)
+
+Los `println!`/`eprintln!` se han migrado a `tracing`. En Windows con
+subsistema GUI el stderr no existe, así que la app soporta escribir el
+log a fichero:
+
+```bash
+# activar log al destino por defecto:
+#   macOS:   ~/Library/Application Support/videodrome/debug.log
+#   Linux:   ~/.local/share/videodrome/debug.log
+#   Windows: %LOCALAPPDATA%\videodrome\debug.log
+VIDEODROME_LOG=1 videodrome
+
+# o forzar una ruta concreta:
+VIDEODROME_LOG=/tmp/videodrome-bug.log videodrome
+```
+
+Nivel controlable con `VIDEODROME_LOG_LEVEL` (formato `EnvFilter`):
+
+```bash
+VIDEODROME_LOG=1 VIDEODROME_LOG_LEVEL=debug videodrome
+VIDEODROME_LOG=1 VIDEODROME_LOG_LEVEL="info,videodrome::stream=debug" videodrome
+```
+
+Al abrir issue, reproduce el bug con `VIDEODROME_LOG=1` y adjunta el
+`debug.log`. La app corre 100% local — el log solo contiene rangos de
+bytes servidos, timings de ffprobe/ffmpeg, y decisiones del scheduler
+de librqbit. Sin credenciales, sin infohashes, sin nombres de ficheros.

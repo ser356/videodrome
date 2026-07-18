@@ -651,9 +651,11 @@ async fn get_movie_view(
         .get_movie_view(tmdb_id)
         .await
         .map_err(|e| e.to_string());
-    eprintln!(
-        "[gui] get_movie_view tmdb_id={tmdb_id} en {}ms",
-        start.elapsed().as_millis()
+    tracing::info!(
+        target: "gui",
+        tmdb_id,
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "get_movie_view"
     );
     out
 }
@@ -674,9 +676,11 @@ async fn get_series_view(
         .get_series_details(tmdb_id)
         .await
         .map_err(|e| e.to_string());
-    eprintln!(
-        "[gui] get_series_view tmdb_id={tmdb_id} en {}ms",
-        start.elapsed().as_millis()
+    tracing::info!(
+        target: "gui",
+        tmdb_id,
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "get_series_view"
     );
     out
 }
@@ -1703,9 +1707,14 @@ async fn search_subtitles(
         None
     };
 
-    eprintln!(
-        "[subs] search_subtitles stream_id={:?} moviehash={:?} imdb_id={:?} query={:?} langs={:?}",
-        stream_id, moviehash, imdb_id, query, langs
+    tracing::info!(
+        target: "subs",
+        stream_id = ?stream_id,
+        moviehash = ?moviehash,
+        imdb_id = ?imdb_id,
+        query = ?query,
+        langs = ?langs,
+        "search_subtitles"
     );
 
     // Estrategia Stremio-like: ejecutar EN PARALELO las dos búsquedas
@@ -1761,14 +1770,14 @@ async fn search_subtitles(
     let hash_subs = match hash_res {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[subs] hash search ERROR: {e}");
+            tracing::warn!(target: "subs", error = %e, "hash search failed");
             Vec::new()
         }
     };
     let catalog_subs = match catalog_res {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[subs] catalog search ERROR: {e}");
+            tracing::warn!(target: "subs", error = %e, "catalog search failed");
             Vec::new()
         }
     };
@@ -1784,10 +1793,11 @@ async fn search_subtitles(
         }
     }
 
-    eprintln!(
-        "[subs] merged → {} results ({} hash-matched primeros)",
-        merged.len(),
-        merged.iter().filter(|s| s.hash_match).count()
+    tracing::info!(
+        target: "subs",
+        results = merged.len(),
+        hash_matched = merged.iter().filter(|s| s.hash_match).count(),
+        "merged results"
     );
     Ok(merged)
 }

@@ -1054,10 +1054,12 @@ impl<'a> TmdbClient<'a> {
         .await
         .map_err(|_| anyhow::anyhow!("TMDB /movie/{tmdb_id} (view) timeout tras 4s"))?
         .with_context(|| format!("Error al llamar a TMDB /movie/{tmdb_id} (view)"))?;
-        eprintln!(
-            "[tmdb] get_movie_view tmdb_id={tmdb_id} -> {} en {}ms",
-            resp.status(),
-            start.elapsed().as_millis()
+        tracing::debug!(
+            target: "tmdb",
+            tmdb_id,
+            status = %resp.status(),
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "get_movie_view"
         );
         if !resp.status().is_success() {
             if resp.status() == reqwest::StatusCode::NOT_FOUND {

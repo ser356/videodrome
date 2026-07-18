@@ -23,6 +23,7 @@ mod keychain;
 #[cfg(feature = "gui")]
 mod keyframes;
 mod letterboxd;
+mod logging;
 #[cfg(feature = "gui")]
 mod preferences;
 mod progress;
@@ -32,6 +33,7 @@ mod subtitles;
 mod tmdb;
 mod torrents;
 mod tui;
+mod winutil;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -197,6 +199,22 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+
+    // Logging: inicializar ANTES de despachar cualquier rama. En modo
+    // TUI la capa stderr se suprime (rompería la alternate screen);
+    // ver `logging::init` para las reglas de activación del fichero.
+    //
+    // El destino elegido (`Enabled` / `Suppressed`) es una función del
+    // subcomando, no del build: `cargo run tui` en macOS también
+    // suprime stderr.
+    let stderr_policy = match &cli.command {
+        Some(Commands::Tui { .. }) => logging::StderrPolicy::Suppressed,
+        _ => logging::StderrPolicy::Enabled,
+    };
+    let _log_file = logging::init(stderr_policy).ok().flatten();
+    if let Some(path) = _log_file.as_ref() {
+        tracing::info!(target: "logging", path = %path.display(), "log file activo");
+    }
 
     // Sin subcomando explícito + feature `gui` activa + hay display:
     // arrancamos la GUI Tauri. Tauri exige el main thread, así que no

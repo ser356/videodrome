@@ -222,13 +222,13 @@ async fn fetch_from_any_host(http: &reqwest::Client, path: &str) -> Result<EztvR
         let resp = match tokio::time::timeout(EZTV_HOST_TIMEOUT, fut).await {
             Err(_) => {
                 last_err = Some(anyhow::anyhow!("timeout {host}"));
-                eprintln!("[eztv] timeout {host}");
+                tracing::warn!(target: "eztv", host, "timeout");
                 continue;
             }
             Ok(Err(e)) => {
                 // DNS block / connection reset / TLS. Silencio a
                 // stderr y probamos el siguiente.
-                eprintln!("[eztv] red {host}: {e}");
+                tracing::warn!(target: "eztv", host, error = %e, "red");
                 last_err = Some(anyhow::Error::from(e));
                 continue;
             }
@@ -236,7 +236,7 @@ async fn fetch_from_any_host(http: &reqwest::Client, path: &str) -> Result<EztvR
         };
         let status = resp.status();
         if !status.is_success() {
-            eprintln!("[eztv] {host} HTTP {status}");
+            tracing::warn!(target: "eztv", host, %status, "HTTP error");
             last_err = Some(anyhow::anyhow!("{host} HTTP {status}"));
             continue;
         }
@@ -245,7 +245,7 @@ async fn fetch_from_any_host(http: &reqwest::Client, path: &str) -> Result<EztvR
             Err(e) => {
                 // JSON malformado (típico: Cloudflare devuelve HTML
                 // de challenge con 200). Probar el siguiente host.
-                eprintln!("[eztv] {host} parse: {e}");
+                tracing::warn!(target: "eztv", host, error = %e, "parse");
                 last_err = Some(anyhow::Error::from(e));
                 continue;
             }

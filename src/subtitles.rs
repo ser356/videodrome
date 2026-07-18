@@ -409,22 +409,24 @@ pub fn srt_to_vtt(srt_bytes: &[u8]) -> String {
             let total = srt_bytes.len();
             let invalid_ratio = estimate_invalid_utf8_ratio(srt_bytes, e);
             if invalid_ratio < 0.05 {
-                eprintln!(
-                    "[subs] UTF-8 con {:.2}% bytes inválidos ({} total) → lossy decode",
-                    invalid_ratio * 100.0,
-                    total
+                tracing::debug!(
+                    target: "subs",
+                    invalid_pct = format!("{:.2}", invalid_ratio * 100.0),
+                    total,
+                    "UTF-8 con bytes inválidos → lossy decode"
                 );
                 String::from_utf8_lossy(srt_bytes).into_owned()
             } else {
-                eprintln!(
-                    "[subs] UTF-8 con {:.2}% bytes inválidos → chardetng",
-                    invalid_ratio * 100.0
+                tracing::debug!(
+                    target: "subs",
+                    invalid_pct = format!("{:.2}", invalid_ratio * 100.0),
+                    "UTF-8 con bytes inválidos → chardetng"
                 );
                 let mut detector = chardetng::EncodingDetector::new();
                 detector.feed(srt_bytes, true);
                 let encoding = detector.guess(None, true);
                 let (cow, actual, _had_errors) = encoding.decode(srt_bytes);
-                eprintln!("[subs] chardetng eligió: {}", actual.name());
+                tracing::debug!(target: "subs", encoding = actual.name(), "chardetng eligió");
                 cow.into_owned()
             }
         }

@@ -350,12 +350,12 @@ async fn fetch_from_any_host(http: &reqwest::Client, path: &str) -> Result<Respo
         let fut = http.get(&url).send();
         let resp = match tokio::time::timeout(TORRENTIO_HOST_TIMEOUT, fut).await {
             Err(_) => {
-                eprintln!("[torrentio] timeout {host}");
+                tracing::warn!(target: "torrentio", host, "timeout");
                 last_err = Some(anyhow::anyhow!("timeout {host}"));
                 continue;
             }
             Ok(Err(e)) => {
-                eprintln!("[torrentio] red {host}: {e}");
+                tracing::warn!(target: "torrentio", host, error = %e, "red");
                 last_err = Some(anyhow::Error::from(e));
                 continue;
             }
@@ -363,14 +363,14 @@ async fn fetch_from_any_host(http: &reqwest::Client, path: &str) -> Result<Respo
         };
         let status = resp.status();
         if !status.is_success() {
-            eprintln!("[torrentio] {host} HTTP {status}");
+            tracing::warn!(target: "torrentio", host, %status, "HTTP error");
             last_err = Some(anyhow::anyhow!("{host} HTTP {status}"));
             continue;
         }
         match resp.json::<Response>().await {
             Ok(parsed) => return Ok(parsed),
             Err(e) => {
-                eprintln!("[torrentio] {host} parse: {e}");
+                tracing::warn!(target: "torrentio", host, error = %e, "parse");
                 last_err = Some(anyhow::Error::from(e));
                 continue;
             }

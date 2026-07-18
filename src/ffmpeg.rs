@@ -14,11 +14,77 @@
 //! declara `ffmpeg` como dependencia para que el user no tenga que
 //! instalarlo a mano.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+
+use crate::winutil::HideConsoleExt;
+
+// ── Windows: resolver de shims de Scoop ───────────────────────────────────
+//
+// `which::which("ffprobe")` en máquinas con ffmpeg instalado por Scoop
+// devuelve `~\scoop\shims\ffprobe.exe`, que es el `shim.exe` genérico
+// de Scoop. Ese proxy spawnea al binario real y sale, pero NO propaga
+// la terminación: al llamar a `child.kill()` (probe cancelado, kill de
+// sesión HLS, `kill_on_drop`) matamos al SHIM y el ffmpeg/ffprobe real
+// queda huérfano indefinidamente — combinado con la ausencia de
+// `CREATE_NO_WINDOW` (ver `winutil::HideConsoleExt`), ese huérfano
+// arrastra su propia ventana de consola visible "para siempre".
+//
+// La cura es resolver el shim a su destino real leyendo el fichero de
+// metadata `<nombre>.shim` adyacente ANTES de spawnear. Con el
+// binario real spawneado directamente, `kill()` vuelve a comportarse
+// igual que en macOS/Linux.
+
+/// Resuelve un shim de Scoop (`~\scoop\shims\<name>.exe`) a la ruta
+/// real del binario destino. Cada shim tiene adyacente un fichero de
+/// metadata `<name>.shim` con formato:
+///
+/// ```text
+/// path = "C:\Users\foo\scoop\apps\ffmpeg\current\bin\ffprobe.exe"
+/// args = ...
+/// ```
+///
+/// Si no hay `.shim` (binario normal, winget, install manual) o el
+/// path no apunta a un fichero existente, devolvemos la ruta original.
+///
+/// NOTA sobre Chocolatey: choco usa `shimgen` que embebe la ruta
+/// DENTRO del binario shim (no hay fichero legible al lado). Aquí no
+/// lo resolvemos; si aparece el mismo síntoma con instalaciones de
+/// choco, la vía correcta es priorizar la ruta real
+/// (`chocolatey\lib\ffmpeg\tools\ffmpeg\bin\...`) en
+/// `windows_fallback_dirs` por delante de `chocolatey\bin`.
+#[cfg(windows)]
+fn resolve_scoop_shim(p: &Path) -> PathBuf {
+    let meta = p.with_extension("shim");
+    let Ok(text) = std::fs::read_to_string(&meta) else {
+        return p.to_path_buf();
+    };
+    for line in text.lines() {
+        let t = line.trim_start();
+        if !t.starts_with("path") {
+            continue;
+        }
+        let Some(raw) = t.splitn(2, '=').nth(1) else {
+            break;
+        };
+        let real = PathBuf::from(raw.trim().trim_matches('"'));
+        if real.is_file() {
+            return real;
+        }
+        break;
+    }
+    p.to_path_buf()
+}
+
+#[cfg(not(windows))]
+#[inline]
+fn resolve_scoop_shim(p: &Path) -> PathBuf {
+    p.to_path_buf()
+}
 
 /// Nombre del binario según el SO. Windows añade `.exe`.
 #[cfg(target_os = "windows")]
@@ -86,10 +152,13 @@ fn windows_fallback_dirs() -> Vec<std::path::PathBuf> {
 
 /// Busca `name` primero por PATH y, si falla, en los `FALLBACK_DIRS`
 /// de la plataforma. Solo devuelve `Some` si la ruta existe como
-/// fichero.
+/// fichero. En Windows, el resultado se pasa por `resolve_scoop_shim`
+/// para saltarnos los proxies de Scoop y spawnear el binario real
+/// (ver comentario del helper — sin esto los `kill()` matan al shim
+/// y dejan ffmpeg/ffprobe huérfanos).
 fn locate_bin(name: &str) -> Option<PathBuf> {
     if let Ok(p) = which::which(name) {
-        return Some(p);
+        return Some(resolve_scoop_shim(&p));
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -105,7 +174,7 @@ fn locate_bin(name: &str) -> Option<PathBuf> {
         for dir in windows_fallback_dirs() {
             let candidate = dir.join(name);
             if candidate.is_file() {
-                return Some(candidate);
+                return Some(resolve_scoop_shim(&candidate));
             }
         }
     }
@@ -157,9 +226,12 @@ fn load_ffmpeg_filters() -> std::collections::HashSet<String> {
     let Some(bin) = ffmpeg_binary() else {
         return std::collections::HashSet::new();
     };
-    let out = std::process::Command::new(bin)
-        .args(["-hide_banner", "-filters"])
-        .output();
+    let out = {
+        let mut cmd = std::process::Command::new(bin);
+        cmd.args(["-hide_banner", "-filters"]);
+        cmd.hide_console();
+        cmd.output()
+    };
     let Ok(out) = out else {
         return std::collections::HashSet::new();
     };
@@ -182,7 +254,7 @@ fn load_ffmpeg_filters() -> std::collections::HashSet<String> {
         }
     }
     if set.is_empty() {
-        eprintln!("[ffmpeg] warning: no pude parsear -filters, tonemap HDR caerá a fallback");
+        tracing::warn!(target: "ffmpeg", "no pude parsear -filters, tonemap HDR caerá a fallback");
     }
     set
 }
@@ -266,27 +338,73 @@ pub enum StreamKind {
 /// descarga completa.
 pub async fn probe(url: &str) -> Result<MediaInfo> {
     let bin = ffprobe_binary().context("ffprobe no est\u{e1} en PATH")?;
-    let out = Command::new(bin)
-        .args([
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_streams",
-            "-show_format",
-            url,
-        ])
-        .output()
-        .await
-        .context("Error al spawnear ffprobe")?;
+    let started = std::time::Instant::now();
+    tracing::info!(target: "probe", url = %url, "start");
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        url,
+    ])
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
+    cmd.hide_console();
+
+    // Timeout defensivo: si librqbit está descargando un swarm muerto
+    // (o el moov está al final del fichero sin priorizar), ffprobe se
+    // queda leyendo `/video` para siempre. 20 s es holgado para
+    // cabeceras de MP4/MKV con Range OK, corto para no hacer esperar
+    // al user cuando de verdad no va a llegar.
+    //
+    // El `spawn` + `wait_with_output` (en vez de `.output()` a secas)
+    // permite que, al hacer timeout, el `Child` se drope dentro del
+    // future de `tokio::time::timeout` y `kill_on_drop(true)` mate al
+    // proceso real. Con el shim de Scoop resuelto en `locate_bin`,
+    // ese kill ahora sí alcanza al ffprobe.exe destino.
+    let child = cmd.spawn().context("Error al spawnear ffprobe")?;
+    let out = match tokio::time::timeout(Duration::from_secs(20), child.wait_with_output()).await {
+        Ok(res) => res.context("Error al esperar ffprobe")?,
+        Err(_) => {
+            tracing::warn!(
+                target: "probe",
+                url = %url,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "timeout 20s — descarga del inicio del fichero no avanza"
+            );
+            bail!(
+                "no se pudo analizar el v\u{ed}deo: la descarga del inicio del fichero no avanza (timeout ffprobe 20s)"
+            );
+        }
+    };
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
+        tracing::warn!(
+            target: "probe",
+            url = %url,
+            status = %out.status,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            stderr = %stderr.trim(),
+            "failed"
+        );
         bail!(
             "ffprobe devolvi\u{f3} {} \u{2014} {}",
             out.status,
             stderr.trim()
         );
     }
+    tracing::info!(
+        target: "probe",
+        url = %url,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        bytes = out.stdout.len(),
+        "done"
+    );
 
     #[derive(Deserialize)]
     struct Raw {

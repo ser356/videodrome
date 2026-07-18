@@ -94,6 +94,28 @@ observaciones.
 - [ ] Volver atrás con `Esc` mata el stream (verificar en Task
     Manager: `ffmpeg.exe` desaparece antes de 2s).
 
+### Sin ventanas de consola parásitas (regresión Scoop)
+
+Contexto: hasta la corrección del audit "Windows: consola ffprobe +
+huérfanos Scoop", instalar ffmpeg con Scoop provocaba (a) una ventana
+`conhost.exe` visible sobre el player y (b) procesos ffprobe/ffmpeg
+huérfanos que no morían al cerrar. Estos checks reproducen ambos
+casos.
+
+- [ ] Con ffmpeg instalado por **Scoop** (`scoop install ffmpeg`),
+    reproducir un vídeo por transmux (MKV/H.264). En NINGÚN momento
+    aparece una ventana de consola — ni al arrancar el probe, ni al
+    lanzar ffmpeg, ni al hacer seek.
+- [ ] Tras pulsar Detener, `Get-Process ffmpeg,ffprobe -ErrorAction
+    SilentlyContinue` en PowerShell devuelve vacío (ni shim ni
+    binario real vivos).
+- [ ] Hacer 3 seeks largos seguidos (drag a distintas posiciones)
+    y volver a comprobar: durante reproducción SOLO un `ffmpeg.exe`
+    vivo; tras Detener, cero.
+- [ ] Repetir el primer punto con ffmpeg instalado por **winget**
+    (`winget install Gyan.FFmpeg`) — sin shims — para confirmar que
+    la resolución de shims no rompe el caso normal.
+
 ### Fallback VLC
 
 - [ ] Cambiar `default_player = "vlc"` en Ajustes.

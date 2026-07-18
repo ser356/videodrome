@@ -1,6 +1,6 @@
 [package]
 name = "videodrome"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 
 [[bin]]
@@ -52,6 +52,17 @@ encoding_rs = "0.8"
 tauri = { version = "2", features = [], optional = true }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
+# Logging estructurado (audit): reemplaza `eprintln!` a stderr, que en
+# Windows con subsistema GUI se pierde silenciosamente. `tracing` con
+# un `WorkerGuard` no-blocking permite escribir a fichero desde el
+# handler `axum` sin bloquear ni la respuesta HTTP ni el probe. La
+# feature `local-time` da timestamps con hora de pared (útil para
+# correlacionar el log con reports del user); si el crate `time` no
+# está disponible fallback a `SystemTime` seguirá funcionando.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time", "local-time"] }
+tracing-appender = "0.2"
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
