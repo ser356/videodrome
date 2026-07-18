@@ -12,10 +12,13 @@ import {
   hasSession,
   isTauri,
   listDismissed,
+  logInfo,
   logout,
+  openLogFolder,
   setPreferences,
   tmdbPoster,
   undismissRecommendation,
+  type AppLogInfo,
   type CacheEntry,
   type DismissedEntry,
   type Preferences,
@@ -44,6 +47,7 @@ export function Settings() {
   const [prefs, setPrefs] = useState<Preferences | null>(null)
   const [caches, setCaches] = useState<CacheEntry[] | null>(null)
   const [dismissed, setDismissed] = useState<DismissedEntry[] | null>(null)
+  const [log, setLog] = useState<AppLogInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -54,15 +58,17 @@ export function Settings() {
       return
     }
     try {
-      const [hasS, list, p, dis] = await Promise.all([
+      const [hasS, list, p, dis, li] = await Promise.all([
         hasSession(),
         cacheInfo(),
         getPreferences(),
         listDismissed(),
+        logInfo(),
       ])
       setCaches(list)
       setPrefs(p)
       setDismissed(dis)
+      setLog(li)
       if (hasS) {
         setUsername(await getUsername())
       } else {
@@ -130,6 +136,14 @@ export function Settings() {
       await undismissRecommendation(id)
       setDismissed((prev) => prev?.filter((e) => e.id !== id) ?? null)
       flash(t('settings.dismissed.restored', { title }))
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const onOpenLogFolder = async () => {
+    try {
+      await openLogFolder()
     } catch (e) {
       setError(String(e))
     }
@@ -256,6 +270,54 @@ export function Settings() {
           <p className="mt-3 text-[11px] text-dim">
             {t('settings.cache.sessionHint')}
           </p>
+        </Section>
+
+        <Section title={t('settings.about.section')}>
+          {log ? (
+            <div className="flex flex-col gap-3">
+              <div className="flex items-baseline justify-between gap-4">
+                <span className="text-[13px] text-dim">
+                  {t('settings.about.version')}
+                </span>
+                <span className="text-[14px] tabular-nums text-ink">
+                  v{log.version}
+                </span>
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-[13px] text-dim">
+                    {t('settings.about.logFile')}
+                  </span>
+                  <button
+                    onClick={onOpenLogFolder}
+                    disabled={!log.enabled || (!log.dir && !log.file)}
+                    className="focus-ring shrink-0 rounded-full border border-hairline px-3 py-1 text-[12px] text-body hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-hairline disabled:hover:text-body"
+                  >
+                    {t('settings.about.openLogFolder')}
+                  </button>
+                </div>
+                {log.enabled ? (
+                  <>
+                    <code className="break-all text-[11px] text-muted">
+                      {log.file ?? log.dir ?? ''}
+                    </code>
+                    <span className="text-[11px] text-dim">
+                      {log.explicit_path
+                        ? t('settings.about.logExplicit')
+                        : t('settings.about.logRotation')}
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-[11px] text-dim">
+                    {t('settings.about.logDisabled')}
+                  </span>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="text-[13px] text-muted">{t('common.loading')}</div>
+          )}
         </Section>
       </main>
 

@@ -235,6 +235,18 @@ export const es: Record<string, string> = {
   'settings.player.hint':
     'Player embebido dentro de la app o VLC como app externa. El clic derecho sobre un torrent siempre ofrece VLC como escape hatch aunque el default sea embebido.',
 
+  // ── Settings: acerca de / logs ──────────────────────
+  'settings.about.section': 'Acerca de',
+  'settings.about.version': 'Versión',
+  'settings.about.logFile': 'Fichero de log',
+  'settings.about.openLogFolder': 'Abrir carpeta de logs',
+  'settings.about.logRotation':
+    'Se registra en info con rotación diaria. Los ficheros de más de 7 días se borran al arrancar.',
+  'settings.about.logExplicit':
+    'Fichero fijo (VIDEODROME_LOG). Sin rotación ni purga automática.',
+  'settings.about.logDisabled':
+    'Logging a fichero desactivado (VIDEODROME_LOG=0).',
+
   // ── Player controls ─────────────────────────────────
   'player.playTitle': 'Play (Espacio)',
   'player.pauseTitle': 'Pausa (Espacio)',

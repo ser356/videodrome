@@ -92,7 +92,7 @@ problemas) en [docs/WINDOWS.md](docs/WINDOWS.md).
 ### Linux · tarball CLI
 
 ```bash
-curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.5-linux-x86_64.tar.gz | tar -xz
+curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.6-linux-x86_64.tar.gz | tar -xz
 sudo mv videodrome /usr/local/bin/
 sudo apt install ffmpeg
 ```
@@ -417,32 +417,47 @@ cargo test --features gui
 
 ## Reportar bugs (logs)
 
-Todo el stderr se ha migrado a `tracing`. En Windows con subsistema
-GUI el stderr no existe, así que la app soporta escribir el log a
-fichero. Activar log al destino por defecto (ver tabla de rutas):
+Todo el stderr se ha migrado a `tracing`. Desde v1.1.6 la capa
+fichero está **activa por defecto** a nivel `info` con rotación
+diaria: los ficheros viven en `<data_local>/videodrome/logs/` con
+nombre `videodrome.log.YYYY-MM-DD`, y al arrancar la app se borra
+cualquier fichero con más de 7 días. Rutas concretas:
+
+| Sistema | Carpeta de logs |
+|---|---|
+| macOS   | `~/Library/Application Support/videodrome/logs/` |
+| Linux   | `~/.local/share/videodrome/logs/` |
+| Windows | `%LOCALAPPDATA%\videodrome\logs\` |
+
+En Ajustes → **Acerca de** tienes la ruta exacta y un botón "Abrir
+carpeta de logs".
+
+Opt-out (sin fichero, solo stderr):
 
 ```bash
-VIDEODROME_LOG=1 videodrome
+VIDEODROME_LOG=0 videodrome
 ```
 
-Forzar una ruta concreta:
+Forzar una ruta concreta (útil para adjuntar a un issue; sin
+rotación ni prune, gestionas el fichero tú):
 
 ```bash
 VIDEODROME_LOG=/tmp/videodrome-bug.log videodrome
 ```
 
-Nivel controlable con `VIDEODROME_LOG_LEVEL` (formato `EnvFilter`):
+Subir la verbosidad para cazar un bug intermitente con
+`VIDEODROME_LOG_LEVEL` (formato `EnvFilter`):
 
 ```bash
-VIDEODROME_LOG=1 VIDEODROME_LOG_LEVEL=debug videodrome
-VIDEODROME_LOG=1 VIDEODROME_LOG_LEVEL="info,videodrome::stream=debug" videodrome
+VIDEODROME_LOG_LEVEL=debug videodrome
+VIDEODROME_LOG_LEVEL="info,videodrome::stream=debug" videodrome
 ```
 
 Targets útiles para filtrar: `video`, `probe`, `warmup`, `hls`,
 `hls-evict`, `ffmpeg-hls`, `torrent`, `resume`, `subs`, `tmdb`,
 `gui`, `eztv`, `torrentio`, `ffmpeg`, `logging`.
 
-Al abrir issue, reproduce el bug con `VIDEODROME_LOG=1` y adjunta el
-`debug.log`. La app corre 100% local — el log solo contiene rangos de
-bytes servidos, timings de ffprobe/ffmpeg, y decisiones del scheduler
-de librqbit. Sin credenciales, sin infohashes, sin nombres de ficheros.
+Al abrir issue, adjunta el fichero del día. La app corre 100% local —
+el log solo contiene rangos de bytes servidos, timings de ffprobe/
+ffmpeg, y decisiones del scheduler de librqbit. Sin credenciales, sin
+infohashes, sin nombres de ficheros.

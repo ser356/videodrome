@@ -2011,6 +2011,72 @@ async fn set_preferences(prefs: Preferences) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- About / logs ----------
+
+/// Info sobre la app + capa de logging, consumida por la sección
+/// "Acerca de" de Ajustes. `enabled=false` cuando el user forzó
+/// `VIDEODROME_LOG=0`. El path puede no existir todavía si la app
+/// arrancó hace segundos y aún no ha flusheado ninguna línea.
+#[derive(Serialize)]
+struct AppLogInfo {
+    version: &'static str,
+    enabled: bool,
+    dir: Option<String>,
+    file: Option<String>,
+    explicit_path: bool,
+}
+
+#[tauri::command]
+fn log_info() -> AppLogInfo {
+    let info = crate::logging::log_info();
+    AppLogInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        enabled: info.as_ref().map(|i| i.enabled).unwrap_or(false),
+        dir: info
+            .as_ref()
+            .and_then(|i| i.dir.as_ref())
+            .map(|p| p.display().to_string()),
+        file: info
+            .as_ref()
+            .and_then(|i| i.file.as_ref())
+            .map(|p| p.display().to_string()),
+        explicit_path: info.as_ref().map(|i| i.explicit_path).unwrap_or(false),
+    }
+}
+
+/// Abre la carpeta de logs en el file manager nativo. En Windows
+/// invocamos `explorer` (silencia el error si la carpeta no existe
+/// todavía — el user acaba de arrancar la app sin haber escrito
+/// nada); en macOS `open`; en Linux `xdg-open`. Espejo del patrón
+/// usado por `open_magnet`.
+#[tauri::command]
+fn open_log_folder() -> Result<(), String> {
+    let info = crate::logging::log_info().ok_or_else(|| "logging no inicializado".to_string())?;
+    if !info.enabled {
+        return Err("logging deshabilitado (VIDEODROME_LOG=0)".to_string());
+    }
+    let target = info
+        .dir
+        .clone()
+        .or_else(|| {
+            info.file
+                .as_ref()
+                .and_then(|f| f.parent().map(|p| p.to_path_buf()))
+        })
+        .ok_or_else(|| "no hay carpeta de logs".to_string())?;
+    // Crear el directorio si el user pulsa el botón antes de que se
+    // haya escrito ninguna línea (arranque en frío en Windows con la
+    // capa fichero recién montada).
+    std::fs::create_dir_all(&target).ok();
+    #[cfg(target_os = "macos")]
+    let out = std::process::Command::new("open").arg(&target).spawn();
+    #[cfg(target_os = "linux")]
+    let out = std::process::Command::new("xdg-open").arg(&target).spawn();
+    #[cfg(target_os = "windows")]
+    let out = std::process::Command::new("explorer").arg(&target).spawn();
+    out.map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// Borra un cache tipo `"tmdb_search"`, `"tmdb_view"`, etc. Existe
 /// como helper aparte para poderlo llamar sin pasar por el comando
 /// Tauri `clear_cache` (que además invalida más cosas y hace lock
@@ -2127,6 +2193,8 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             clear_cache,
             get_preferences,
             set_preferences,
+            log_info,
+            open_log_folder,
         ])
         .run(tauri::generate_context!())
         .context("Error al ejecutar la app Tauri")

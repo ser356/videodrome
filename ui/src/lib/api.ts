@@ -668,6 +668,25 @@ export const getPreferences = () => invoke<Preferences>('get_preferences')
 export const setPreferences = (prefs: Preferences) =>
   invoke<void>('set_preferences', { prefs })
 
+// -------- About / logs --------
+
+/** Info de app + capa de logging, expuesta para la sección
+ *  "Acerca de" de Ajustes. `enabled=false` cuando el user forzó
+ *  `VIDEODROME_LOG=0`. El fichero puede no existir todavía si la
+ *  app arrancó hace segundos y aún no ha flusheado ninguna línea. */
+export interface AppLogInfo {
+  version: string
+  enabled: boolean
+  dir: string | null
+  file: string | null
+  /** `true` cuando el user forzó `VIDEODROME_LOG=/ruta/x.log`. En ese
+   * modo el prune diario y la rotación están desactivados. */
+  explicit_path: boolean
+}
+
+export const logInfo = () => invoke<AppLogInfo>('log_info')
+export const openLogFolder = () => invoke<void>('open_log_folder')
+
 // -------- Helpers --------
 
 export function tmdbPoster(
