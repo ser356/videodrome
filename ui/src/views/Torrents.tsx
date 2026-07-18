@@ -206,6 +206,11 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
           season: mode === 'series' ? season : null,
           episode: mode === 'series' ? episode : null,
           isSeries: mode === 'series',
+          // fileHint de Torrentio (§): índice pre-resuelto del
+          // fichero dentro del torrent. Cuando existe, el backend
+          // salta la heurística de parseo y sirve directamente ese
+          // file — clave para packs con numeración de anime.
+          fileHint: current.file_hint ?? null,
         },
       })
       return
@@ -232,6 +237,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
         resumeSeconds,
         mode === 'series' ? season : null,
         mode === 'series' ? episode : null,
+        current.file_hint ?? null,
       )
       setStream(info)
       const subNote = subRelease ? `  \u00b7  sub: ${subRelease}` : ''

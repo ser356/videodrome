@@ -16,6 +16,7 @@ pub mod apibay;
 pub mod eztv;
 pub mod knaben;
 pub mod release_name;
+pub mod torrentio;
 pub mod torznab;
 pub mod yts;
 
@@ -52,10 +53,35 @@ pub struct Torrent {
     ///   * modular el score final (`match_multiplier` en `score()`)
     #[serde(default)]
     pub match_kind: MatchKind,
+    /// Hint del índice de fichero DENTRO del torrent para el episodio
+    /// pedido. Solo lo poblan providers que dan la respuesta
+    /// pre-resuelta (Torrentio a través de su addon Stremio). Con
+    /// hint disponible, `stream::start` puede saltarse la heurística
+    /// de parseo de nombres (`select_file`) y usarlo directo — clave
+    /// para packs con numeración absoluta de anime donde el parser
+    /// falla.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_hint: Option<usize>,
     /// Infohash extraído del magnet (para dedupe). No se serializa al JSON
     /// para no ensuciar la salida.
     #[serde(skip)]
     pub infohash: String,
+}
+
+/// Selección de fichero dentro de un torrent multi-file. Se pasa a
+/// `stream::start` para decidir qué fichero servir. `None` = fichero
+/// de vídeo más grande (comportamiento pre-audit, correcto para pelis
+/// y torrents mono-fichero).
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub enum FileSelector {
+    /// Elegir por match S+E parseando los nombres. Fallback al mayor
+    /// si ningún nombre matchea.
+    Episode(u16, u16),
+    /// Índice directo (0-based). Se usa cuando el provider ya
+    /// resolvió qué fichero es (Torrentio.fileIdx). Si el índice está
+    /// fuera de rango, `select_file` cae al mayor.
+    Index(usize),
 }
 
 /// Cómo un release matchea contra la query. Por defecto `Movie`
@@ -609,6 +635,12 @@ fn language_multiplier(hint: AudioHint) -> f64 {
 /// definidas `TORZNAB_URL` y `TORZNAB_APIKEY` en el entorno.
 pub fn default_providers() -> Vec<Arc<dyn TorrentProvider>> {
     let mut providers: Vec<Arc<dyn TorrentProvider>> = vec![
+        // Torrentio primero: es meta-agregador (RARBG-legacy, 1337x,
+        // TPB, YTS, EZTV…) direccionable por IMDb con dedup y
+        // `fileIdx` pre-resuelto. Cubre solapadamente lo que hacen
+        // YTS/EZTV/knaben pero con mejor recall — el resto queda
+        // como fallback / redundancia.
+        Arc::new(torrentio::Torrentio),
         Arc::new(yts::Yts),
         Arc::new(eztv::Eztv),
         Arc::new(knaben::Knaben),

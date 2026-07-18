@@ -848,6 +848,12 @@ struct TorrentDto {
     /// `"episode"`, `"season_pack"`, `"series_pack"`. La UI pinta un
     /// badge acorde ("E03" / "Pack S01" / "Serie completa").
     match_kind: String,
+    /// Índice de fichero pre-resuelto por el provider (Torrentio).
+    /// El frontend lo pasa a `start_stream_html` como `file_hint`
+    /// para saltarse la heurística de `select_file` en packs con
+    /// numeración rara.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_hint: Option<usize>,
 }
 
 impl TorrentDto {
@@ -879,6 +885,7 @@ impl TorrentDto {
             source: t.source,
             audio,
             match_kind: match_kind.to_string(),
+            file_hint: t.file_hint,
         }
     }
 }
@@ -1318,9 +1325,10 @@ async fn start_stream_with_sub(
     resume_seconds: Option<u32>,
     season: Option<u16>,
     episode: Option<u16>,
+    file_hint: Option<usize>,
     state: State<'_, AppState>,
 ) -> Result<StreamInfo, String> {
-    let target = season.zip(episode);
+    let target = build_target(season, episode, file_hint);
     start_stream_inner(
         magnet,
         sub_path.map(PathBuf::from),
@@ -1340,16 +1348,37 @@ async fn start_stream_with_sub(
 ///
 /// `season`/`episode`: cuando el magnet es un season pack de una
 /// serie, seleccionan el fichero del episodio pedido dentro del
-/// torrent (§4 audit series). Ambos deben venir juntos o ninguno.
+/// torrent parseando nombres (§4 audit series). Ambos juntos o ninguno.
+/// `file_hint`: cuando el provider ya resolvió el índice del fichero
+/// (Torrentio.fileIdx), se pasa aquí y skipeamos el parseo. Tiene
+/// prioridad sobre season/episode.
 #[tauri::command]
 async fn start_stream_html(
     magnet: String,
     season: Option<u16>,
     episode: Option<u16>,
+    file_hint: Option<usize>,
     state: State<'_, AppState>,
 ) -> Result<StreamInfo, String> {
-    let target = season.zip(episode);
+    let target = build_target(season, episode, file_hint);
     start_stream_inner(magnet, None, None, target, PlayerMode::Html, &state).await
+}
+
+/// Construye el `FileSelector` a partir de los inputs del frontend.
+/// `file_hint` (índice pre-resuelto por Torrentio) gana a
+/// `(season, episode)` porque es más preciso — el provider ya sabe
+/// qué fichero es y no depende del parser de nombres.
+fn build_target(
+    season: Option<u16>,
+    episode: Option<u16>,
+    file_hint: Option<usize>,
+) -> Option<torrents::FileSelector> {
+    if let Some(idx) = file_hint {
+        return Some(torrents::FileSelector::Index(idx));
+    }
+    season
+        .zip(episode)
+        .map(|(s, e)| torrents::FileSelector::Episode(s, e))
 }
 
 /// Lista los ficheros de un torrent multi-file sin arrancar streaming.
@@ -1373,7 +1402,7 @@ async fn start_stream_inner(
     magnet: String,
     sub_path: Option<PathBuf>,
     resume_seconds: Option<u32>,
-    target: Option<(u16, u16)>,
+    target: Option<torrents::FileSelector>,
     mode: PlayerMode,
     state: &State<'_, AppState>,
 ) -> Result<StreamInfo, String> {

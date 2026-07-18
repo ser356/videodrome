@@ -193,6 +193,9 @@ impl TorrentProvider for Eztv {
                 quality: super::quality_from_title(&it.title),
                 source: "eztv".to_string(),
                 match_kind: crate::torrents::MatchKind::default(),
+                // EZTV podría exponer fileIdx en algún caso pero su
+                // API no lo devuelve fiablemente — dejamos None.
+                file_hint: None,
                 infohash: hash_up,
             });
         }

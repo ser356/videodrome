@@ -65,6 +65,13 @@ export interface Torrent {
    * `season_pack`, `series_pack`. La UI pinta un badge acorde
    * (E03 / Pack S01 / Serie completa). */
   match_kind: 'movie' | 'episode' | 'season_pack' | 'series_pack'
+  /** Índice de fichero pre-resuelto por el provider (Torrentio.fileIdx).
+   * Cuando está presente, el frontend lo pasa a startStreamHtml como
+   * `fileHint` — el backend salta la heurística de parseo de nombres y
+   * sirve el fichero exacto (crítico para packs con numeración de
+   * anime u otras rarezas). `null` = el provider no lo resolvió;
+   * backend cae al parser + fallback al mayor. */
+  file_hint?: number | null
 }
 
 export interface TorrentSearchResult {
@@ -308,6 +315,7 @@ export const startStreamWithSub = (
   resumeSeconds: number | null = null,
   season: number | null = null,
   episode: number | null = null,
+  fileHint: number | null = null,
 ) =>
   invoke<StreamInfo>('start_stream_with_sub', {
     magnet,
@@ -315,6 +323,7 @@ export const startStreamWithSub = (
     resumeSeconds,
     season,
     episode,
+    fileHint,
   })
 
 /** Arranca el stream en modo player HTML: solo librqbit + HTTP server,
@@ -324,12 +333,16 @@ export const startStreamWithSub = (
  *
  * `season`/`episode`: cuando el magnet es un season pack de una
  * serie, seleccionan el fichero del episodio dentro del torrent
- * (§4 audit series). Ambos juntos o ninguno. */
+ * parseando nombres (§4 audit series). Ambos juntos o ninguno.
+ * `fileHint`: cuando el provider ya resolvió el índice del fichero
+ * (Torrentio.fileIdx), se pasa aquí y skipeamos el parseo. Tiene
+ * prioridad sobre season/episode. */
 export const startStreamHtml = (
   magnet: string,
   season: number | null = null,
   episode: number | null = null,
-) => invoke<StreamInfo>('start_stream_html', { magnet, season, episode })
+  fileHint: number | null = null,
+) => invoke<StreamInfo>('start_stream_html', { magnet, season, episode, fileHint })
 
 /** `true` si ffmpeg + ffprobe están en PATH. */
 export const ffmpegAvailable = () => invoke<boolean>('ffmpeg_available')

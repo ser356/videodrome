@@ -92,6 +92,7 @@ impl TorrentProvider for Apibay {
                 quality,
                 source: "apibay".to_string(),
                 match_kind: crate::torrents::MatchKind::default(),
+                file_hint: None,
                 infohash: hash_up,
             });
         }

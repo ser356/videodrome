@@ -99,6 +99,11 @@ interface PlayerState {
   season?: number | null
   episode?: number | null
   isSeries?: boolean
+  /** Índice de fichero pre-resuelto por el provider (Torrentio.fileIdx).
+   * Cuando está presente, backend salta el `select_file` heurístico y
+   * sirve directamente `files[fileHint]` — crítico para packs con
+   * numeración de anime u otras rarezas donde parsear el nombre falla. */
+  fileHint?: number | null
 }
 
 const CONTROLS_HIDE_MS = 2500
@@ -262,11 +267,14 @@ export function Player() {
       try {
         // §4 audit series: si el user viene del flujo de serie
         // pasamos S/E → el backend selecciona el fichero del
-        // episodio dentro del pack (`select_file`).
+        // episodio dentro del pack (`select_file`). Si el provider
+        // ya nos dio el índice (Torrentio.fileIdx), lo pasamos como
+        // `fileHint` — bypasa `select_file` y es más preciso.
         const info = await startStreamHtml(
           state.magnet,
           state.isSeries ? (state.season ?? null) : null,
           state.isSeries ? (state.episode ?? null) : null,
+          state.fileHint ?? null,
         )
         if (cancelled) {
           await stopStream(info.id).catch(() => {})

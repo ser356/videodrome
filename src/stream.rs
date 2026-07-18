@@ -387,17 +387,34 @@ pub struct TorrentFileInfo {
 ///
 /// * `target = None` → el vídeo más grande (comportamiento pre-audit,
 ///   correcto para películas y torrents mono-fichero).
-/// * `target = Some((S, E))` → parsea cada nombre con
+/// * `target = Some(Episode(S, E))` → parsea cada nombre con
 ///   `release_name::parse` y elige el que matchee S+E. Si varios
 ///   matchean (mismo episodio en calidades duplicadas), el más
 ///   grande de ellos. Si ninguno matchea, cae al mayor — así una
 ///   heurística de S/E fallida no bloquea el arranque.
+/// * `target = Some(Index(i))` → devuelve directo `files[i]` (con
+///   bounds check). Se usa cuando el provider ya resolvió el índice
+///   (Torrentio.fileIdx) y saltarnos el parser evita el edge case de
+///   packs con numeración absoluta de anime.
 ///
 /// Filtra ficheros de tamaño < 50 MB para no picar samples/extras.
 pub fn select_file(
     files: &[(usize, String, u64)],
-    target: Option<(u16, u16)>,
+    target: Option<crate::torrents::FileSelector>,
 ) -> Option<(usize, String, u64)> {
+    use crate::torrents::FileSelector;
+
+    // Índice directo: el provider ya nos dijo cuál. Bypass del
+    // filtro de samples porque el proveedor sabe mejor que la
+    // heurística "> 50 MB" cuando el fichero elegido es válido.
+    if let Some(FileSelector::Index(i)) = target {
+        if let Some(f) = files.iter().find(|(id, _, _)| *id == i) {
+            return Some(f.clone());
+        }
+        // Fuera de rango: cae al mayor. Mejor un fichero incorrecto
+        // que un error duro.
+    }
+
     // Vídeos "reales" (ext conocida + tamaño > sample). Si el filtro
     // deja lista vacía (torrent con nombres no estándar), volvemos al
     // set completo antes de descartar.
@@ -406,7 +423,7 @@ pub fn select_file(
             && std::path::Path::new(name)
                 .extension()
                 .and_then(|e| e.to_str())
-                .map(|e| VIDEO_EXTS.iter().any(|v| e.eq_ignore_ascii_case(v)))
+                .map(|e| VIDEO_EXTS.contains(&e))
                 .unwrap_or(false)
     };
     let candidates: Vec<&(usize, String, u64)> =
@@ -417,7 +434,7 @@ pub fn select_file(
         candidates
     };
 
-    if let Some((qs, qe)) = target {
+    if let Some(FileSelector::Episode(qs, qe)) = target {
         let matches: Vec<&&(usize, String, u64)> = pool
             .iter()
             .filter(|(_, n, _)| {
@@ -561,15 +578,17 @@ pub async fn list_files(magnet: String) -> Result<Vec<TorrentFileInfo>> {
 /// vez que se abra esta misma peli, librqbit reutiliza los ficheros y
 /// arranca casi al instante. Sin infohash, se cae a un tempdir efímero.
 ///
-/// `target`: `Some((season, episode))` para elegir dentro de un
-/// torrent multi-fichero el episodio pedido (season packs de series).
-/// `None` = comportamiento pre-audit (fichero de vídeo más grande).
+/// `target`: ver `select_file`. `None` = fichero de vídeo más grande.
 pub async fn start(magnet: String) -> Result<StreamHandle> {
     start_with_target(magnet, None).await
 }
 
-/// Variante con selección explícita de episodio. Ver `start`.
-pub async fn start_with_target(magnet: String, target: Option<(u16, u16)>) -> Result<StreamHandle> {
+/// Variante con selección explícita de fichero. Ver `start` y
+/// `select_file`.
+pub async fn start_with_target(
+    magnet: String,
+    target: Option<crate::torrents::FileSelector>,
+) -> Result<StreamHandle> {
     let infohash = parse_infohash(&magnet);
 
     // Directorio de datos: caché persistente si hay infohash, tempdir si
@@ -2677,29 +2696,32 @@ mod tests {
 
     #[test]
     fn select_file_target_matches_episode_in_pack() {
+        use crate::torrents::FileSelector;
         let files = mkfiles(&[
             ("Fargo.S02E01.1080p.WEB-DL.x264-GRP.mkv", 900 * 1024 * 1024),
             ("Fargo.S02E02.1080p.WEB-DL.x264-GRP.mkv", 950 * 1024 * 1024),
             ("Fargo.S02E03.1080p.WEB-DL.x264-GRP.mkv", 800 * 1024 * 1024),
         ]);
-        let (id, name, _) = select_file(&files, Some((2, 3))).unwrap();
+        let (id, name, _) = select_file(&files, Some(FileSelector::Episode(2, 3))).unwrap();
         assert_eq!(id, 2);
         assert!(name.contains("S02E03"));
     }
 
     #[test]
     fn select_file_target_prefers_largest_of_dup_episodes() {
+        use crate::torrents::FileSelector;
         // Pack con 720p y 1080p del mismo E03: gana el mayor.
         let files = mkfiles(&[
             ("Fargo.S02E03.720p.WEB-DL.x264.mkv", 400 * 1024 * 1024),
             ("Fargo.S02E03.1080p.WEB-DL.x264.mkv", 900 * 1024 * 1024),
         ]);
-        let (id, _, _) = select_file(&files, Some((2, 3))).unwrap();
+        let (id, _, _) = select_file(&files, Some(FileSelector::Episode(2, 3))).unwrap();
         assert_eq!(id, 1);
     }
 
     #[test]
     fn select_file_target_falls_back_to_largest_when_no_match() {
+        use crate::torrents::FileSelector;
         // Pedimos S05E01 pero el pack solo tiene S02. En vez de
         // devolver None, cae al mayor — mejor un fichero incorrecto
         // que un error duro; el user puede corregir con list_files.
@@ -2707,7 +2729,33 @@ mod tests {
             ("Fargo.S02E01.mkv", 900 * 1024 * 1024),
             ("Fargo.S02E02.mkv", 950 * 1024 * 1024),
         ]);
-        let (id, _, _) = select_file(&files, Some((5, 1))).unwrap();
+        let (id, _, _) = select_file(&files, Some(FileSelector::Episode(5, 1))).unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn select_file_index_bypasses_heuristics() {
+        // Con FileSelector::Index(i), el file elegido es el que dice
+        // el provider — se salta hasta el filtro de samples porque
+        // el provider (Torrentio) sabe mejor cuál es el bueno.
+        use crate::torrents::FileSelector;
+        let files = mkfiles(&[
+            ("episode.mkv", 900 * 1024 * 1024),
+            ("tiny.mkv", 10 * 1024 * 1024), // < 50 MB, normalmente sample
+            ("huge.mkv", 3000 * 1024 * 1024),
+        ]);
+        let (id, _, _) = select_file(&files, Some(FileSelector::Index(1))).unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn select_file_index_out_of_range_falls_back_to_largest() {
+        use crate::torrents::FileSelector;
+        let files = mkfiles(&[
+            ("small.mkv", 100 * 1024 * 1024),
+            ("big.mkv", 900 * 1024 * 1024),
+        ]);
+        let (id, _, _) = select_file(&files, Some(FileSelector::Index(99))).unwrap();
         assert_eq!(id, 1);
     }
 

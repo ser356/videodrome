@@ -176,6 +176,7 @@ impl TorrentProvider for Torznab {
                 quality,
                 source: "torznab".to_string(),
                 match_kind: crate::torrents::MatchKind::default(),
+                file_hint: None,
                 infohash,
             });
         }

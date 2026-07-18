@@ -161,6 +161,7 @@ impl TorrentProvider for Yts {
                 quality: Some(t.quality),
                 source: "yts".to_string(),
                 match_kind: crate::torrents::MatchKind::default(),
+                file_hint: None,
                 infohash: t.hash.to_ascii_uppercase(),
             });
         }
