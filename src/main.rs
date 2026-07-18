@@ -113,6 +113,18 @@ enum Commands {
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
 
+        /// Serie: temporada a buscar. Si se combina con `--episode`
+        /// busca el episodio exacto; sin `--episode` busca packs de
+        /// temporada. Requiere que el título/imdb sean de una serie
+        /// (los providers de series lo asumen a partir de
+        /// `kind=Series`).
+        #[arg(long)]
+        season: Option<u16>,
+
+        /// Serie: episodio a buscar. Requiere `--season`.
+        #[arg(long, requires = "season")]
+        episode: Option<u16>,
+
         /// Imprime como JSON en lugar de texto formateado
         #[arg(long)]
         json: bool,
@@ -399,6 +411,8 @@ async fn dispatch(command: Commands) -> Result<()> {
             tmdb_id,
             min_seeders,
             limit,
+            season,
+            episode,
             json,
         } => {
             config::load_env_files();
@@ -462,9 +476,13 @@ async fn dispatch(command: Commands) -> Result<()> {
                 tmdb_id,
                 original_language: None,
                 title_variants: Vec::new(),
-                kind: crate::tmdb::MediaKind::Movie,
-                season: None,
-                episode: None,
+                kind: if season.is_some() {
+                    crate::tmdb::MediaKind::Series
+                } else {
+                    crate::tmdb::MediaKind::Movie
+                },
+                season,
+                episode,
             };
 
             let providers = torrents::default_providers();

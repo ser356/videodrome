@@ -1572,10 +1572,19 @@ fn draw_torrents(f: &mut Frame, app: &mut App) {
                     torrents::AudioHint::Dubbed(_) => Color::LightMagenta,
                     torrents::AudioHint::Unknown => Color::DarkGray,
                 };
+                // §7 audit series: prefijo visible cuando el release
+                // es de series. Movie queda sin prefijo (compat).
+                let mk_prefix = match t.match_kind {
+                    torrents::MatchKind::Movie => "",
+                    torrents::MatchKind::Episode => "[EP] ",
+                    torrents::MatchKind::SeasonPack => "[PACK] ",
+                    torrents::MatchKind::SeriesPack => "[SERIE] ",
+                };
+                let title_cell = format!("{mk_prefix}{}", t.title);
                 Row::new(vec![
                     Cell::from(format!("{:>2}.", i + 1))
                         .style(Style::default().fg(Color::DarkGray)),
-                    Cell::from(t.title.clone()).style(Style::default().fg(Color::White)),
+                    Cell::from(title_cell).style(Style::default().fg(Color::White)),
                     Cell::from(size).style(Style::default().fg(Color::Yellow)),
                     Cell::from(format!("↑{}", t.seeders)).style(Style::default().fg(Color::Green)),
                     Cell::from(format!("↓{}", t.leechers)).style(Style::default().fg(Color::Red)),
