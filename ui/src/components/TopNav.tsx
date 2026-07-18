@@ -2,6 +2,7 @@ import type { PropsWithChildren } from 'react'
 import { Gear } from '@phosphor-icons/react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Top navigation. Wordmark-only ("screener"), thin hairline, right slot
@@ -20,6 +21,7 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  * propia vista de Ajustes (evita el "botón que va a la página actual").
  */
 export function TopNav({ children }: PropsWithChildren) {
+  const t = useT()
   const isMac =
     typeof navigator !== 'undefined' &&
     navigator.platform.toLowerCase().includes('mac')
@@ -50,7 +52,7 @@ export function TopNav({ children }: PropsWithChildren) {
         <Link
           to="/"
           className="focus-ring rounded-md text-[17px] font-semibold tracking-tight text-ink"
-          aria-label="Inicio"
+          aria-label={t('nav.home')}
         >
           videodrome
         </Link>
@@ -59,8 +61,8 @@ export function TopNav({ children }: PropsWithChildren) {
           {showGear && (
             <button
               onClick={() => nav('/settings')}
-              aria-label="Ajustes"
-              title="Ajustes (,)"
+              aria-label={t('nav.settings')}
+              title={`${t('nav.settings')} (,)`}
               className="focus-ring flex h-9 w-9 items-center justify-center rounded-full border border-hairline text-body transition-colors hover:border-border-strong hover:text-ink"
             >
               <Gear size={16} weight="bold" />

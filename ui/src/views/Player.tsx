@@ -23,6 +23,7 @@ import {
   fetchEmbeddedSubtitle,
   formatSize,
   getMovieView,
+  getPreferences,
   hlsUrl,
   probeStream,
   reportPosition,
@@ -39,6 +40,7 @@ import {
   type StreamStats,
   type Subtitle,
 } from '../lib/api'
+import { getLocale, mergeSubtitleLangs } from '../lib/i18n'
 
 /**
  * Player HTML embebido. Reemplaza el spawn de VLC cuando la
@@ -425,34 +427,43 @@ export function Player() {
     if (!stream) return
     let cancelled = false
     setSubsLoading(true)
-    // Sin languages → backend pasa "" → OpenSubtitles devuelve
-    // todos los idiomas disponibles para el imdb_id/query.
-    //
-    // Pasamos también `stream.id`: el backend usa el StreamHandle
-    // asociado para calcular el hash OpenSubtitles del fichero de
-    // vídeo y buscar subs SYNC-VERIFIED (match exacto de release).
-    // Si el hash no da resultados, cae a imdb_id/query como antes.
-    searchSubtitles(
-      stream.id,
-      state?.imdbId ?? null,
-      state?.title ?? null,
-      undefined,
-      // §5 audit series: parent_imdb_id + season + episode habilita
-      // la ruta canónica de OpenSubtitles para subs de episodio,
-      // en vez de basarse solo en query textual con SxxEyy.
-      state?.isSeries ? (state.season ?? null) : null,
-      state?.isSeries ? (state.episode ?? null) : null,
-    )
-      .then((subs) => {
+    // Idiomas: `UI locale + prefs.subtitle_languages` con dedupe.
+    // Así OpenSubtitles ordena los subs del idioma de la app arriba
+    // (el user con la app en ES ve los ES primero aunque sus prefs
+    // históricas fueran "en,es"). Si getPreferences falla — no-Tauri,
+    // backend caído — sólo enviamos el UI locale.
+    ;(async () => {
+      let langs: string = getLocale()
+      try {
+        const prefs = await getPreferences()
+        langs = mergeSubtitleLangs(getLocale(), prefs.subtitle_languages)
+      } catch {
+        /* best-effort */
+      }
+      if (cancelled) return
+      // Pasamos también `stream.id`: el backend usa el StreamHandle
+      // asociado para calcular el hash OpenSubtitles del fichero de
+      // vídeo y buscar subs SYNC-VERIFIED (match exacto de release).
+      // Si el hash no da resultados, cae a imdb_id/query como antes.
+      try {
+        const subs = await searchSubtitles(
+          stream.id,
+          state?.imdbId ?? null,
+          state?.title ?? null,
+          langs,
+          // §5 audit series: parent_imdb_id + season + episode habilita
+          // la ruta canónica de OpenSubtitles para subs de episodio.
+          state?.isSeries ? (state.season ?? null) : null,
+          state?.isSeries ? (state.episode ?? null) : null,
+        )
         if (!cancelled) setSubsList(subs)
-      })
-      .catch((e) => {
+      } catch (e) {
         console.warn('searchSubtitles failed:', e)
         if (!cancelled) setSubsList([])
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setSubsLoading(false)
-      })
+      }
+    })()
     return () => {
       cancelled = true
     }

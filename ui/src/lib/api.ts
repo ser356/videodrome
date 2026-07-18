@@ -549,6 +549,11 @@ export interface Preferences {
    * externo. El clic derecho sobre un torrent siempre ofrece
    * "Abrir en VLC" como escape hatch. */
   default_player: 'html' | 'vlc'
+  /** Idioma de la UI (ISO 639-1). `null` = auto-detección al
+   * arrancar vía `navigator.language`; tras la primera detección se
+   * persiste aquí. Se usa además como primer idioma al buscar
+   * subtítulos (el UI lang sale arriba en OpenSubtitles). */
+  ui_language: string | null
 }
 
 export const cacheInfo = () => invoke<CacheEntry[]>('cache_info')

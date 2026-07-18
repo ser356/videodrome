@@ -42,7 +42,7 @@ pub struct Preferences {
     /// encima del gradiente de `.glass`/`.glass-strong`/`.popover`.
     #[serde(default = "default_glass_opacity")]
     pub glass_opacity: u8,
-    /// Reproductor por defecto al pulsar Enter/play sobre un torrent.
+    /// Reproductor que la GUI usa por defecto al pulsar Enter/play sobre un torrent.
     /// `Html` usa el player embebido (view `Player.tsx`, requiere
     /// ffmpeg en PATH); `Vlc` mantiene la ruta legacy que abre VLC
     /// como proceso externo. El clic derecho sobre un torrent siempre
@@ -50,6 +50,18 @@ pub struct Preferences {
     /// esta preferencia.
     #[serde(default = "default_player")]
     pub default_player: PlayerKind,
+    /// Idioma de la UI (ISO 639-1: `"en"`, `"es"`, `"fr"`, `"de"`,
+    /// `"it"`, `"pt"`). `None` = auto-detección en frontend vía
+    /// `navigator.language` la primera vez que arranca la app, tras
+    /// lo cual se persiste el valor detectado. Los diccionarios
+    /// viven en `ui/src/lib/i18n/<code>.ts`.
+    ///
+    /// Se usa además como PRIMER idioma de preferencia al buscar
+    /// subtítulos (§ audit i18n): un user con la app en ES ve subs
+    /// españoles arriba aunque su `subtitle_languages` histórica
+    /// empezara por "en,es".
+    #[serde(default)]
+    pub ui_language: Option<String>,
 }
 
 /// Reproductor que la GUI usa por defecto. Serializado como string
@@ -87,6 +99,7 @@ impl Default for Preferences {
             stream_cache_ttl_days: default_stream_cache_ttl_days(),
             glass_opacity: default_glass_opacity(),
             default_player: default_player(),
+            ui_language: None,
         }
     }
 }

@@ -9,6 +9,7 @@ import {
   type MovieHit,
 } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Pantalla intermedia entre `Search` y `Torrents`. Muestra los posibles
@@ -24,6 +25,7 @@ export function SearchResults() {
   const nav = useNavigate()
   const [params] = useSearchParams()
   const q = params.get('q') ?? ''
+  const t = useT()
 
   const [items, setItems] = useState<MovieHit[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -85,16 +87,16 @@ export function SearchResults() {
   const hotkeys: Hotkey[] = [
     { key: 'j', hint: '', run: () => move(1) },
     { key: 'ArrowDown', hint: '', run: () => move(1) },
-    { key: 'k', hint: 'Mover', run: () => move(-1) },
+    { key: 'k', hint: t('hotkey.move'), run: () => move(-1) },
     { key: 'ArrowUp', hint: '', run: () => move(-1) },
     { key: 'ArrowRight', hint: '', run: () => move(1) },
     { key: 'ArrowLeft', hint: '', run: () => move(-1) },
     {
       key: 'Enter',
-      hint: 'Torrents',
+      hint: t('hotkey.torrents'),
       run: () => items && items[sel] && openTorrents(items[sel]),
     },
-    { key: 'Escape', hint: 'Volver', run: () => nav('/search') },
+    { key: 'Escape', hint: t('common.back'), run: () => nav('/search') },
   ]
   useHotkeys(hotkeys, [items, sel])
 
@@ -105,18 +107,22 @@ export function SearchResults() {
           onClick={() => nav('/search')}
           className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
         >
-          Volver
+          {t('common.back')}
         </button>
       </TopNav>
 
       <main className="mx-auto w-full max-w-[1400px] flex-1 px-8 py-8">
         <div className="mb-6 flex items-baseline justify-between">
           <h1 className="text-[22px] font-semibold text-ink">
-            Resultados{' '}
+            {t('searchResults.title')}{' '}
             <span className="text-muted">· {q}</span>
           </h1>
           <p className="text-[12px] tabular-nums text-dim">
-            {loading ? 'Buscando…' : items ? `${items.length} coincidencias` : ''}
+            {loading
+              ? t('searchResults.searching')
+              : items
+                ? t('searchResults.matches', { n: items.length })
+                : ''}
           </p>
         </div>
 
@@ -130,11 +136,9 @@ export function SearchResults() {
 
         {items && items.length === 0 && !loading && (
           <div className="rounded-lg border border-hairline bg-surface p-10 text-center">
-            <p className="text-[16px] text-ink">Nada con torrents disponibles.</p>
+            <p className="text-[16px] text-ink">{t('searchResults.emptyTitle')}</p>
             <p className="mt-1 text-[13px] text-muted">
-              TMDB no devolvió coincidencias, o ningún indexador tiene
-              torrents con seeders para las que devolvió. Prueba el título
-              original en inglés o añade el año.
+              {t('searchResults.emptyHint')}
             </p>
           </div>
         )}
@@ -170,6 +174,7 @@ function MovieCard({
   onClick: () => void
   onMouseEnter: () => void
 }) {
+  const t = useT()
   const year = movie.release_date?.slice(0, 4) ?? ''
   const src = tmdbPoster(movie.poster_path)
 
@@ -204,7 +209,7 @@ function MovieCard({
             </div>
           )}
           <span className="absolute right-2 top-2 rounded-full border border-accent/40 bg-canvas/80 px-2 py-0.5 text-[10px] font-semibold text-accent backdrop-blur-sm">
-            {movie.kind === 'series' ? 'SERIE' : `▾ ${movie.torrent_count}`}
+            {movie.kind === 'series' ? t('searchResults.badgeSeries') : `▾ ${movie.torrent_count}`}
           </span>
         </div>
         <div className="mt-3 flex items-baseline justify-between gap-2">

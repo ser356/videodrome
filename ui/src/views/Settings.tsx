@@ -21,6 +21,7 @@ import {
   type Preferences,
 } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { getLocale, LOCALE_LABELS, setLocale, SUPPORTED_LOCALES, useT } from '../lib/i18n'
 import { applyGlassOpacity } from '../lib/theme'
 
 /**
@@ -295,11 +296,19 @@ function PreferencesEditor({
   saving: boolean
   onSave: (p: Preferences) => void
 }) {
+  const t = useT()
   const [rating, setRating] = useState(prefs.default_min_rating)
   const [langs, setLangs] = useState(prefs.subtitle_languages)
   const [ttl, setTtl] = useState(prefs.stream_cache_ttl_days)
   const [glass, setGlass] = useState(prefs.glass_opacity)
   const [player, setPlayer] = useState<'html' | 'vlc'>(prefs.default_player)
+  // Idioma UI: se aplica en VIVO al cambiarlo (sin esperar a "Guardar")
+  // para que el user vea el efecto inmediato. La persistencia va con
+  // el submit — pero `setLocale` ya persiste por su cuenta (best-effort),
+  // así que un cambio de idioma + cerrar sin guardar deja el idioma
+  // aplicado. Es UX correcto: el idioma no es "un ajuste con estado
+  // dirty", es un modo.
+  const [ui, setUi] = useState<string>(prefs.ui_language ?? getLocale())
 
   const dirty =
     rating !== prefs.default_min_rating ||
@@ -319,8 +328,30 @@ function PreferencesEditor({
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <Field
-        label="Rating mínimo por defecto"
-        hint="Umbral inicial de la vista Cartelera (0.5 – 5.0)."
+        label={t('settings.ui.language')}
+        hint={t('settings.ui.languageHint')}
+      >
+        <select
+          value={ui}
+          onChange={(e) => {
+            const next = e.target.value
+            setUi(next)
+            // Aplica y persiste el idioma en vivo.
+            void setLocale(next)
+          }}
+          className="focus-ring h-10 w-full rounded-md border border-hairline bg-surface px-3 text-[14px] text-ink"
+        >
+          {SUPPORTED_LOCALES.map((l) => (
+            <option key={l} value={l}>
+              {LOCALE_LABELS[l]}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field
+        label={t('settings.recs.minRating')}
+        hint={t('settings.recs.minRatingHint')}
       >
         <input
           type="number"
@@ -334,8 +365,8 @@ function PreferencesEditor({
       </Field>
 
       <Field
-        label="Idiomas de subtítulos"
-        hint='Códigos ISO 639-1 separados por coma. Ej: "es,en,fr".'
+        label={t('settings.subs.languages')}
+        hint={t('settings.subs.languagesHint')}
       >
         <input
           type="text"
@@ -420,11 +451,14 @@ function PreferencesEditor({
               stream_cache_ttl_days: ttl,
               glass_opacity: glass,
               default_player: player,
+              // Preservamos el idioma actual — no se toca desde el
+              // botón "Guardar" (se persiste inline con setLocale).
+              ui_language: ui,
             })
           }
           className="focus-ring h-10 rounded-full bg-accent px-5 text-[13px] font-semibold text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-accent-disabled"
         >
-          {saving ? 'Guardando…' : 'Guardar cambios'}
+          {saving ? t('common.loading') : t('common.save')}
         </button>
       </div>
     </div>

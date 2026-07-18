@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import './index.css'
 import { getPreferences, isTauri } from './lib/api'
+import { initLocale } from './lib/i18n'
 import { applyGlassOpacity } from './lib/theme'
 import { Home } from './views/Home'
 import { Login } from './views/Login'
@@ -24,22 +25,31 @@ if (isTauri()) {
     .catch(() => {})
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/login" element={<Login />} />
-        <Route path="/recs" element={<Recommendations />} />
-        <Route path="/search" element={<Search />} />
-        <Route path="/search/results" element={<SearchResults />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="/series/:tmdbId" element={<SeriesDetail />} />
-        <Route path="/torrents/tmdb/:tmdbId" element={<Torrents mode="tmdb" />} />
-        <Route path="/torrents/search" element={<Torrents mode="direct" />} />
-        <Route path="/torrents/series/:tmdbId" element={<Torrents mode="series" />} />
-        <Route path="/player" element={<Player />} />
-      </Routes>
-    </BrowserRouter>
-  </StrictMode>,
-)
+// Inicializa el locale ANTES del render para que el primer paint ya
+// muestre los strings del idioma correcto y no haya un flash EN → ES.
+// `initLocale` es best-effort: si falla (no-Tauri, backend caído),
+// cae a `navigator.language` y de ahí a `en`.
+async function bootstrap() {
+  await initLocale()
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/recs" element={<Recommendations />} />
+          <Route path="/search" element={<Search />} />
+          <Route path="/search/results" element={<SearchResults />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="/series/:tmdbId" element={<SeriesDetail />} />
+          <Route path="/torrents/tmdb/:tmdbId" element={<Torrents mode="tmdb" />} />
+          <Route path="/torrents/search" element={<Torrents mode="direct" />} />
+          <Route path="/torrents/series/:tmdbId" element={<Torrents mode="series" />} />
+          <Route path="/player" element={<Player />} />
+        </Routes>
+      </BrowserRouter>
+    </StrictMode>,
+  )
+}
+
+void bootstrap()

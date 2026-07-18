@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { TopNav } from '../components/TopNav'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Vista `View::Search` de la TUI. Un solo input; Enter dispara la
@@ -10,9 +11,10 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  */
 export function Search() {
   const nav = useNavigate()
+  const t = useT()
 
   const hotkeys: Hotkey[] = [
-    { key: 'Escape', hint: 'volver', run: () => nav('/'), ignoreInInput: false },
+    { key: 'Escape', hint: t('common.back'), run: () => nav('/'), ignoreInInput: false },
   ]
   useHotkeys(hotkeys, [])
 
@@ -22,11 +24,10 @@ export function Search() {
 
       <main className="mx-auto flex w-full max-w-[720px] flex-1 flex-col justify-center px-8">
         <h1 className="mb-1 text-[24px] font-semibold text-ink">
-          Buscar torrents
+          {t('search.title')}
         </h1>
         <p className="mb-6 text-[14px] text-muted">
-          Escribe el título. Añade el año al final para desambiguar remakes
-          (por ejemplo, "Funny Games 2007").
+          {t('search.hint')}
         </p>
 
         <form
@@ -41,22 +42,22 @@ export function Search() {
             name="q"
             autoFocus
             required
-            placeholder="Título…"
+            placeholder={t('search.placeholder')}
             className="focus-ring glass h-11 flex-1 rounded-full px-4 text-[15px] text-ink placeholder:text-dim"
           />
           <button
             type="submit"
             className="focus-ring h-11 rounded-full bg-accent px-5 text-[15px] font-semibold text-on-accent transition-colors hover:bg-accent-hover"
           >
-            Buscar
+            {t('search.submit')}
           </button>
         </form>
       </main>
 
       <HotkeyBar
         hotkeys={[
-          { key: 'Enter', hint: 'buscar', run: () => {} },
-          { key: 'Escape', hint: 'volver', run: () => {} },
+          { key: 'Enter', hint: t('search.submit'), run: () => {} },
+          { key: 'Escape', hint: t('common.back'), run: () => {} },
         ]}
       />
     </div>

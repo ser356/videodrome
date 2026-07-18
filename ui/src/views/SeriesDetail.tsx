@@ -12,6 +12,7 @@ import {
   type SeriesEpisode,
 } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Vista SeriesDetail (§7 audit series). Se llega desde SearchResults
@@ -32,6 +33,7 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  */
 export function SeriesDetail() {
   const nav = useNavigate()
+  const t = useT()
   const { tmdbId } = useParams<{ tmdbId?: string }>()
   const [params] = useSearchParams()
   const fallbackTitle = params.get('title') ?? ''
@@ -48,13 +50,13 @@ export function SeriesDetail() {
   // Fetch series details on mount.
   useEffect(() => {
     if (!isTauri()) {
-      setError('Esta vista requiere la app de escritorio (Tauri).')
+      setError(t('series.tauriRequired'))
       setLoading(false)
       return
     }
     const id = Number(tmdbId ?? '')
     if (!Number.isFinite(id) || id <= 0) {
-      setError('tmdbId inválido.')
+      setError(t('series.invalidId'))
       setLoading(false)
       return
     }
@@ -126,19 +128,19 @@ export function SeriesDetail() {
   const hotkeys: Hotkey[] = [
     { key: 'j', hint: '', run: () => move(1) },
     { key: 'ArrowDown', hint: '', run: () => move(1) },
-    { key: 'k', hint: 'Episodio', run: () => move(-1) },
+    { key: 'k', hint: t('hotkey.episode'), run: () => move(-1) },
     { key: 'ArrowUp', hint: '', run: () => move(-1) },
     { key: 'l', hint: '', run: () => changeSeason(1) },
-    { key: 'ArrowRight', hint: 'Temporada', run: () => changeSeason(1) },
+    { key: 'ArrowRight', hint: t('hotkey.season'), run: () => changeSeason(1) },
     { key: 'h', hint: '', run: () => changeSeason(-1) },
     { key: 'ArrowLeft', hint: '', run: () => changeSeason(-1) },
     {
       key: 'Enter',
-      hint: 'Torrents',
+      hint: t('hotkey.torrents'),
       run: () => episodes[sel] && openEpisode(episodes[sel]),
     },
-    { key: 'p', hint: 'Pack temporada', run: openSeasonPack },
-    { key: 'Escape', hint: 'Volver', run: () => nav(-1) },
+    { key: 'p', hint: t('hotkey.seasonPack'), run: openSeasonPack },
+    { key: 'Escape', hint: t('common.back'), run: () => nav(-1) },
   ]
   useHotkeys(hotkeys, [episodes, sel, details, selectedSeason])
 
@@ -155,7 +157,7 @@ export function SeriesDetail() {
           onClick={() => nav(-1)}
           className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
         >
-          Volver
+          {t('common.back')}
         </button>
       </TopNav>
 
@@ -168,7 +170,7 @@ export function SeriesDetail() {
 
         {loading && !error && (
           <div className="mt-16 text-center text-[14px] text-muted">
-            Cargando serie…
+            {t('series.loading')}
           </div>
         )}
 
@@ -198,25 +200,25 @@ export function SeriesDetail() {
             <div className="mb-3 mt-6 flex items-center justify-between">
               <h2 className="text-[16px] font-semibold text-ink">
                 {selectedSeason
-                  ? `Temporada ${selectedSeason}`
-                  : 'Episodios'}
+                  ? t('series.season', { n: selectedSeason })
+                  : t('hotkey.episode')}
               </h2>
               <button
                 onClick={openSeasonPack}
                 className="focus-ring rounded-full border border-hairline px-3 py-1 text-[12px] text-body hover:border-border-strong"
                 disabled={selectedSeason == null}
               >
-                Buscar pack de temporada
+                {t('series.searchPack')}
               </button>
             </div>
 
             {epsLoading && (
-              <div className="text-[13px] text-muted">Cargando episodios…</div>
+              <div className="text-[13px] text-muted">{t('series.loadingEpisodes')}</div>
             )}
 
             {!epsLoading && episodes.length === 0 && (
               <div className="rounded-sm border border-hairline bg-surface p-4 text-[13px] text-muted">
-                Sin episodios listados para esta temporada.
+                {t('series.noEpisodes')}
               </div>
             )}
 
@@ -262,6 +264,7 @@ function SeriesHeader({
   backdrop: string | null
   poster: string | null
 }) {
+  const t = useT()
   return (
     <div className="relative mb-6 overflow-hidden rounded-lg border border-hairline bg-surface">
       {backdrop && (
@@ -275,7 +278,7 @@ function SeriesHeader({
         {poster && (
           <img
             src={poster}
-            alt={`Poster de ${title}`}
+            alt={title}
             className="h-[220px] w-[147px] shrink-0 rounded-poster object-cover shadow-lg"
             draggable={false}
           />
@@ -291,10 +294,15 @@ function SeriesHeader({
           </div>
           <div className="mb-3 flex items-center gap-2 text-[12px] text-dim">
             <span className="rounded-sm border border-accent/40 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-accent">
-              Serie
+              {t('series.badge')}
             </span>
             {status && <span>· {status}</span>}
-            <span>· {seasons} {seasons === 1 ? 'temporada' : 'temporadas'}</span>
+            <span>
+              ·{' '}
+              {seasons === 1
+                ? t('series.seasonCount1')
+                : t('series.seasonsCount', { n: seasons })}
+            </span>
           </div>
           {overview && (
             <p className="line-clamp-6 text-[13px] leading-relaxed text-body">
@@ -350,6 +358,7 @@ function EpisodeRow({
   onClick: () => void
   onMouseEnter: () => void
 }) {
+  const t = useT()
   const still = ep.still_path
     ? `https://image.tmdb.org/t/p/w300${ep.still_path}`
     : null
@@ -370,7 +379,7 @@ function EpisodeRow({
         />
       ) : (
         <div className="flex h-[80px] w-[142px] shrink-0 items-center justify-center rounded-sm bg-surface-hi text-[10px] text-dim">
-          sin still
+          {t('series.noStill')}
         </div>
       )}
       <div className="min-w-0 flex-1">
@@ -383,11 +392,11 @@ function EpisodeRow({
             E{String(ep.episode_number).padStart(2, '0')}
           </span>
           <p className="truncate text-[14px] text-ink">
-            {ep.name ?? `Episodio ${ep.episode_number}`}
+            {ep.name ?? t('series.episodeShort', { n: ep.episode_number })}
           </p>
           {ep.runtime != null && (
             <span className="shrink-0 text-[11px] text-dim">
-              · {ep.runtime} min
+              · {ep.runtime} {t('series.min')}
             </span>
           )}
           {ep.air_date && (
