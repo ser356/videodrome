@@ -148,4 +148,93 @@ export const pt: Record<string, string> = {
   'login.hint': 'As credenciais ficam locais; nunca saem da tua máquina.',
   'login.onlyDesktop': 'Esta janela só funciona dentro da app desktop.',
   'login.verifying': 'A verificar…',
+
+  // ── Recommendations ──────────────────────────────────
+  'recs.title': 'Em cartaz',
+  'recs.reload': 'Recarregar',
+  'recs.detail': 'Detalhe',
+  'recs.emptyTitle': 'Sem resultados.',
+  'recs.emptyHint': 'Baixa a avaliação mínima ou verifica o teu histórico no Letterboxd.',
+  'recs.endOfList': 'Fim da lista. {{n}} recomendações.',
+  'recs.dismissError': 'Erro ao descartar: {{err}}',
+  'recs.dismissedFlash': 'Descartada: {{title}}. Restaurar em Definições.',
+  'recs.menu.detail': 'Ver detalhe',
+  'recs.menu.torrents': 'Ver torrents',
+
+  // ── Movie detail modal ───────────────────────────────
+  'movieDetail.noOverview': 'Sem sinopse disponível.',
+  'movieDetail.viewTorrents': 'Ver torrents',
+
+  // ── Search box ───────────────────────────────────────
+  'search.boxPlaceholder': 'Pesquisar filme…',
+
+  // ── Time ────────────────────────────────────────────
+  'time.secondsShort': 'há {{n}}s',
+  'time.minutesShort': 'há {{n}}min',
+  'time.hoursShort': 'há {{n}}h',
+  'time.daysShort': 'há {{n}}d',
+
+  // ── Settings extras ─────────────────────────────────
+  'settings.session.section': 'Sessão',
+  'settings.session.noSession': 'Sem sessão',
+  'settings.logoutDone': 'Sessão terminada.',
+  'settings.preferences.section': 'Preferências',
+  'settings.dismissed.section': 'Sugestões descartadas',
+  'settings.dismissed.count': '{{n}} filmes',
+  'settings.dismissed.count1': '1 filme',
+  'settings.dismissed.empty':
+    'Não descartaste nenhuma recomendação. Clique direito num filme em «Em cartaz» → «Não sugerir».',
+  'settings.dismissed.restored': 'Restaurada: {{title}}',
+  'settings.cache.cleared': 'Cache «{{kind}}» limpa.',
+  'settings.cache.allCleared': 'Todas as caches limpas.',
+  'settings.cache.updatedAgo': 'Atualizada {{age}}',
+  'settings.cache.empty': 'vazia',
+  'settings.cache.sessionHint': 'A sessão não se limpa aqui. Usa «Terminar sessão» acima.',
+  'settings.cache.label.log_entries': 'Histórico Letterboxd',
+  'settings.cache.label.watchlist': 'Watchlist Letterboxd',
+  'settings.cache.label.tmdb_recs': 'Recomendações TMDB',
+  'settings.cache.label.search': 'Pesquisas TMDB + torrents',
+  'settings.cache.label.torrent_search': 'Resultados de torrents (30 min / 5 min vazio)',
+  'settings.cache.label.tmdb_search': 'Pesquisas TMDB (títulos)',
+  'settings.cache.label.tmdb_view': 'Detalhes TMDB (modal)',
+  'settings.cache.label.tmdb_details': 'Detalhes TMDB (torrents)',
+  'settings.cache.label.streams': 'Streams (peças BitTorrent)',
+  'settings.streamCacheTtlHint':
+    'Limpeza ao arrancar: filmes não reproduzidos há N dias são apagados do disco. Entre 1 e 365.',
+  'settings.glass.hint':
+    '0 = translucidez máx (default). 100 = superfícies quase sólidas, mais legíveis sobre grelhas de posters.',
+  'settings.glass.crystal': 'Cristal',
+  'settings.glass.solid': 'Sólido',
+  'settings.player.hint':
+    'Leitor integrado ou VLC externo. O clique direito num torrent oferece sempre VLC como saída de emergência.',
+
+  // ── Player ──────────────────────────────────────────
+  'player.playTitle': 'Reproduzir (Espaço)',
+  'player.pauseTitle': 'Pausa (Espaço)',
+  'player.stats': 'Estatísticas do stream',
+  'player.audioTrack': 'Faixa de áudio',
+  'player.subtitlesTitle': 'Legendas (C)',
+  'player.subtitles': 'Legendas',
+  'player.subtitle': 'Legenda',
+  'player.fullscreenTitle': 'Ecrã inteiro (F)',
+  'player.muteTitle': 'Sem som (M)',
+  'player.unmuteTitle': 'Reativar som (M)',
+  'player.available1': '{{n}} disponível',
+  'player.availableN': '{{n}} disponíveis',
+  'player.langUnknown': 'Idioma desconhecido',
+  'player.active': 'Ativo',
+  'player.trackN': 'Faixa {{n}}',
+  'player.removeCurrent': 'Remover atual',
+  'player.embedded': 'Do ficheiro',
+  'player.noSubs': 'Sem legendas disponíveis.',
+  'player.noSubsHint':
+    'OpenSubtitles não tem resultados e o contentor não tem legendas embutidas.',
+  'player.downloads': '{{n}} descargas',
+  'player.trustedTitle': 'Verificado por moderador OpenSubtitles',
+  'player.sdhTitle': 'Transcrição para surdos',
+  'player.waitingData': 'À espera de dados…',
+  'player.stat.speed': 'Velocidade',
+  'player.stat.peers': 'Peers',
+  'player.stat.progress': 'Progresso',
+  'player.stat.downloaded': 'Descarregado',
 }

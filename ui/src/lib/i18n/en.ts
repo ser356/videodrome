@@ -177,4 +177,105 @@ export const en: Record<string, string> = {
   'resume.jumpTo': 'Jump to {{time}}',
   'resume.ignorePrevious': 'Ignore previous progress',
   'resume.confirm': 'confirm',
+
+  // ── Recommendations ──────────────────────────────────
+  'recs.title': 'Now playing',
+  'recs.reload': 'Reload',
+  'recs.detail': 'Detail',
+  'recs.emptyTitle': 'No results.',
+  'recs.emptyHint': 'Lower the minimum rating or check your Letterboxd history.',
+  'recs.endOfList': 'End of the list. {{n}} recommendations.',
+  'recs.dismissError': 'Error dismissing: {{err}}',
+  'recs.dismissedFlash': 'Dismissed: {{title}}. Restore from Settings.',
+  'recs.menu.detail': 'View detail',
+  'recs.menu.torrents': 'View torrents',
+
+  // ── Movie detail modal ───────────────────────────────
+  'movieDetail.noOverview': 'No synopsis available.',
+  'movieDetail.viewTorrents': 'View torrents',
+
+  // ── Search box ───────────────────────────────────────
+  'search.boxPlaceholder': 'Search movie…',
+
+  // ── Time (relative, short form) ─────────────────────
+  'time.secondsShort': '{{n}}s ago',
+  'time.minutesShort': '{{n}}min ago',
+  'time.hoursShort': '{{n}}h ago',
+  'time.daysShort': '{{n}}d ago',
+
+  // ── Settings sub-sections ───────────────────────────
+  'settings.session.section': 'Session',
+  'settings.session.noSession': 'No session',
+  'settings.logoutDone': 'Logged out.',
+  'settings.preferences.section': 'Preferences',
+  'settings.dismissed.section': 'Dismissed suggestions',
+  'settings.dismissed.count': '{{n}} movies',
+  'settings.dismissed.count1': '1 movie',
+  'settings.dismissed.empty':
+    'You have not dismissed any recommendation. Right-click a movie in Now Playing → "Do not suggest".',
+  'settings.dismissed.restored': 'Restored: {{title}}',
+  'settings.cache.cleared': 'Cache "{{kind}}" cleared.',
+  'settings.cache.allCleared': 'All caches cleared.',
+  'settings.cache.updatedAgo': 'Updated {{age}}',
+  'settings.cache.empty': 'empty',
+  'settings.cache.sessionHint': 'The session is not cleared here. Use "Log out" above.',
+  'settings.cache.label.log_entries': 'Letterboxd history',
+  'settings.cache.label.watchlist': 'Letterboxd watchlist',
+  'settings.cache.label.tmdb_recs': 'TMDB recommendations',
+  'settings.cache.label.search': 'TMDB + torrents searches',
+  'settings.cache.label.torrent_search': 'Torrent results (30 min / 5 min empty)',
+  'settings.cache.label.tmdb_search': 'TMDB searches (titles)',
+  'settings.cache.label.tmdb_view': 'TMDB details (modal)',
+  'settings.cache.label.tmdb_details': 'TMDB details (torrents)',
+  'settings.cache.label.streams': 'Streams (BitTorrent pieces)',
+  'settings.streamCacheTtlHint':
+    'Prune at startup: movies not played in N days are removed from disk. Between 1 and 365.',
+  'settings.glass.hint':
+    '0 = maximum translucency (default). 100 = nearly solid surfaces, more readable over poster grids.',
+  'settings.glass.crystal': 'Crystal',
+  'settings.glass.solid': 'Solid',
+  'settings.player.hint':
+    'Embedded player inside the app or VLC as an external app. Right-click a torrent always offers VLC as an escape hatch even if the default is embedded.',
+
+  // ── Player controls ─────────────────────────────────
+  'player.playTitle': 'Play (Space)',
+  'player.pauseTitle': 'Pause (Space)',
+  'player.stats': 'Stream stats',
+  'player.audioTrack': 'Audio track',
+  'player.subtitlesTitle': 'Subtitles (C)',
+  'player.subtitles': 'Subtitles',
+  'player.subtitle': 'Subtitle',
+  'player.fullscreenTitle': 'Fullscreen (F)',
+  'player.muteTitle': 'Mute (M)',
+  'player.unmuteTitle': 'Unmute (M)',
+  'player.available1': '{{n}} available',
+  'player.availableN': '{{n}} available',
+  'player.langUnknown': 'Unknown language',
+  'player.active': 'Active',
+  'player.trackN': 'Track {{n}}',
+  'player.removeCurrent': 'Remove current',
+  'player.embedded': 'From file',
+  'player.noSubs': 'No subtitles available.',
+  'player.noSubsHint':
+    'OpenSubtitles has no results for this title and the container has no embedded subs.',
+  'player.downloads': '{{n}} downloads',
+  'player.trustedTitle': 'Verified by OpenSubtitles moderator',
+  'player.sdhTitle': 'Transcription for deaf and hard of hearing',
+  'player.waitingData': 'Waiting for data…',
+  'player.stat.speed': 'Speed',
+  'player.stat.peers': 'Peers',
+  'player.stat.progress': 'Progress',
+  'player.stat.downloaded': 'Downloaded',
+  'player.hlsUnsupported': 'Your browser/webview does not support HLS. Switch the player to VLC in Settings.',
+  'player.hlsFatal': 'HLS failure ({{type}}/{{details}}). Try switching the player to VLC in Settings.',
+  'player.videoFailed': 'Could not play this movie in the embedded player. Try switching to VLC from Settings.',
+  'player.ffmpegMissing':
+    'ffmpeg is not available. {{hint}} Alternative: switch the player to VLC in Settings.',
+  'player.probeFailed':
+    'Could not analyze the stream: {{err}}. Check that ffmpeg is installed, or switch the player to VLC in Settings.',
+  'player.ffmpegHintWindows': 'Install it with `winget install Gyan.FFmpeg` (or `scoop install ffmpeg`).',
+  'player.ffmpegHintMac': 'Install it with `brew install ffmpeg`.',
+  'player.ffmpegHintLinux':
+    'Install it via your distro package manager (`sudo apt install ffmpeg`, `sudo dnf install ffmpeg`, `sudo pacman -S ffmpeg`).',
+  'player.ffmpegHintGeneric': 'Install ffmpeg and make sure it is in the PATH.',
 }

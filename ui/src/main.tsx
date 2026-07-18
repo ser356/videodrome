@@ -2,7 +2,12 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import './index.css'
-import { getPreferences, isTauri } from './lib/api'
+import {
+  detectClientCapabilities,
+  getPreferences,
+  isTauri,
+  setClientCapabilities,
+} from './lib/api'
 import { initLocale } from './lib/i18n'
 import { applyGlassOpacity } from './lib/theme'
 import { Home } from './views/Home'
@@ -23,6 +28,14 @@ if (isTauri()) {
   getPreferences()
     .then((p) => applyGlassOpacity(p.glass_opacity))
     .catch(() => {})
+
+  // Audit §4: registra las capacidades del WebView (`canPlayType`
+  // por códec) para que el backend decida DIRECT vs COPY vs
+  // TRANSCODE con datos reales del cliente en vez de una whitelist
+  // estática. Es una llamada disparada-y-olvidada: no bloquea el
+  // arranque, y si falla el backend usa `safe_default` (H.264+AAC).
+  const caps = detectClientCapabilities()
+  setClientCapabilities(caps).catch(() => {})
 }
 
 // Inicializa el locale ANTES del render para que el primer paint ya

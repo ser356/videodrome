@@ -62,6 +62,46 @@ pub struct Preferences {
     /// empezara por "en,es".
     #[serde(default)]
     pub ui_language: Option<String>,
+    /// Estrategia de calidad para el pipeline HLS (audit §2/§7).
+    ///
+    /// * `Auto` (default): intenta `-c:v copy` cuando el probe
+    ///   detecta un códec compatible con el cliente y un índice de
+    ///   keyframes legible con GOPs razonables (≤10s). Si algo falla,
+    ///   cae a transcode. Cero pérdida cuando es posible; pérdida
+    ///   controlada (CRF 18) cuando no.
+    /// * `Copy`: fuerza `-c:v copy` siempre; si el índice o el
+    ///   códec no lo permite, el arranque falla y el user tiene que
+    ///   volver a Auto/Transcode. Modo debug/experto.
+    /// * `Transcode`: fuerza transcode CRF 18 siempre (el
+    ///   comportamiento pre-§2 con quality bump del §5). Útil como
+    ///   red de seguridad si copy tiene bugs en algún archivo.
+    #[serde(default = "default_quality_mode")]
+    pub quality_mode: QualityMode,
+    /// Presupuesto de disco (GB) para la caché de segmentos `.ts`
+    /// del pipeline HLS. Cuando el tempdir de un stream supera este
+    /// tamaño, la evicción LRU borra los segmentos MÁS ALEJADOS del
+    /// playhead actual (ambas direcciones, priorizando los de atrás
+    /// muy lejanos). Necesario en modo `Copy` porque los segmentos
+    /// tienen bitrate del original (una peli UHD de 60 GB deja 60 GB
+    /// si se ve entera). En `Transcode` el efecto es más leve pero
+    /// la eviction sigue aplicando.
+    ///
+    /// Un segmento evictado se re-materializa bajo demanda como
+    /// cualquier otro; solo se pierde la propiedad "seek atrás
+    /// gratis" más allá del presupuesto. Rango efectivo 1–200; 0
+    /// se trata como 8 (default).
+    #[serde(default = "default_hls_disk_budget_gb")]
+    pub hls_disk_budget_gb: u32,
+}
+
+/// Estrategia de calidad para el pipeline HLS. Ver
+/// [`Preferences::quality_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QualityMode {
+    Auto,
+    Copy,
+    Transcode,
 }
 
 /// Reproductor que la GUI usa por defecto. Serializado como string
@@ -91,6 +131,14 @@ fn default_player() -> PlayerKind {
     PlayerKind::Html
 }
 
+fn default_quality_mode() -> QualityMode {
+    QualityMode::Auto
+}
+
+fn default_hls_disk_budget_gb() -> u32 {
+    8
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -100,6 +148,8 @@ impl Default for Preferences {
             glass_opacity: default_glass_opacity(),
             default_player: default_player(),
             ui_language: None,
+            quality_mode: default_quality_mode(),
+            hls_disk_budget_gb: default_hls_disk_budget_gb(),
         }
     }
 }

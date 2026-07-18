@@ -347,6 +347,70 @@ export const startStreamHtml = (
 /** `true` si ffmpeg + ffprobe están en PATH. */
 export const ffmpegAvailable = () => invoke<boolean>('ffmpeg_available')
 
+// ── Client capabilities (audit §4) ────────────────────────────
+//
+// El backend necesita saber qué códecs sabe decodificar el WebView
+// para decidir DIRECT vs COPY vs TRANSCODE en el pipeline HLS. Antes
+// era una whitelist estática (`["h264","hevc"]`); ahora los reportamos
+// desde el frontend usando `HTMLVideoElement.canPlayType()`, que es
+// el único juez fiable en producción (WKWebView macOS decodifica HEVC
+// por hardware pero WebView2 Windows sólo si el user tiene "HEVC Video
+// Extensions" de la MS Store).
+
+export interface ClientCapabilities {
+  /** Tags cortos: "h264", "hevc", "hevc10", "av1", "vp9",
+   *  "aac", "mp3", "ac3", "eac3", "opus", "flac". */
+  codecs: string[]
+}
+
+export const setClientCapabilities = (caps: ClientCapabilities) =>
+  invoke<void>('set_client_capabilities', { caps })
+
+/** MIME representativo por tag. Se usa `hvc1` (Main) y también
+ *  `hev1` (algunos WebViews solo aceptan una de las dos formas).
+ *  `avc1.640028` = H.264 High L4.0 — la referencia universal.
+ *  `mp4a.40.2` = AAC LC. */
+const CODEC_PROBES: Record<string, string[]> = {
+  h264: ['video/mp4; codecs="avc1.640028"'],
+  hevc: [
+    'video/mp4; codecs="hvc1.1.6.L123.B0"',
+    'video/mp4; codecs="hev1.1.6.L123.B0"',
+  ],
+  hevc10: [
+    'video/mp4; codecs="hvc1.2.4.L123.B0"',
+    'video/mp4; codecs="hev1.2.4.L123.B0"',
+  ],
+  av1: ['video/mp4; codecs="av01.0.05M.08"'],
+  vp9: ['video/webm; codecs="vp09.00.10.08"'],
+  aac: ['audio/mp4; codecs="mp4a.40.2"'],
+  mp3: ['audio/mpeg'],
+  ac3: ['audio/mp4; codecs="ac-3"'],
+  eac3: ['audio/mp4; codecs="ec-3"'],
+  opus: ['audio/webm; codecs="opus"'],
+  flac: ['audio/flac'],
+}
+
+/** Corre `canPlayType` para cada tag conocido y devuelve los que
+ *  el WebView acepta como `"probably"` o `"maybe"`. `maybe` cuenta
+ *  para todo menos HEVC/AV1 (Chromium suele decir `maybe` cuando
+ *  en realidad falla → strict `probably` en esos dos). */
+export function detectClientCapabilities(): ClientCapabilities {
+  if (typeof document === 'undefined') return { codecs: [] }
+  const probe = document.createElement('video')
+  const audio = document.createElement('audio')
+  const strict = new Set(['hevc', 'hevc10', 'av1'])
+  const supported: string[] = []
+  for (const [tag, mimes] of Object.entries(CODEC_PROBES)) {
+    const el = mimes[0].startsWith('audio/') ? audio : probe
+    const ok = mimes.some((m) => {
+      const r = el.canPlayType(m)
+      return strict.has(tag) ? r === 'probably' : r !== ''
+    })
+    if (ok) supported.push(tag)
+  }
+  return { codecs: supported }
+}
+
 // Info que devuelve `/probe.json` del servidor local. Es lo que
 // ffprobe reporta sobre el input: contenedor, duración y streams.
 // El player HTML lo usa para saber la duración (video.duration es

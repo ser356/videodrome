@@ -175,4 +175,105 @@ export const es: Record<string, string> = {
   'resume.jumpTo': 'Salta a {{time}}',
   'resume.ignorePrevious': 'Ignorar el progreso anterior',
   'resume.confirm': 'confirmar',
+
+  // ── Recommendations ──────────────────────────────────
+  'recs.title': 'Cartelera',
+  'recs.reload': 'Recargar',
+  'recs.detail': 'Detalle',
+  'recs.emptyTitle': 'Sin resultados.',
+  'recs.emptyHint': 'Baja el rating mínimo o comprueba tu historial en Letterboxd.',
+  'recs.endOfList': 'Fin de la cartelera. {{n}} recomendaciones.',
+  'recs.dismissError': 'Error al descartar: {{err}}',
+  'recs.dismissedFlash': 'Descartada: {{title}}. Restaurar desde Ajustes.',
+  'recs.menu.detail': 'Ver detalle',
+  'recs.menu.torrents': 'Ver torrents',
+
+  // ── Movie detail modal ───────────────────────────────
+  'movieDetail.noOverview': 'Sin sinopsis disponible.',
+  'movieDetail.viewTorrents': 'Ver torrents',
+
+  // ── Search box ───────────────────────────────────────
+  'search.boxPlaceholder': 'Buscar película…',
+
+  // ── Time (relative, short form) ─────────────────────
+  'time.secondsShort': 'hace {{n}}s',
+  'time.minutesShort': 'hace {{n}}min',
+  'time.hoursShort': 'hace {{n}}h',
+  'time.daysShort': 'hace {{n}}d',
+
+  // ── Settings sub-sections ───────────────────────────
+  'settings.session.section': 'Sesión',
+  'settings.session.noSession': 'Sin sesión',
+  'settings.logoutDone': 'Sesión cerrada.',
+  'settings.preferences.section': 'Preferencias',
+  'settings.dismissed.section': 'Sugerencias descartadas',
+  'settings.dismissed.count': '{{n}} películas',
+  'settings.dismissed.count1': '1 película',
+  'settings.dismissed.empty':
+    'No has descartado ninguna recomendación. Usa clic derecho sobre una peli en Cartelera → "No sugerir".',
+  'settings.dismissed.restored': 'Restaurada: {{title}}',
+  'settings.cache.cleared': 'Caché "{{kind}}" borrada.',
+  'settings.cache.allCleared': 'Todas las cachés borradas.',
+  'settings.cache.updatedAgo': 'Actualizada {{age}}',
+  'settings.cache.empty': 'vacía',
+  'settings.cache.sessionHint': 'La sesión no se borra desde aquí. Usa "Cerrar sesión" arriba.',
+  'settings.cache.label.log_entries': 'Historial Letterboxd',
+  'settings.cache.label.watchlist': 'Watchlist Letterboxd',
+  'settings.cache.label.tmdb_recs': 'Recomendaciones TMDB',
+  'settings.cache.label.search': 'Búsquedas TMDB + torrents',
+  'settings.cache.label.torrent_search': 'Resultados de torrents (30 min / 5 min vacío)',
+  'settings.cache.label.tmdb_search': 'Búsquedas TMDB (títulos)',
+  'settings.cache.label.tmdb_view': 'Detalles TMDB (modal)',
+  'settings.cache.label.tmdb_details': 'Detalles TMDB (torrents)',
+  'settings.cache.label.streams': 'Streams (piezas de BitTorrent)',
+  'settings.streamCacheTtlHint':
+    'Purga al arrancar: pelis no reproducidas en N días se borran del disco. Entre 1 y 365.',
+  'settings.glass.hint':
+    '0 = translúcido máximo (default). 100 = superficies casi sólidas, más legibles sobre grids de pósters.',
+  'settings.glass.crystal': 'Cristal',
+  'settings.glass.solid': 'Sólido',
+  'settings.player.hint':
+    'Player embebido dentro de la app o VLC como app externa. El clic derecho sobre un torrent siempre ofrece VLC como escape hatch aunque el default sea embebido.',
+
+  // ── Player controls ─────────────────────────────────
+  'player.playTitle': 'Play (Espacio)',
+  'player.pauseTitle': 'Pausa (Espacio)',
+  'player.stats': 'Estadísticas del stream',
+  'player.audioTrack': 'Pista de audio',
+  'player.subtitlesTitle': 'Subtítulos (C)',
+  'player.subtitles': 'Subtítulos',
+  'player.subtitle': 'Subtítulo',
+  'player.fullscreenTitle': 'Pantalla completa (F)',
+  'player.muteTitle': 'Silenciar (M)',
+  'player.unmuteTitle': 'Reactivar audio (M)',
+  'player.available1': '{{n}} disponible',
+  'player.availableN': '{{n}} disponibles',
+  'player.langUnknown': 'Idioma desconocido',
+  'player.active': 'Activo',
+  'player.trackN': 'Pista {{n}}',
+  'player.removeCurrent': 'Quitar el actual',
+  'player.embedded': 'Del fichero',
+  'player.noSubs': 'Sin subtítulos disponibles.',
+  'player.noSubsHint':
+    'OpenSubtitles no tiene resultados para este título y el contenedor no lleva subs embebidos.',
+  'player.downloads': '{{n}} descargas',
+  'player.trustedTitle': 'Verificado por moderador de OpenSubtitles',
+  'player.sdhTitle': 'Transcripción para sordos',
+  'player.waitingData': 'Esperando datos…',
+  'player.stat.speed': 'Velocidad',
+  'player.stat.peers': 'Peers',
+  'player.stat.progress': 'Progreso',
+  'player.stat.downloaded': 'Descargado',
+  'player.hlsUnsupported': 'Tu navegador/webview no soporta HLS. Cambia el reproductor a VLC en Ajustes.',
+  'player.hlsFatal': 'Fallo de HLS ({{type}}/{{details}}). Prueba a cambiar el reproductor a VLC en Ajustes.',
+  'player.videoFailed': 'No se pudo reproducir esta película en el player. Prueba a cambiar el reproductor a VLC desde Ajustes.',
+  'player.ffmpegMissing':
+    'ffmpeg no está disponible. {{hint}} Alternativa: cambia el reproductor a VLC en Ajustes.',
+  'player.probeFailed':
+    'No se pudo analizar el stream: {{err}}. Comprueba que ffmpeg está instalado, o cambia el reproductor a VLC en Ajustes.',
+  'player.ffmpegHintWindows': 'Instálalo con `winget install Gyan.FFmpeg` (o `scoop install ffmpeg`).',
+  'player.ffmpegHintMac': 'Instálalo con `brew install ffmpeg`.',
+  'player.ffmpegHintLinux':
+    'Instálalo con el gestor de paquetes de tu distro (`sudo apt install ffmpeg`, `sudo dnf install ffmpeg`, `sudo pacman -S ffmpeg`).',
+  'player.ffmpegHintGeneric': 'Instala ffmpeg y asegúrate de que esté en el PATH.',
 }

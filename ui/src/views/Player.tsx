@@ -122,6 +122,15 @@ export function Player() {
   const [stream, setStream] = useState<StreamInfo | null>(null)
   const [media, setMedia] = useState<MediaInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** `true` cuando el `<video>` con `src=/video` (path DIRECT) dio
+   *  `MEDIA_ERR_SRC_NOT_SUPPORTED`. En ese caso reescribimos
+   *  `canGoDirect` a `false` para el siguiente render → el effect
+   *  del src apunta a HLS transmux y ffmpeg entrega H.264/AAC
+   *  compatible. WKWebView / WebView2 a veces dicen "puedo con
+   *  esto" en `direct_playable=true` pero al montar el fichero
+   *  fallan (perfil raro, moov al final con problemas, audio no
+   *  soportado, etc.). Este fallback los cubre a todos. */
+  const [directFailed, setDirectFailed] = useState(false)
 
   const [paused, setPaused] = useState(true)
   const [currentTime, setCurrentTime] = useState(state?.startSeconds ?? 0)
@@ -328,8 +337,8 @@ export function Player() {
           const looksLikeMissingFfmpeg = /ffmpeg/i.test(msg)
           setError(
             looksLikeMissingFfmpeg
-              ? `ffmpeg no está disponible. ${ffmpegInstallHint()} Alternativa: cambia el reproductor a VLC en Ajustes.`
-              : `No se pudo analizar el stream: ${msg}. Comprueba que ffmpeg está instalado, o cambia el reproductor a VLC en Ajustes.`,
+              ? t('player.ffmpegMissing', { hint: ffmpegInstallHint(t) })
+              : t('player.probeFailed', { err: msg }),
           )
         }
       }
@@ -946,6 +955,7 @@ export function Player() {
   // devuelve vacío, forzamos ruta TRANSMUX (hls.js/ffmpeg lo baja a
   // H.264 en cliente/servidor).
   const canGoDirect = (() => {
+    if (directFailed) return false
     if (!media?.direct_playable) return false
     const videoStream = media.streams.find((s) => s.kind === 'video')
     const codec = videoStream?.codec?.toLowerCase() ?? ''
@@ -1052,9 +1062,7 @@ export function Player() {
         // Ni HLS nativo ni MSE — plataforma sin soporte de vídeo
         // decente. Cae al mensaje de error genérico; el user puede
         // volver atrás y cambiar a VLC en Ajustes.
-        setError(
-          'Tu navegador/webview no soporta HLS. Cambia el reproductor a VLC en Ajustes.',
-        )
+        setError(t('player.hlsUnsupported'))
         return
       }
       const hls = new Hls({
@@ -1078,10 +1086,7 @@ export function Player() {
         // útil. `startLoad()` recupera algunos NETWORK / MEDIA no
         // fatales — pero cuando llega `fatal: true` no hay vuelta.
         console.warn('[hls] fatal', data.type, data.details)
-        setError(
-          `Fallo de HLS (${data.type}/${data.details}). ` +
-            'Prueba a cambiar el reproductor a VLC en Ajustes.',
-        )
+        setError(t('player.hlsFatal', { type: data.type, details: data.details }))
       })
       return () => {
         try {
@@ -1108,8 +1113,23 @@ export function Player() {
       }`}
       onMouseMove={bumpControls}
       onClick={() => {
-        // Click en el fondo: toggle play. Los controles interceptan
-        // sus propios eventos con stopPropagation.
+        // Click en el fondo del player:
+        //   1. Si hay algún panel lateral abierto (subs/audio/stats),
+        //      lo cerramos — patrón esperado: "click fuera = cerrar
+        //      overlay". Los propios paneles paran la propagación
+        //      con `stopPropagation`, así que este handler SOLO
+        //      corre para clicks fuera de ellos.
+        //   2. Si no hay ningún panel abierto, toggle play (comportamiento
+        //      tipo Netflix/Stremio: click en el video = pausa/play).
+        // Los controles (barra inferior, botones) interceptan sus
+        // propios eventos con stopPropagation, así que un click en
+        // el play/pause del control bar NO llega aquí.
+        if (subsPanelOpen || audioPanelOpen || statsPanelOpen) {
+          setSubsPanelOpen(false)
+          setAudioPanelOpen(false)
+          setStatsPanelOpen(false)
+          return
+        }
         togglePlay()
       }}
     >
@@ -1184,15 +1204,25 @@ export function Player() {
             const v = videoRef.current
             const code = v?.error?.code ?? 0
             const msg = v?.error?.message ?? 'error desconocido'
-            // Con HLS (o `/video` direct) el error del `<video>` es
-            // ya definitivo — no hay fallback más agresivo que el
-            // player HTML pueda montar. Si falla aquí, el usuario
-            // puede volver a Ajustes y cambiar a VLC externo.
             console.warn(`<video> error code ${code}: ${msg}`)
-            setError(
-              'No se pudo reproducir esta pel\u00edcula en el player. ' +
-                'Prueba a cambiar el reproductor a VLC desde Ajustes.',
-            )
+            // Fallback DIRECT → HLS: si estábamos en `<video src=/video>`
+            // directo y WKWebView/WebView2 lo rechaza con
+            // MEDIA_ERR_SRC_NOT_SUPPORTED (code 4), reintentamos por
+            // HLS (ffmpeg transmux → H.264/AAC forzado, siempre
+            // reproducible). El `direct_playable=true` del backend
+            // es una PREDICCIÓN — a veces el WebView miente sobre
+            // qué códecs soporta, o el fichero tiene un perfil raro
+            // que el probe no detecta.
+            //
+            // Si el error viene YA de HLS (canGoDirect era false),
+            // no hay más fallbacks posibles → mostrar mensaje al
+            // user para que caiga a VLC.
+            if (code === 4 && canGoDirect && !directFailed) {
+              console.warn('<video> falló en DIRECT → reintentando por HLS')
+              setDirectFailed(true)
+              return
+            }
+            setError(t('player.videoFailed'))
           }}
         >
           {vttUrl && (
@@ -1338,7 +1368,7 @@ export function Player() {
           <button
             onClick={togglePlay}
             className="flex h-11 w-11 items-center justify-center rounded-full bg-accent text-on-accent transition-colors hover:bg-accent-hover"
-            title={paused ? 'Play (Space)' : 'Pause (Space)'}
+            title={paused ? t('player.playTitle') : t('player.pauseTitle')}
           >
             {paused ? <Play size={20} weight="fill" /> : <Pause size={20} weight="fill" />}
           </button>
@@ -1367,7 +1397,8 @@ export function Player() {
                 ? 'bg-accent/20 text-accent'
                 : 'text-ink hover:bg-surface'
             }`}
-            title="Estadísticas del stream"
+            title=""
+            aria-label={t('player.stats')}
             aria-pressed={statsPanelOpen}
           >
             <Gauge size={18} weight={statsPanelOpen ? 'fill' : 'bold'} />
@@ -1381,7 +1412,8 @@ export function Player() {
                   ? 'bg-accent/20 text-accent'
                   : 'text-ink hover:bg-surface'
               }`}
-              title="Pista de audio"
+              title=""
+              aria-label={t('player.audioTrack')}
               aria-pressed={audioPanelOpen}
             >
               <MusicNotes size={18} weight={audioPanelOpen ? 'fill' : 'bold'} />
@@ -1400,7 +1432,7 @@ export function Player() {
                 ? 'bg-accent/20 text-accent'
                 : 'text-ink hover:bg-surface'
             }`}
-            title={activeSub ? `Sub: ${activeSub.release}` : 'Subtítulos (C)'}
+            title={activeSub ? `${t('player.subs')}: ${activeSub.release}` : t('player.subtitlesTitle')}
           >
             <ClosedCaptioning size={18} weight={activeSub ? 'fill' : 'bold'} />
             {activeSub && (
@@ -1413,7 +1445,7 @@ export function Player() {
           <button
             onClick={toggleFullscreen}
             className="flex h-9 w-9 items-center justify-center rounded-full text-ink hover:bg-surface"
-            title="Fullscreen (F)"
+            title={t('player.fullscreenTitle')}
           >
             {isFullscreen ? (
               <ArrowsIn size={18} weight="bold" />
@@ -1584,13 +1616,14 @@ function VolumeControl({
   onVolume: (v: number) => void
   onToggleMute: () => void
 }) {
+  const t = useT()
   const Icon = muted || volume === 0 ? SpeakerX : volume < 0.5 ? SpeakerNone : SpeakerHigh
   return (
     <div className="group flex items-center gap-2">
       <button
         onClick={onToggleMute}
         className="flex h-9 w-9 items-center justify-center rounded-full text-ink hover:bg-surface"
-        title={muted ? 'Unmute (M)' : 'Mute (M)'}
+        title={muted ? t('player.unmuteTitle') : t('player.muteTitle')}
       >
         <Icon size={18} weight="bold" />
       </button>
@@ -1626,18 +1659,18 @@ function formatTime(s: number): string {
  * `navigator.userAgent` — Tauri no expone el OS al frontend sin el
  * plugin `@tauri-apps/plugin-os`, y este helper es suficiente para
  * los tres SO que soportamos. */
-function ffmpegInstallHint(): string {
+function ffmpegInstallHint(t: (k: string, v?: Record<string, string | number>) => string): string {
   const ua = navigator.userAgent
   if (ua.includes('Windows')) {
-    return 'Instálalo con `winget install Gyan.FFmpeg` (o `scoop install ffmpeg`).'
+    return t('player.ffmpegHintWindows')
   }
   if (ua.includes('Mac OS X') || ua.includes('Macintosh')) {
-    return 'Instálalo con `brew install ffmpeg`.'
+    return t('player.ffmpegHintMac')
   }
   if (ua.includes('Linux')) {
-    return 'Instálalo con el gestor de paquetes de tu distro (`sudo apt install ffmpeg`, `sudo dnf install ffmpeg`, `sudo pacman -S ffmpeg`).'
+    return t('player.ffmpegHintLinux')
   }
-  return 'Instala ffmpeg y asegúrate de que esté en el PATH.'
+  return t('player.ffmpegHintGeneric')
 }
 
 /** Detecta codecs de subtítulos de imagen (bitmap) que ffmpeg no
@@ -1712,6 +1745,7 @@ function AudioPanel({
   onPick: (idx: number) => void
   onClose: () => void
 }) {
+  const tr = useT()
   return (
     <div
       className="absolute inset-y-0 right-0 z-30 flex w-full max-w-[420px] flex-col border-l border-hairline bg-black/95 backdrop-blur-lg"
@@ -1719,15 +1753,17 @@ function AudioPanel({
     >
       <header className="flex items-center justify-between border-b border-hairline px-5 py-4">
         <div>
-          <h2 className="text-[15px] font-semibold text-ink">Pista de audio</h2>
+          <h2 className="text-[15px] font-semibold text-ink">{tr('player.audioTrack')}</h2>
           <p className="mt-0.5 text-[11px] text-muted">
-            {tracks.length} disponible{tracks.length === 1 ? '' : 's'}
+            {tracks.length === 1
+              ? tr('player.available1', { n: tracks.length })
+              : tr('player.availableN', { n: tracks.length })}
           </p>
         </div>
         <button
           onClick={onClose}
           className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-surface hover:text-ink"
-          aria-label="Cerrar"
+          aria-label={tr('common.close')}
         >
           <X size={16} weight="bold" />
         </button>
@@ -1744,7 +1780,7 @@ function AudioPanel({
             [t.language ? languageLabel(t.language) : null, t.codec]
               .filter(Boolean)
               .join(' · ') ||
-            `Pista ${idx + 1}`
+            tr('player.trackN', { n: idx + 1 })
           return (
             <li key={`audio-${idx}`}>
               <button
@@ -1759,14 +1795,14 @@ function AudioPanel({
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-[13px] text-ink">{label}</p>
                   <p className="mt-0.5 text-[11px] text-muted">
-                    {t.language ? languageLabel(t.language) : 'Idioma desconocido'}
+                    {t.language ? languageLabel(t.language) : tr('player.langUnknown')}
                     <span className="mx-1.5 text-dim">·</span>
                     <span className="text-dim">{t.codec}</span>
                   </p>
                 </div>
                 {isActive && (
                   <span className="mt-0.5 text-[11px] font-medium text-accent">
-                    {switching ? 'Cargando…' : 'Activo'}
+                    {switching ? tr('common.loading') : tr('player.active')}
                   </span>
                 )}
               </button>
@@ -1812,6 +1848,7 @@ function SubsPanel({
   activeEmbeddedIdx: number | null
   onPickEmbedded: (stream: MediaStream, subIdx: number) => void
 }) {
+  const tr = useT()
   // Idiomas presentes en la lista + conteo. Se ordenan por count
   // descendente y luego alfabético → el idioma con más opciones
   // aparece primero (típicamente inglés).
@@ -1851,20 +1888,20 @@ function SubsPanel({
     >
       <header className="flex items-center justify-between border-b border-hairline px-5 py-4">
         <div>
-          <h2 className="text-[15px] font-semibold text-ink">Subtítulos</h2>
+          <h2 className="text-[15px] font-semibold text-ink">{tr('player.subtitles')}</h2>
           {(activeFileId != null || activeEmbeddedIdx != null) && (
             <button
               onClick={onClear}
               className="mt-0.5 text-[11px] text-muted hover:text-ink"
             >
-              Quitar el actual
+              {tr('player.removeCurrent')}
             </button>
           )}
         </div>
         <button
           onClick={onClose}
           className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-surface hover:text-ink"
-          aria-label="Cerrar"
+          aria-label={tr('common.close')}
         >
           <X size={16} weight="bold" />
         </button>
@@ -1877,12 +1914,12 @@ function SubsPanel({
       {embeddedSubs.length > 0 && (
         <div className="border-b border-hairline">
           <p className="px-5 pt-3 text-[10px] uppercase tracking-[0.14em] text-dim">
-            Del fichero
+            {tr('player.embedded')}
           </p>
           <ul className="divide-y divide-hairline-soft">
             {embeddedSubs.map((sub, idx) => {
               const isActive = idx === activeEmbeddedIdx
-              const label = sub.title || `Pista ${idx + 1}`
+              const label = sub.title || tr('player.trackN', { n: idx + 1 })
               return (
                 <li key={`emb-${idx}`}>
                   <button
@@ -1896,14 +1933,14 @@ function SubsPanel({
                       <p className="mt-0.5 text-[11px] text-muted">
                         {sub.language
                           ? languageLabel(sub.language)
-                          : 'Idioma desconocido'}
+                          : tr('player.langUnknown')}
                         <span className="mx-1.5 text-dim">·</span>
                         <span className="text-dim">{sub.codec}</span>
                       </p>
                     </div>
                     {isActive && (
                       <span className="mt-0.5 text-[11px] font-medium text-accent">
-                        Activo
+                        {tr('player.active')}
                       </span>
                     )}
                   </button>
@@ -1924,10 +1961,9 @@ function SubsPanel({
         (subs === null || subs.length === 0) &&
         embeddedSubs.length === 0 && (
           <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
-            <p className="text-[14px] text-body">Sin subtítulos disponibles.</p>
+            <p className="text-[14px] text-body">{tr('player.noSubs')}</p>
             <p className="mt-1 text-[12px] text-muted">
-              OpenSubtitles no tiene resultados para este título y el
-              contenedor no lleva subs embebidos.
+              {tr('player.noSubsHint')}
             </p>
           </div>
         )}
@@ -1974,14 +2010,14 @@ function SubsPanel({
                   >
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[13px] text-ink">
-                        {sub.release || sub.file_name || 'Subtítulo'}
+                        {sub.release || sub.file_name || tr('player.subtitle')}
                       </p>
                       <p className="mt-0.5 flex items-center gap-2 text-[11px] text-muted">
-                        <span>{sub.downloads.toLocaleString()} descargas</span>
+                        <span>{tr('player.downloads', { n: sub.downloads.toLocaleString() })}</span>
                         {sub.from_trusted && (
                           <span
                             className="rounded-sm border border-good/40 bg-good/10 px-1.5 py-0.5 text-[10px] font-medium text-good"
-                            title="Verificado por moderador de OpenSubtitles"
+                            title={tr('player.trustedTitle')}
                           >
                             Trusted
                           </span>
@@ -1989,7 +2025,7 @@ function SubsPanel({
                         {sub.hearing_impaired && (
                           <span
                             className="rounded-sm border border-hairline px-1.5 py-0.5 text-[10px]"
-                            title="Transcripción para sordos"
+                            title={tr('player.sdhTitle')}
                           >
                             SDH
                           </span>
@@ -1998,7 +2034,7 @@ function SubsPanel({
                     </div>
                     {isActive && (
                       <span className="mt-0.5 text-[11px] font-medium text-accent">
-                        Activo
+                        {tr('player.active')}
                       </span>
                     )}
                     {isDownloading && (
@@ -2098,6 +2134,7 @@ function StatsPanel({
   stats: StreamStats | null
   onClose: () => void
 }) {
+  const tr = useT()
   const hasProgress = stats != null && stats.total_bytes > 0
   const pct = hasProgress
     ? (stats!.progress_bytes / stats!.total_bytes) * 100
@@ -2120,7 +2157,7 @@ function StatsPanel({
         <button
           onClick={onClose}
           className="flex h-6 w-6 items-center justify-center rounded-full text-muted hover:bg-surface hover:text-ink"
-          aria-label="Cerrar"
+          aria-label={tr('common.close')}
         >
           <X size={12} weight="bold" />
         </button>
@@ -2129,7 +2166,7 @@ function StatsPanel({
       {!stats && (
         <div className="flex items-center gap-2 py-2 text-[12px] text-muted">
           <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-          <span>Esperando datos…</span>
+          <span>{tr('player.waitingData')}</span>
         </div>
       )}
 
@@ -2146,7 +2183,7 @@ function StatsPanel({
           <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[12px] tabular-nums text-body">
             <Metric
               icon={<ArrowDown size={13} weight="bold" />}
-              label="Velocidad"
+              label={tr('player.stat.speed')}
               value={
                 <span className="text-good">
                   {stats.down_mbps.toFixed(2)}{' '}
@@ -2156,7 +2193,7 @@ function StatsPanel({
             />
             <Metric
               icon={<UsersThree size={13} weight="bold" />}
-              label="Peers"
+              label={tr('player.stat.peers')}
               value={stats.live_peers.toString()}
             />
             <Metric
@@ -2164,12 +2201,12 @@ function StatsPanel({
               value={etaSec != null ? formatEta(etaSec) : '—'}
             />
             <Metric
-              label="Progreso"
+              label={tr('player.stat.progress')}
               value={hasProgress ? `${pct.toFixed(1)} %` : '—'}
             />
             {hasProgress && (
               <Metric
-                label="Descargado"
+                label={tr('player.stat.downloaded')}
                 value={
                   <span>
                     {formatSize(stats.progress_bytes)}{' '}

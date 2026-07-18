@@ -177,8 +177,17 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
     subRelease: string | null = null,
     resumeSeconds: number | null = null,
     forceVlc = false,
+    torrentOverride: Torrent | null = null,
   ) => {
-    if (!current) return
+    // React setState es asíncrono: si el caller viene de un onClick
+    // que hizo `setSel(i)` + `startStreamFlow()`, `current` (que
+    // depende de `sel`) todavía tiene el valor viejo del closure.
+    // El caller puede pasar `torrentOverride` con el Torrent
+    // recién clickeado para saltarse ese race. Los callers vía
+    // hotkey/menú contextual no necesitan override porque `sel`
+    // ya está sincronizado antes de que se lance el flow.
+    const target = torrentOverride ?? current
+    if (!target) return
     const useHtml = !forceVlc && defaultPlayer === 'html' && ffmpegOk !== false
     // Ruta preferida: player HTML embebido. La reproducción, subs y
     // resume viven en la view `/player`. Torrents queda como
@@ -193,8 +202,8 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
         (mode === 'tmdb' || mode === 'series') && tmdbId ? Number(tmdbId) : null
       nav('/player', {
         state: {
-          magnet: current.magnet,
-          title: result?.title ?? current.title,
+          magnet: target.magnet,
+          title: result?.title ?? target.title,
           imdbId: result?.imdb_id ?? null,
           tmdbId: Number.isFinite(tmdbIdNum) ? tmdbIdNum : null,
           subPath,
@@ -212,7 +221,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
           // fichero dentro del torrent. Cuando existe, el backend
           // salta la heurística de parseo y sirve directamente ese
           // file — clave para packs con numeración de anime.
-          fileHint: current.file_hint ?? null,
+          fileHint: target.file_hint ?? null,
         },
       })
       return
@@ -226,7 +235,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
     if (defaultPlayer === 'html' && ffmpegOk === false && !forceVlc) {
       setStreamMsg(t('torrents.stream.vlcFallback'))
     } else {
-      setStreamMsg(t('torrents.stream.starting', { name: current.title }))
+      setStreamMsg(t('torrents.stream.starting', { name: target.title }))
     }
     if (stream) {
       await stopStream(stream.id).catch(() => {})
@@ -234,12 +243,12 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
     }
     try {
       const info = await startStreamWithSub(
-        current.magnet,
+        target.magnet,
         subPath,
         resumeSeconds,
         mode === 'series' ? season : null,
         mode === 'series' ? episode : null,
-        current.file_hint ?? null,
+        target.file_hint ?? null,
       )
       setStream(info)
       const subNote = subRelease ? `  \u00b7  sub: ${subRelease}` : ''
@@ -270,15 +279,16 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
    * entre el 2% y el 95% del runtime. Fuera de ese rango o sin
    * datos, empezamos desde el principio.
    */
-  const maybePromptResume = async () => {
-    if (!current) return
+  const maybePromptResume = async (torrentOverride: Torrent | null = null) => {
+    const target = torrentOverride ?? current
+    if (!target) return
     let resume: Resume | null = null
     try {
       // Series: pasamos S/E → backend filtra a la entrada de ese
       // episodio dentro del store multi-file. Si no hay match
       // (nunca reproducido), devuelve null y saltamos el prompt.
       resume = await getResume(
-        current.magnet,
+        target.magnet,
         mode === 'series' ? season : null,
         mode === 'series' ? episode : null,
       )
@@ -320,7 +330,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
         return
       }
     }
-    await goStream(null, null, null)
+    await goStream(null, null, null, false, target)
   }
 
   // Enter en la lista de torrents: prompt de resume (si hay caché) y
@@ -328,9 +338,10 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
   // ahora (panel embebido estilo Stremio) — antes había un diálogo
   // intermedio ("¿con subs?" → SubsSheet → resume → player) que
   // añadía fricción sin valor.
-  const startStreamFlow = () => {
-    if (!current) return
-    void maybePromptResume()
+  const startStreamFlow = (torrentOverride: Torrent | null = null) => {
+    const target = torrentOverride ?? current
+    if (!target) return
+    void maybePromptResume(target)
   }
 
   const copyMagnet = async () => {
@@ -477,8 +488,11 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
                   onClick={() => {
                     setSel(i)
                     // Un solo clic lanza el flujo (pregunta subs → stream).
-                    // Los power-users siguen usando j/k + Enter con teclado.
-                    startStreamFlow()
+                    // PASAMOS el torrent explícitamente: React setState es
+                    // async, sin esto `startStreamFlow` leería `sel` viejo
+                    // del closure y abriría siempre el que estaba
+                    // seleccionado ANTES del click.
+                    startStreamFlow(tor)
                   }}
                   onContextMenu={(x, y) => {
                     setSel(i)

@@ -132,6 +132,61 @@ pub fn is_available() -> bool {
     ffmpeg_binary().is_some() && ffprobe_binary().is_some()
 }
 
+/// Cache de filtros disponibles en la build de ffmpeg del user.
+/// Se popula on-demand la primera vez que se pregunta y no cambia
+/// mientras la app corre.
+static FFMPEG_FILTERS: std::sync::OnceLock<std::collections::HashSet<String>> =
+    std::sync::OnceLock::new();
+
+/// `true` si la build de ffmpeg del user tiene el filtro `name`.
+/// Se usa en `spawn_hls` para decidir la cadena de tonemap: la
+/// receta canónica usa `zscale` (requiere `--enable-libzimg` al
+/// compilar ffmpeg), que NO viene en muchos builds de Homebrew /
+/// scoop / winget. Si `zscale` no está, caemos a `colorspace`
+/// (nativo, siempre disponible) — menos preciso pero al menos
+/// no explota.
+pub fn ffmpeg_has_filter(name: &str) -> bool {
+    let filters = FFMPEG_FILTERS.get_or_init(load_ffmpeg_filters);
+    filters.contains(name)
+}
+
+fn load_ffmpeg_filters() -> std::collections::HashSet<String> {
+    // Sync porque solo se llama una vez desde una tarea async.
+    // Timeout defensivo: si ffmpeg cuelga (raro), devolvemos set
+    // vacío y todos los `has_filter` responden `false`.
+    let Some(bin) = ffmpeg_binary() else {
+        return std::collections::HashSet::new();
+    };
+    let out = std::process::Command::new(bin)
+        .args(["-hide_banner", "-filters"])
+        .output();
+    let Ok(out) = out else {
+        return std::collections::HashSet::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Formato de línea: " T. name  desc"
+    // (T = timeline support, . = commands, etc.).
+    // Nos quedamos con la segunda columna.
+    let mut set = std::collections::HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Ignora la cabecera y las líneas de leyenda.
+        if trimmed.is_empty() || trimmed.starts_with("Filters:") || trimmed.starts_with("---") {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_ascii_whitespace().collect();
+        // La primera columna suele ser flags de 3 chars (`T..`);
+        // la segunda es el nombre.
+        if parts.len() >= 2 && parts[0].len() <= 4 {
+            set.insert(parts[1].to_string());
+        }
+    }
+    if set.is_empty() {
+        eprintln!("[ffmpeg] warning: no pude parsear -filters, tonemap HDR caerá a fallback");
+    }
+    set
+}
+
 // ── ffprobe ────────────────────────────────────────────────────────────────
 
 /// Info que ffprobe devuelve sobre un stream. Solo mapeamos los campos
@@ -181,6 +236,13 @@ pub struct StreamInfo {
     /// solo lo reporta por aquí.
     #[serde(default)]
     pub profile: Option<String>,
+    /// Solo para video: color transfer characteristics (BT.709,
+    /// SMPTE 2084 / arib-std-b67 = HDR). Se usa en `try_build_copy_grid`
+    /// para bailar HDR de la ruta copy (HLS-TS + copy + HDR es un
+    /// campo de minas; se transcodea con tonemap) y en el spawn de
+    /// transcode para meter la cadena de filtros zscale+tonemap.
+    #[serde(default)]
+    pub color_transfer: Option<String>,
     /// Solo para audio: número de canales (1=mono, 2=stereo, 6=5.1,
     /// 8=7.1). Se usa en `spawn_hls` para elegir bitrate AAC sin
     /// forzar downmix a estéreo (preservación de multicanal).
@@ -255,6 +317,8 @@ pub async fn probe(url: &str) -> Result<MediaInfo> {
         #[serde(default)]
         profile: Option<String>,
         #[serde(default)]
+        color_transfer: Option<String>,
+        #[serde(default)]
         channels: Option<u32>,
         #[serde(default)]
         tags: Option<Tags>,
@@ -298,29 +362,83 @@ pub async fn probe(url: &str) -> Result<MediaInfo> {
                 height: s.height,
                 pix_fmt: s.pix_fmt,
                 profile: s.profile,
+                color_transfer: s.color_transfer,
                 channels: s.channels,
             }
         })
         .collect();
 
-    let mut info = MediaInfo {
+    let info = MediaInfo {
         duration_seconds,
         streams,
         container,
         direct_playable: false,
     };
-    // Rellenamos `direct_playable` derivándolo del propio MediaInfo.
-    // Se recalcula aquí (en vez de exigir al caller que lo haga) para
-    // que el JSON que sale por `/probe.json` ya venga con la respuesta.
-    info.direct_playable = compute_direct_playable(&info);
+    // `direct_playable` NO se rellena aquí: depende de las
+    // capacidades del cliente (audit §4). El caller (serve_probe en
+    // stream.rs) llama a `compute_direct_playable(&info, &caps)`
+    // con los caps reportados por el frontend vía canPlayType.
     Ok(info)
 }
 
-// ── Compatibilidad con el player HTML ──────────────────────────────────────
+// ── Capacidades del cliente + compatibilidad con el player HTML ─────────
 
-/// Códecs de video que WKWebView/WebView2/WebKitGTK reproducen nativamente
-/// dentro de MP4/MOV al apuntar `<video src>` a `/video` raw. Fuera de
-/// esta lista → hay que pasar por el path HLS (transmux con ffmpeg).
+/// Códecs que el WebView del cliente sabe decodificar, reportados
+/// desde el frontend vía `canPlayType()` en el arranque (audit §4).
+/// El backend consume estos tags para decidir DIRECT vs COPY vs
+/// TRANSCODE en `spawn_hls` — la matriz deja de ser una whitelist
+/// estática y pasa a ser función real del cliente.
+///
+/// Tags cortos y estables (más fáciles de comparar que MIMEs largos
+/// con `codecs="hvc1.2.4.L120.90"`):
+///
+///   * "h264"      → H.264 8-bit (baseline universal)
+///   * "hevc"      → HEVC Main 8-bit
+///   * "hevc10"    → HEVC Main 10 (10-bit / HDR SDR-tonemap)
+///   * "av1"       → AV1 Main
+///   * "vp9"       → VP9 profile 0/2
+///   * "aac"       → AAC LC (universal en MP4/TS)
+///   * "mp3"       → MPEG audio layer 3
+///   * "ac3"       → Dolby Digital (raro en browsers)
+///   * "eac3"      → Dolby Digital Plus
+///   * "opus"      → Opus (Chromium sí, Safari 17+)
+///   * "flac"      → FLAC
+///
+/// `codecs` vacío = frontend aún no ha reportado. En ese caso el
+/// backend usa [`ClientCapabilities::safe_default`] (h264 + aac +
+/// mp3), que replica el comportamiento pre-§4.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClientCapabilities {
+    #[serde(default)]
+    pub codecs: Vec<String>,
+}
+
+impl ClientCapabilities {
+    /// Fallback conservador: asume solo lo que TODO WebView soporta
+    /// nativamente en `<video>`: H.264 8-bit + AAC/MP3. Se usa
+    /// cuando el frontend aún no ha registrado sus caps. Es lo más
+    /// restrictivo (max ffmpeg work) pero jamás falla al
+    /// reproducir.
+    pub fn safe_default() -> Self {
+        Self {
+            codecs: vec!["h264".into(), "aac".into(), "mp3".into()],
+        }
+    }
+
+    /// `true` si el tag está declarado por el cliente. Comparación
+    /// case-insensitive porque canPlayType a veces normaliza a
+    /// lowercase, a veces no.
+    pub fn supports(&self, tag: &str) -> bool {
+        self.codecs.iter().any(|c| c.eq_ignore_ascii_case(tag))
+    }
+}
+
+/// Códecs de video que aceptamos por el path DIRECT (`<video src>`
+/// apuntando a `/video` raw). Requiere que el cliente los declare
+/// vía `caps.supports(...)` — la lista pre-§4 (`["h264", "hevc"]`)
+/// se conserva como techo semántico: aunque el cliente diga soportar
+/// AV1, DIRECT solo va por H.264/HEVC porque `serve_video`
+/// devuelve el fichero tal cual (MP4/MOV con esos códecs).
 const DIRECT_VIDEO_CODECS: &[&str] = &["h264", "hevc"];
 
 /// Códecs de audio compatibles con el path DIRECT. El resto
@@ -329,24 +447,35 @@ const DIRECT_VIDEO_CODECS: &[&str] = &["h264", "hevc"];
 const DIRECT_AUDIO_CODECS: &[&str] = &["aac", "mp3"];
 
 /// `true` si el source es MP4/MOV con códecs ya WebView-compatibles
-/// y sin banderas raras (10-bit, 4:2:2/4:4:4, perfiles High 10…). En
-/// ese caso el player HTML apunta `<video src>` a `/video` directo —
-/// sin subprocess, sin remux, con Range HTTP para seek nativo.
+/// y sin banderas raras (10-bit, 4:2:2/4:4:4, perfiles High 10…),
+/// Y además el cliente declara soporte para esos códecs en `caps`.
+/// En ese caso el player HTML apunta `<video src>` a `/video`
+/// directo — sin subprocess, sin remux, con Range HTTP para seek
+/// nativo.
 ///
-/// Todo lo que no cumpla esta whitelist entra por el path HLS
-/// (`spawn_hls` transcodifica a H.264 8-bit High + AAC).
-fn compute_direct_playable(info: &MediaInfo) -> bool {
+/// Todo lo que no cumpla la matriz entra por el path HLS
+/// (`spawn_hls` transcodifica o hace copy según §2).
+pub fn compute_direct_playable(info: &MediaInfo, caps: &ClientCapabilities) -> bool {
     let Some(video) = info.streams.iter().find(|s| s.kind == StreamKind::Video) else {
         return false;
     };
     if !DIRECT_VIDEO_CODECS.contains(&video.codec.as_str()) {
         return false;
     }
-    let audio_ok = info
+    // El cliente debe declarar soporte para este códec de vídeo.
+    // Si aún no ha reportado (safe_default), el cliente tiene h264
+    // como mínimo — HEVC quedará excluido correctamente.
+    if !caps.supports(&video.codec) {
+        return false;
+    }
+    let audio = info
         .streams
         .iter()
-        .find(|s| s.kind == StreamKind::Audio)
-        .map(|s| DIRECT_AUDIO_CODECS.contains(&s.codec.as_str()))
+        .find(|s| s.kind == StreamKind::Audio);
+    let audio_ok = audio
+        .map(|s| {
+            DIRECT_AUDIO_CODECS.contains(&s.codec.as_str()) && caps.supports(&s.codec)
+        })
         .unwrap_or(false);
     if !audio_ok {
         return false;
@@ -357,18 +486,36 @@ fn compute_direct_playable(info: &MediaInfo) -> bool {
     // H.264 High 10 y 4:2:2 leen OK del fichero pero fallan al
     // decodificar → los tratamos como no-direct y los mandamos a
     // HLS con transcode.
-    let pix_bad = video
+    //
+    // Excepción: si el cliente declara `hevc10`, permitimos HEVC
+    // Main 10 en DIRECT (WKWebView macOS con HW decoder lo hace
+    // bien en SDR; HDR con DV metadata sigue siendo transcode+
+    // tonemap en HLS — la decisión final la toma spawn_hls).
+    let is_10bit_video = video
         .pix_fmt
         .as_deref()
         .map(|p| {
             let p = p.to_ascii_lowercase();
-            p.contains("10le")
-                || p.contains("10be")
-                || p.contains("12le")
-                || p.contains("12be")
-                // yuv422p, yuv444p, yuvj422p, etc.
-                || p.contains("422p")
-                || p.contains("444p")
+            p.contains("10le") || p.contains("10be") || p.contains("12le") || p.contains("12be")
+        })
+        .unwrap_or(false)
+        || video
+            .profile
+            .as_deref()
+            .map(|p| {
+                let p = p.to_ascii_lowercase();
+                p.contains("main 10") || p.contains("high 10")
+            })
+            .unwrap_or(false);
+    if is_10bit_video && !caps.supports("hevc10") {
+        return false;
+    }
+    let chroma_bad = video
+        .pix_fmt
+        .as_deref()
+        .map(|p| {
+            let p = p.to_ascii_lowercase();
+            p.contains("422p") || p.contains("444p")
         })
         .unwrap_or(false);
     let profile_bad = video
@@ -376,10 +523,10 @@ fn compute_direct_playable(info: &MediaInfo) -> bool {
         .as_deref()
         .map(|p| {
             let p = p.to_ascii_lowercase();
-            p.contains("main 10") || p.contains("high 10") || p.contains("high 4:")
+            p.contains("high 4:")
         })
         .unwrap_or(false);
-    if pix_bad || profile_bad {
+    if chroma_bad || profile_bad {
         return false;
     }
     // El contenedor de origen tiene que ser MP4/MOV (o similares).

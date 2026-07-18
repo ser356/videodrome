@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -57,6 +57,47 @@ use tokio_util::sync::CancellationToken;
 
 const LAST_USED_FILE: &str = ".last_used";
 const RESUME_FILE: &str = "resume.json";
+
+// ── Client capabilities (audit §4) ────────────────────────────
+//
+// Store global (static) para las capacidades del WebView reportadas
+// por el frontend al arrancar. Es global porque hay UN solo WebView
+// por proceso (Tauri single-window) y las caps no cambian en runtime
+// — se leen una vez al mount de React. Los handlers HTTP (que viven
+// en `stream::AppState` per-stream, sin acceso al `tauri::AppState`)
+// las consultan vía `current_client_capabilities()`.
+//
+// Antes de que el frontend registre nada, se devuelve
+// `ClientCapabilities::safe_default()` (H.264+AAC+MP3) — la matriz
+// más restrictiva, equivalente al comportamiento pre-§4.
+
+static CLIENT_CAPABILITIES: OnceLock<RwLock<crate::ffmpeg::ClientCapabilities>> = OnceLock::new();
+
+fn client_caps_slot() -> &'static RwLock<crate::ffmpeg::ClientCapabilities> {
+    CLIENT_CAPABILITIES.get_or_init(|| RwLock::new(crate::ffmpeg::ClientCapabilities::default()))
+}
+
+/// Registra las capacidades del cliente. Idempotente y thread-safe;
+/// llamado desde el comando Tauri `set_client_capabilities` con lo
+/// que `canPlayType()` reporta al arranque del frontend. Sobreescribe
+/// el valor anterior (una sola WebView, no hay ambigüedad).
+pub fn set_client_capabilities(caps: crate::ffmpeg::ClientCapabilities) {
+    if let Ok(mut w) = client_caps_slot().write() {
+        *w = caps;
+    }
+}
+
+/// Snapshot actual de las caps. Si el frontend aún no ha reportado
+/// (codecs vacío), devuelve el safe_default en su lugar — así los
+/// consumidores nunca ven "cero códecs" (que sería equivalente a
+/// "el cliente no puede reproducir nada").
+pub fn current_client_capabilities() -> crate::ffmpeg::ClientCapabilities {
+    let caps = client_caps_slot().read().ok().map(|g| g.clone());
+    match caps {
+        Some(c) if !c.codecs.is_empty() => c,
+        _ => crate::ffmpeg::ClientCapabilities::safe_default(),
+    }
+}
 
 /// Handle de una sesión de streaming activa. `Drop` cancela el servidor
 /// HTTP, detiene la sesión BitTorrent y — si tenemos infohash — persiste
@@ -293,6 +334,65 @@ struct HlsState {
     /// el job activo, purgamos segmentos y guardamos aquí la nueva
     /// selección; el próximo respawn usa `-map 0:v:0 -map 0:a:<idx>`.
     audio_idx: Option<usize>,
+    /// Estrategia decidida al init: Copy (remux -c:v copy, cero
+    /// pérdida) o Transcode (libx264 CRF 18). Audit §2/§7. La
+    /// decisión mira el probe + client caps + preferences y se
+    /// congela para toda la vida del stream — un cambio de
+    /// preferencia NO afecta a un stream ya arrancado.
+    mode: HlsMode,
+    /// Rejilla de segmentos: para cada idx, `(start_seconds,
+    /// duration_seconds)`. En modo Transcode todos duran
+    /// `HLS_SEG_SECS`; en modo Copy la rejilla es variable y
+    /// viene del `KeyframeIndex.variable_segments()` — los cortes
+    /// caen en keyframes reales del archivo (audit §2b).
+    segments: Vec<(f64, f64)>,
+    /// Último idx pedido por `serve_hls_segment`. La tarea de
+    /// eviction LRU lo usa como playhead para decidir qué
+    /// segmentos son "lejanos" y candidatos a borrar (audit §6).
+    /// Inicializa a 0 (arranque) y avanza monótono con seek
+    /// forward + oscila con scrubbing. Cero coste de sincronía
+    /// (atomic).
+    last_requested_idx: Arc<AtomicU64>,
+    /// Handle a la tarea de eviction para poder abortarla al drop
+    /// del stream. `None` si el budget es 0 (evicción desactivada).
+    _evictor: Option<tokio::task::JoinHandle<()>>,
+    /// Sticky failure: si algún spawn de ffmpeg murió en <500ms
+    /// con exit code != 0, guardamos aquí el mensaje del último
+    /// error. Todos los `serve_hls_segment` siguientes devuelven
+    /// 500 con ese mensaje SIN respawnear ffmpeg, hasta que el
+    /// user cierre el player. Necesario para no entrar en loop
+    /// infinito cuando el argv es inválido (filter missing,
+    /// codec sin soporte, etc.).
+    fatal_error: Option<String>,
+}
+
+#[cfg(feature = "gui")]
+impl Drop for HlsState {
+    fn drop(&mut self) {
+        // Aborta la tarea de eviction. Sin esto, el loop seguiría
+        // corriendo tras cerrar el player (el `dir` que escanea
+        // desaparece con `_tempdir`, así que fallaría en silencio,
+        // pero es limpio abortarlo). El tempdir + cualquier ffmpeg
+        // hijo se limpian por su propio Drop (`kill_on_drop`).
+        if let Some(h) = self._evictor.take() {
+            h.abort();
+        }
+    }
+}
+
+/// Estrategia de encoding decidida por `decide_hls_mode` al init.
+#[cfg(feature = "gui")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HlsMode {
+    /// `-c:v copy`: sin pérdida en vídeo. Los cortes de segmento
+    /// caen en keyframes REALES del archivo (rejilla de
+    /// `HlsState.segments` construida desde el `KeyframeIndex`).
+    Copy,
+    /// `-c:v libx264 -crf 18 -preset veryfast`: transcode con
+    /// preset de calidad alta (audit §5). Los cortes de segmento
+    /// caen en múltiplos exactos de `HLS_SEG_SECS` porque el
+    /// encoder fuerza keyframes ahí (`-force_key_frames`).
+    Transcode,
 }
 
 /// Job ffmpeg activo: proceso corriendo con `-ss <idx*4>` +
@@ -1026,68 +1126,54 @@ async fn serve_hls_playlist(
             "ffmpeg no est\u{e1} en PATH".to_string(),
         ));
     }
-    // El playlist es función pura de la duración: no espera a ffmpeg
-    // ni respawnea nada. Necesitamos `duration_seconds` del probe; si
-    // no está cacheado (raro: el frontend llama a `/probe.json` antes
-    // de montar el `<video>`), lo calculamos aquí.
-    let info = ensure_probe(&state)
-        .await
-        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("probe: {e}")))?;
-    let duration = info.duration_seconds.ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "duración desconocida (probe sin moov accesible)".to_string(),
-    ))?;
-    if duration <= 0.0 {
+    // Garantiza HlsState (probe + modo + rejilla de segmentos ya
+    // decididos, congelados para toda la vida del stream). Es
+    // idempotente y thread-safe: la primera llamada paga probe +
+    // keyframe index; las siguientes son un lock check.
+    ensure_hls_dir(&state).await?;
+    let (segments, mode) = {
+        let guard = state.hls.lock().await;
+        let hls = guard.as_ref().expect("ensure_hls_dir just populated");
+        (hls.segments.clone(), hls.mode)
+    };
+    if segments.is_empty() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("duración inválida ({duration}s)"),
+            "rejilla de segmentos vacía".to_string(),
         ));
     }
-    let n = (duration / HLS_SEG_SECS).ceil() as u64;
-    if n == 0 {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "peli demasiado corta para HLS".to_string(),
-        ));
-    }
-    // Playlist VOD: todos los segmentos declarados desde el arranque,
-    // último EXTINF ajustado al resto real (`duration - (n-1)*4`).
-    // `#EXT-X-ENDLIST` presente ⇒ Safari lo trata como VOD puro:
-    // barra de progreso completa desde el primer ms y seek nativo a
-    // cualquier punto.
-    let mut playlist = String::with_capacity(96 + (n as usize) * 32);
+    // TARGETDURATION = ceil del segmento más largo (spec HLS). En
+    // modo Copy con GOPs irregulares puede ser mayor que
+    // HLS_SEG_SECS; en Transcode es HLS_SEG_SECS exacto.
+    let target_duration = segments
+        .iter()
+        .map(|(_, d)| d.ceil() as u64)
+        .max()
+        .unwrap_or_else(|| HLS_SEG_SECS.ceil() as u64);
+    let mut playlist = String::with_capacity(96 + segments.len() * 32);
     playlist.push_str("#EXTM3U\n");
     playlist.push_str("#EXT-X-VERSION:3\n");
-    playlist.push_str(&format!(
-        "#EXT-X-TARGETDURATION:{}\n",
-        HLS_SEG_SECS.ceil() as u64
-    ));
+    playlist.push_str(&format!("#EXT-X-TARGETDURATION:{target_duration}\n"));
     playlist.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
     playlist.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
     playlist.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
-    for i in 0..n {
-        let extinf = if i + 1 == n {
-            // Último segmento: la diferencia real, mínimo 0.001s para
-            // que no salga 0.00000 (que algunos parsers tratan como
-            // segmento vacío).
-            (duration - (n - 1) as f64 * HLS_SEG_SECS).max(0.001)
-        } else {
-            HLS_SEG_SECS
-        };
-        playlist.push_str(&format!("#EXTINF:{extinf:.5},\nseg-{i:05}.ts\n"));
+    for (i, (_start, dur)) in segments.iter().enumerate() {
+        // EXTINF con precisión al ms — Safari/hls.js son estrictos
+        // con truncados que superen la duración real.
+        playlist.push_str(&format!("#EXTINF:{dur:.5},\nseg-{i:05}.ts\n"));
     }
     playlist.push_str("#EXT-X-ENDLIST\n");
     if std::env::var("VIDEODROME_DEBUG").is_ok() {
         eprintln!(
-            "[hls] playlist emitted: duration={duration:.3}s n={n} target={}s",
-            HLS_SEG_SECS.ceil() as u64
+            "[hls] playlist emitted: mode={mode:?} n={} target={target_duration}s",
+            segments.len()
         );
     }
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        // Estable durante la vida del stream (misma duración ⇒ mismo
-        // playlist). Dejamos que el WebView lo cachee.
+        // Estable durante la vida del stream (mismo modo/segments ⇒
+        // mismo playlist). Dejamos que el WebView lo cachee.
         .header(header::CACHE_CONTROL, "public, max-age=3600")
         .body(Body::from(playlist.into_bytes()))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
@@ -1151,28 +1237,258 @@ fn max_produced_idx(dir: &Path, floor: u64) -> u64 {
     }
 }
 
-/// Garantiza que existe el tempdir compartido del stream HLS. Se
-/// crea perezosamente en la primera petición de segmento; sobrevive
-/// a reinicios de ffmpeg (todos los jobs del stream escriben aquí,
+/// Garantiza que existe el tempdir compartido del stream HLS Y la
+/// rejilla de segmentos + modo decididos. Se crea perezosamente en
+/// la primera petición HLS (playlist o segmento); sobrevive a
+/// reinicios de ffmpeg (todos los jobs del stream escriben aquí,
 /// los segmentos son cache para toda la vida del stream).
+///
+/// Al ser el primer punto donde tenemos probe + client caps +
+/// preferencias, aquí es donde se decide `HlsMode`. La decisión se
+/// congela para toda la vida del stream — un cambio de preferencia
+/// mientras se está reproduciendo NO afecta al stream en curso
+/// (ver `HlsState.mode`).
 #[cfg(feature = "gui")]
 async fn ensure_hls_dir(state: &AppState) -> Result<PathBuf, (StatusCode, String)> {
-    let mut guard = state.hls.lock().await;
-    if let Some(hls) = guard.as_ref() {
-        return Ok(hls.dir.clone());
+    {
+        let guard = state.hls.lock().await;
+        if let Some(hls) = guard.as_ref() {
+            return Ok(hls.dir.clone());
+        }
     }
+    // Probe primero (fuera del lock — puede tardar 1-3s con Range
+    // requests). Necesario para conocer duración, container y códecs.
+    let info = ensure_probe(state)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("probe: {e}")))?;
+    let duration = info.duration_seconds.ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "duración desconocida (probe sin moov accesible)".to_string(),
+    ))?;
+    if duration <= 0.0 {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("duración inválida ({duration}s)"),
+        ));
+    }
+    let prefs = crate::preferences::load();
+    let caps = current_client_capabilities();
+    let url = format!("http://{}/video", state.local_addr);
+
+    let (mode, segments) = decide_mode_and_segments(&info, &caps, prefs.quality_mode, &url).await;
+
+    if segments.is_empty() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "peli demasiado corta para HLS".to_string(),
+        ));
+    }
+
     let tempdir = tempfile::Builder::new()
         .prefix("videodrome-hls-")
         .tempdir()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tempdir: {e}")))?;
     let dir = tempdir.path().to_path_buf();
+    eprintln!(
+        "[hls] init: mode={:?} segments={} duration={:.2}s dir={}",
+        mode,
+        segments.len(),
+        duration,
+        dir.display()
+    );
+    let mut guard = state.hls.lock().await;
+    // Doble check: si otra request lo llenó mientras estábamos
+    // haciendo probe/keyframes, respetamos ese estado.
+    if let Some(hls) = guard.as_ref() {
+        return Ok(hls.dir.clone());
+    }
+    let last_requested_idx = Arc::new(AtomicU64::new(0));
+    // Evictor LRU (audit §6): spawnea una tarea que barre el dir
+    // cada 10s y borra segmentos alejados del playhead cuando el
+    // total pisa el budget. Deshabilitado si el user pone 0.
+    let evictor = if prefs.hls_disk_budget_gb > 0 {
+        let budget_bytes: u64 = (prefs.hls_disk_budget_gb as u64) * 1024 * 1024 * 1024;
+        Some(spawn_lru_evictor(
+            dir.clone(),
+            budget_bytes,
+            last_requested_idx.clone(),
+        ))
+    } else {
+        None
+    };
     *guard = Some(HlsState {
         dir: dir.clone(),
         _tempdir: tempdir,
         job: None,
         audio_idx: None,
+        mode,
+        segments,
+        last_requested_idx,
+        _evictor: evictor,
+        fatal_error: None,
     });
     Ok(dir)
+}
+
+/// Decide `HlsMode` + construye la rejilla de segmentos para el
+/// playlist. Audit §2/§7:
+///
+///   * Preferencia `Transcode` → siempre transcode con rejilla fija.
+///   * Preferencia `Copy` → intentar copy; si falla, ERROR (el user
+///     lo pidió expresamente, no cambiamos de modo bajo sus pies).
+///   * Preferencia `Auto` (default): copy si (1) el códec de vídeo
+///     es compatible con el cliente vía DIRECT-eligible codec set,
+///     (2) el `KeyframeIndex` se puede leer, (3) el max GOP ≤ 10s.
+///     Si algo falla → transcode.
+#[cfg(feature = "gui")]
+async fn decide_mode_and_segments(
+    info: &crate::ffmpeg::MediaInfo,
+    caps: &crate::ffmpeg::ClientCapabilities,
+    pref: crate::preferences::QualityMode,
+    url: &str,
+) -> (HlsMode, Vec<(f64, f64)>) {
+    use crate::preferences::QualityMode;
+    let duration = info.duration_seconds.unwrap_or(0.0);
+    let transcode_grid = build_transcode_grid(duration);
+
+    match pref {
+        QualityMode::Transcode => (HlsMode::Transcode, transcode_grid),
+        QualityMode::Copy => match try_build_copy_grid(info, caps, url).await {
+            Ok(grid) if !grid.is_empty() => (HlsMode::Copy, grid),
+            Ok(_) => {
+                eprintln!("[hls] pref=Copy pero grid vacía → fallback transcode");
+                (HlsMode::Transcode, transcode_grid)
+            }
+            Err(e) => {
+                eprintln!("[hls] pref=Copy falló ({e}) → fallback transcode");
+                (HlsMode::Transcode, transcode_grid)
+            }
+        },
+        QualityMode::Auto => match try_build_copy_grid(info, caps, url).await {
+            Ok(grid) if !grid.is_empty() => {
+                eprintln!("[hls] auto → COPY viable ({} segments)", grid.len());
+                (HlsMode::Copy, grid)
+            }
+            Ok(_) => {
+                eprintln!("[hls] auto → grid vacía, transcode");
+                (HlsMode::Transcode, transcode_grid)
+            }
+            Err(e) => {
+                eprintln!("[hls] auto → copy no viable ({e}), transcode");
+                (HlsMode::Transcode, transcode_grid)
+            }
+        },
+    }
+}
+
+/// Construye la rejilla fija de segmentos de `HLS_SEG_SECS`. El
+/// último puede ser más corto para no exceder la duración total.
+#[cfg(feature = "gui")]
+fn build_transcode_grid(duration: f64) -> Vec<(f64, f64)> {
+    if duration <= 0.0 {
+        return Vec::new();
+    }
+    let n = (duration / HLS_SEG_SECS).ceil() as usize;
+    (0..n)
+        .map(|i| {
+            let start = i as f64 * HLS_SEG_SECS;
+            let len = if i + 1 == n {
+                (duration - start).max(0.001)
+            } else {
+                HLS_SEG_SECS
+            };
+            (start, len)
+        })
+        .collect()
+}
+
+/// `true` si el stream de vídeo declara transfer characteristics
+/// HDR: SMPTE 2084 (PQ, típico en BluRay UHD) o ARIB STD-B67 (HLG,
+/// broadcast). Audit §8.
+#[cfg(feature = "gui")]
+fn is_hdr_stream(video: &crate::ffmpeg::StreamInfo) -> bool {
+    video
+        .color_transfer
+        .as_deref()
+        .map(|t| {
+            let t = t.to_ascii_lowercase();
+            t.contains("smpte2084") || t.contains("arib-std-b67") || t.contains("bt2020-10")
+        })
+        .unwrap_or(false)
+}
+
+/// Intenta construir la rejilla de segmentos para modo COPY:
+/// fetchea el keyframe index del contenedor y agrupa keyframes en
+/// segmentos ≥ `HLS_SEG_SECS`. Devuelve error si el códec no es
+/// compatible con el cliente, si el índice no se puede leer, o si
+/// el max GOP > 10s (audit §2d — con GOPs enormes el seek en copy
+/// sería inaceptable).
+#[cfg(feature = "gui")]
+async fn try_build_copy_grid(
+    info: &crate::ffmpeg::MediaInfo,
+    caps: &crate::ffmpeg::ClientCapabilities,
+    url: &str,
+) -> anyhow::Result<Vec<(f64, f64)>> {
+    use anyhow::bail;
+    let video = info
+        .streams
+        .iter()
+        .find(|s| s.kind == crate::ffmpeg::StreamKind::Video)
+        .ok_or_else(|| anyhow::anyhow!("sin stream de vídeo"))?;
+    // Códec debe ser algo que el cliente pueda reproducir vía TS
+    // sin transcode. H.264 universal; HEVC 8-bit solo si el cliente
+    // declara `hevc`; HEVC 10-bit necesita `hevc10` Y salir de HDR
+    // (dejado a §6/§8 futuros).
+    let codec_ok = match video.codec.as_str() {
+        "h264" => caps.supports("h264"),
+        "hevc" | "h265" => {
+            let is_10bit = video
+                .pix_fmt
+                .as_deref()
+                .map(|p| {
+                    let p = p.to_ascii_lowercase();
+                    p.contains("10le") || p.contains("10be")
+                })
+                .unwrap_or(false);
+            if is_10bit {
+                caps.supports("hevc10")
+            } else {
+                caps.supports("hevc")
+            }
+        }
+        _ => false,
+    };
+    if !codec_ok {
+        bail!(
+            "cliente no soporta '{}' vía TS copy (pix_fmt={:?})",
+            video.codec,
+            video.pix_fmt
+        );
+    }
+    // Audit §8: HDR (SMPTE 2084 / arib-std-b67) es incompatible
+    // con TS-copy incluso si el cliente soporta HEVC 10-bit. La
+    // ausencia de tone-map + metadata deja los colores lavados en
+    // pantallas SDR. Bailamos → el caller cae a transcode con la
+    // cadena zscale+tonemap.
+    if is_hdr_stream(video) {
+        bail!("HDR (color_transfer={:?}) → transcode+tonemap", video.color_transfer);
+    }
+    // Fetch keyframe index. Cliente HTTP reutilizable: creamos uno
+    // simple aquí (localhost, sin cookies ni auth).
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap_or_default();
+    let idx =
+        crate::keyframes::fetch_keyframe_index(&client, url, info.container.as_deref()).await?;
+    let max_gap = idx.max_gap_seconds();
+    const MAX_GOP_SECONDS: f64 = 10.0;
+    if max_gap > MAX_GOP_SECONDS {
+        bail!(
+            "GOP máximo {max_gap:.1}s > {MAX_GOP_SECONDS}s (seek en copy sería inaceptable)"
+        );
+    }
+    Ok(idx.variable_segments(HLS_SEG_SECS))
 }
 
 #[cfg(feature = "gui")]
@@ -1187,6 +1503,33 @@ async fn serve_hls_segment(
         parse_seg_idx(&file).ok_or((StatusCode::BAD_REQUEST, "idx inv\u{e1}lido".to_string()))?;
     let dir = ensure_hls_dir(&state).await?;
     let path = dir.join(&file);
+
+    // Trackear playhead para el evictor LRU (audit §6): cada
+    // request pinta la posición actual del cliente. El evictor
+    // usa este valor para decidir qué segmentos son "lejanos" y
+    // por tanto candidatos a borrar. Usamos `store` (no fetch_max):
+    // si el user hace scrubbing hacia atrás, el playhead debe
+    // reflejar la posición REAL, aunque implique evictar
+    // segmentos cercanos al highwatermark previo (esos son ahora
+    // los "lejanos"; los podemos re-materializar bajo demanda).
+    //
+    // ALSO: chequear si hay un fatal_error registrado (spawn
+    // repetidamente muerto) → cortar el loop y devolver 500 al
+    // cliente. Sin esto, cualquier fallo persistente de ffmpeg
+    // (filter missing, codec sin soporte, PATH roto) provoca
+    // respawn cada 150ms hasta cerrar el player.
+    {
+        let guard = state.hls.lock().await;
+        if let Some(hls) = guard.as_ref() {
+            hls.last_requested_idx.store(idx, Ordering::Relaxed);
+            if let Some(msg) = &hls.fatal_error {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("HLS pipeline fatal: {msg}"),
+                ));
+            }
+        }
+    }
 
     // Deadline generoso: el spawn en frío de un job en offset alto
     // puede tardar decenas de segundos (librqbit tiene que bajar las
@@ -1294,12 +1637,20 @@ async fn serve_hls_segment(
 async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, String)> {
     // Sacamos el job existente del guard con `.take()` para no
     // bloquear el mutex durante el kill (puede tardar decenas de ms).
-    let (old_job, dir, audio_idx) = {
+    // Además copiamos el modo + start_seconds del segmento pedido
+    // — la rejilla congelada al init es la fuente de verdad para el
+    // tiempo absoluto en el que ffmpeg debe arrancar (audit §2b).
+    let (old_job, dir, audio_idx, mode, start_seconds) = {
         let mut guard = state.hls.lock().await;
         let hls = guard
             .as_mut()
             .expect("dir must be ensured before ensure_hls_job");
-        (hls.job.take(), hls.dir.clone(), hls.audio_idx)
+        let start = hls
+            .segments
+            .get(idx as usize)
+            .map(|(s, _)| *s)
+            .unwrap_or_else(|| idx as f64 * HLS_SEG_SECS);
+        (hls.job.take(), hls.dir.clone(), hls.audio_idx, hls.mode, start)
     };
     if let Some(mut old) = old_job {
         // Cancelar la Range GET del ffmpeg viejo contra `/video`:
@@ -1325,12 +1676,45 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
     // alto y las piezas están frías, priorizamos su descarga ANTES
     // de que ffmpeg haga su primer read. Reduce el tiempo hasta el
     // primer segmento típico de 60s → 15-30s en pelis pesadas.
-    let start_seconds = idx as f64 * HLS_SEG_SECS;
     if start_seconds > 5.0 {
         warmup_librqbit_for_offset(state, start_seconds).await;
     }
 
-    let child = spawn_hls(state, &dir, idx, audio_idx).await?;
+    let child = spawn_hls(state, &dir, idx, audio_idx, mode, start_seconds).await?;
+    // Detección de fallo temprano: si el argv es inválido
+    // (filter missing, codec sin soporte, PATH roto…) ffmpeg
+    // muere en <100 ms con exit != 0. Sin este check el loop de
+    // `serve_hls_segment` respawnearía indefinidamente cada
+    // 150 ms. Damos 500 ms de gracia — un spawn "sano" tarda
+    // decenas de ms en abrir el input pero no exita nunca; uno
+    // "malo" muere casi al instante.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let mut child = child;
+    match child.try_wait() {
+        Ok(Some(status)) if !status.success() => {
+            // Muerte inmediata con error. Marcamos el HlsState
+            // como fatal para que las siguientes requests devuelvan
+            // 500 sin respawnear.
+            let msg = format!(
+                "ffmpeg exited with {} in <500ms (probablemente filter/codec no soportado)",
+                status
+            );
+            eprintln!("[hls] FATAL: {msg}");
+            let mut guard = state.hls.lock().await;
+            if let Some(hls) = guard.as_mut() {
+                hls.fatal_error = Some(msg.clone());
+            }
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, msg));
+        }
+        Ok(Some(_)) => {
+            // Salió con éxito antes de producir nada — raro,
+            // dejar el flujo normal seguir (`serve_hls_segment`
+            // hará timeout de 60s si no aparece el .ts).
+        }
+        Ok(None) | Err(_) => {
+            // Sigue vivo → todo OK.
+        }
+    }
     let mut guard = state.hls.lock().await;
     let hls = guard.as_mut().expect("dir");
     hls.job = Some(HlsJob {
@@ -1408,6 +1792,152 @@ async fn warmup_librqbit_for_offset(state: &AppState, start_seconds: f64) {
     // avanzase sin que el usuario reprodujese realmente ese offset.
 }
 
+// ── LRU eviction de segmentos .ts (audit §6) ──────────────────
+//
+// Modelo COPY = disco crece con bitrate ORIGINAL: un remux UHD
+// visto entero deja ~60 GB en el tempdir. La evicción por
+// presupuesto es NECESARIA (no opcional) para no llenar disco.
+//
+// Estrategia: cada `EVICT_INTERVAL_SECS` sumamos tamaños de
+// `seg-*.ts`; si el total supera `budget_bytes`, borramos los más
+// alejados del `last_requested_idx` (playhead) hasta bajar a 90%
+// del budget (10% de headroom para no evictar en cada ciclo).
+//
+// Safety window: nunca borramos idx en
+// `[playhead-2, playhead+HLS_LOOKAHEAD+2]`. Ese margen cubre el
+// segmento que se está reproduciendo, los ya buffered por el
+// player (típ. 2-3 hacia adelante), y el que ffmpeg está
+// produciendo justo ahora.
+//
+// Priorización: entre segmentos igual de lejanos, borramos primero
+// los que están POR DETRÁS del playhead — "rewind" es menos
+// común que "keep watching forward", y evictar-luego-rehacer
+// atrás es más barato (el ffmpeg respawn desde un keyframe atrás
+// solo cuesta lo que tarde librqbit en re-servir esas piezas, ya
+// cacheadas por libraría).
+
+#[cfg(feature = "gui")]
+const EVICT_INTERVAL_SECS: u64 = 10;
+#[cfg(feature = "gui")]
+const EVICT_SAFETY_WINDOW: u64 = HLS_LOOKAHEAD + 2;
+#[cfg(feature = "gui")]
+const EVICT_TARGET_RATIO: f64 = 0.9;
+
+/// Spawnea la tarea de eviction. El JoinHandle se guarda en
+/// `HlsState._evictor` para que `Drop` la aborte al cerrar el
+/// stream (si no, seguiría escaneando un dir borrado).
+#[cfg(feature = "gui")]
+fn spawn_lru_evictor(
+    dir: PathBuf,
+    budget_bytes: u64,
+    playhead: Arc<AtomicU64>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(EVICT_INTERVAL_SECS);
+        loop {
+            tokio::time::sleep(interval).await;
+            // El dir puede haber desaparecido si el stream cerró
+            // entre ticks — abortamos silenciosamente.
+            if !dir.exists() {
+                return;
+            }
+            let head = playhead.load(Ordering::Relaxed);
+            if let Err(e) = evict_once(&dir, budget_bytes, head).await {
+                eprintln!("[hls-evict] error: {e}");
+            }
+        }
+    })
+}
+
+/// Un ciclo del evictor. Async solo por conveniencia (usa
+/// `spawn_blocking` para el I/O — read_dir puede ser lento en
+/// tempdirs con miles de entradas).
+#[cfg(feature = "gui")]
+async fn evict_once(dir: &Path, budget_bytes: u64, playhead_idx: u64) -> Result<()> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || evict_once_sync(&dir, budget_bytes, playhead_idx))
+        .await
+        .context("evict spawn_blocking join")?
+}
+
+#[cfg(feature = "gui")]
+fn evict_once_sync(dir: &Path, budget_bytes: u64, playhead_idx: u64) -> Result<()> {
+    let entries = std::fs::read_dir(dir).context("read_dir tempdir")?;
+    // (idx, path, size). Solo consideramos `.ts` estables (no
+    // `.ts.tmp` — esos son de ffmpeg escribiendo y borrarlos
+    // rompería el job en curso).
+    let mut segs: Vec<(u64, PathBuf, u64)> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let name_os = entry.file_name();
+        let name = match name_os.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        if !name.ends_with(".ts") || name.ends_with(".ts.tmp") {
+            continue;
+        }
+        let Some(idx) = parse_seg_idx(name) else {
+            continue;
+        };
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        total += size;
+        segs.push((idx, entry.path(), size));
+    }
+    if total <= budget_bytes {
+        return Ok(());
+    }
+    // Sobrepasado. Objetivo: bajar a 90% del budget.
+    let target = (budget_bytes as f64 * EVICT_TARGET_RATIO) as u64;
+    // Orden por prioridad de eviction: distancia al playhead,
+    // con penalty para "atrás" (borra atrás antes que adelante).
+    // El score menor se evicta primero.
+    // score = (idx > playhead ? distance*2 : distance)
+    let head = playhead_idx;
+    segs.sort_by_key(|(idx, _, _)| {
+        let dist = (*idx).abs_diff(head);
+        // Penalizar segmentos ADELANTE (los queremos conservar
+        // porque el user probablemente sigue viendo): score alto
+        // → se evictan más tarde.
+        if *idx > head {
+            u64::MAX - dist.saturating_mul(2)
+        } else {
+            u64::MAX - dist
+        }
+    });
+    // Después del sort, los primeros son los más "cerca" en el
+    // sentido de nuestro score → NO queremos borrarlos. Los del
+    // final son los más lejanos → los borramos.
+    let mut freed: u64 = 0;
+    let mut removed: usize = 0;
+    while total.saturating_sub(freed) > target {
+        let Some((idx, path, size)) = segs.pop() else {
+            break;
+        };
+        // Safety window: nunca borramos idx en
+        // [head - safety, head + safety].
+        let in_safe_window = idx.abs_diff(head) <= EVICT_SAFETY_WINDOW;
+        if in_safe_window {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            freed += size;
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        eprintln!(
+            "[hls-evict] freed {} MB ({} segments) — head={} budget={} MB total_before={} MB",
+            freed / 1_048_576,
+            removed,
+            head,
+            budget_bytes / 1_048_576,
+            total / 1_048_576
+        );
+    }
+    Ok(())
+}
+
 // ── helpers para elegir codec/bitrate de audio en spawn_hls ───
 
 /// Devuelve `(channels, codec)` del stream de audio que ffmpeg va
@@ -1457,42 +1987,66 @@ fn aac_bitrate_for_channels(channels: Option<u32>) -> &'static str {
     }
 }
 
+/// `true` si el stream de vídeo principal del `cached_probe` es
+/// HDR (SMPTE 2084 / arib-std-b67 / bt2020-10). Se consulta en
+/// `spawn_hls` (rama Transcode) para meter la cadena
+/// zscale+tonemap y evitar colores lavados en SDR. Audit §8.
+#[cfg(feature = "gui")]
+async fn probe_is_hdr_video(state: &AppState) -> bool {
+    let guard = state.cached_probe.lock().await;
+    let Some(info) = guard.as_ref() else {
+        return false;
+    };
+    info.streams
+        .iter()
+        .find(|s| s.kind == crate::ffmpeg::StreamKind::Video)
+        .map(is_hdr_stream)
+        .unwrap_or(false)
+}
+
 /// Spawnea un ffmpeg que producirá `seg-<idx>.ts`, `seg-<idx+1>.ts`,
 /// … en `dir` (tempdir compartido). Argv clave:
 ///
-///   * `-ss <idx*4>` antes de `-i`: fast seek por demuxer (keyframe
-///     ≤ t). Combinado con `-force_key_frames expr:gte(t,n_forced*4)`
-///     que fuerza keyframes en múltiplos exactos de 4s, el primer
-///     segmento del job corta en frontera exacta (igual que
-///     produciría el job del stream desde t=0). Requisito para que
-///     dos jobs distintos produzcan segmentos intercambiables.
+///   * `-ss <start_seconds>` antes de `-i`: fast seek por demuxer
+///     (keyframe ≤ t). En modo Transcode combinado con
+///     `-force_key_frames expr:gte(t,n_forced*4)`. En modo Copy
+///     `start_seconds` es EXACTAMENTE el timestamp de un keyframe
+///     real (viene de `HlsState.segments`, construido desde el
+///     `KeyframeIndex`), así que el primer segmento arranca sin
+///     drop de frames — sin `-force_key_frames` (irrelevante con
+///     `-c:v copy`).
 ///
 ///   * `-start_number <idx>`: los ficheros se numeran desde el
 ///     índice global, coincidiendo con los URIs del playlist
 ///     estático (`seg-<idx>.ts`).
 ///
-///   * `-output_ts_offset <idx*4>`: los PTS del MPEG-TS de salida
-///     arrancan en el tiempo absoluto del segmento, no en 0. Sin
-///     esto, `currentTime`, subtítulos y timeline se desplazarían
-///     tras cada reinicio de ffmpeg.
+///   * `-output_ts_offset <start_seconds>`: los PTS del MPEG-TS de
+///     salida arrancan en el tiempo absoluto del segmento, no en 0.
+///     Sin esto, `currentTime`, subtítulos y timeline se
+///     desplazarían tras cada reinicio de ffmpeg.
 ///
 ///   * `-hls_flags independent_segments+temp_file+omit_endlist`:
 ///     `temp_file` es la clave — ffmpeg escribe `seg-NNNNN.ts.tmp`
-///     y renombra atómicamente a `.ts` al cerrar. El handler solo
-///     ve `.ts` completos, sin heurísticas de tamaño/mtime.
-///     `omit_endlist` evita que ffmpeg escriba `#EXT-X-ENDLIST` en
-///     `live.m3u8` (que ignoramos — nuestro playlist estático es
-///     el único que sirve).
+///     y renombra atómicamente a `.ts` al cerrar.
 ///
-///   * `live.m3u8` como output: es el playlist que escribe ffmpeg,
-///     se ignora (no se sirve nunca); solo nos interesan los .ts.
-///     Es inevitable que el muxer hls lo escriba.
+/// Dos ramas de encoding según `mode`:
+///
+///   * `Transcode`: libx264 CRF 18 High + AAC (audit §5). Cortes
+///     de segmento en múltiplos de `HLS_SEG_SECS` forzados por el
+///     encoder.
+///
+///   * `Copy`: `-c:v copy` (audit §2). Cero pérdida en vídeo. Los
+///     cortes caen donde el archivo YA tiene keyframes. `-hls_time`
+///     recibe la duración del segmento actual del grid, para que
+///     ffmpeg cierre el `.ts` en el siguiente keyframe cercano.
 #[cfg(feature = "gui")]
 async fn spawn_hls(
     state: &AppState,
     dir: &Path,
     idx: u64,
     audio_idx: Option<usize>,
+    mode: HlsMode,
+    start_seconds: f64,
 ) -> Result<tokio::process::Child, (StatusCode, String)> {
     let bin = crate::ffmpeg::ffmpeg_binary().ok_or_else(|| {
         (
@@ -1503,7 +2057,6 @@ async fn spawn_hls(
     let seg_pattern = dir.join("seg-%05d.ts");
     let live_playlist = dir.join("live.m3u8");
     let input_url = format!("http://{}/video", state.local_addr);
-    let start_seconds = idx as f64 * HLS_SEG_SECS;
 
     let mut cmd = tokio::process::Command::new(bin);
     // Loglevel: `error` por defecto para no ensuciar la consola en
@@ -1542,59 +2095,155 @@ async fn spawn_hls(
             cmd.arg("-map").arg("0:a:0?");
         }
     }
-    // Video: siempre transcode a H.264 8-bit High single-slice. HLS
-    // TS segments no soportan HEVC en Safari <14 y añade complejidad;
-    // libx264 veryfast es suficiente para 1080p en cualquier M-series.
-    //
-    // CRF 18 (transparent-ish) en vez de 23: en CRF el coste de CPU
-    // es prácticamente el mismo, lo que cambia es el bitrate de
-    // salida (⇒ más disco). El audit §5 lo justifica como
-    // "presupuesto de calidad alto" para lo que inevitablemente hay
-    // que recodificar; el resto va por copy (rama futura §2).
-    cmd.arg("-c:v")
-        .arg("libx264")
-        .arg("-preset")
-        .arg("veryfast")
-        .arg("-crf")
-        .arg("18")
-        .arg("-profile:v")
-        .arg("high")
-        .arg("-level:v")
-        .arg("4.1")
-        .arg("-pix_fmt")
-        .arg("yuv420p")
-        .arg("-bf")
-        .arg("0")
-        // Keyframes forzados en múltiplos exactos de 4s (0, 4, 8, ...).
-        // Requisito para que dos jobs distintos (uno desde 0, otro
-        // desde `-ss 1728`) corten segmentos en las mismas fronteras
-        // temporales, y por tanto sean intercambiables.
-        .arg("-force_key_frames")
-        .arg("expr:gte(t,n_forced*4)")
-        .arg("-x264-params")
-        .arg("scenecut=0:slices=1:sliced-threads=0")
-        // Reset de timestamps al mínimo tras el input (combina con
-        // `+genpts`). El `-output_ts_offset` de abajo reintroduce
-        // el tiempo absoluto en el mux de salida.
-        .arg("-avoid_negative_ts")
-        .arg("make_zero");
-    // Audio: AAC con bitrate escalado por canales, SIN forzar
-    // downmix. Audit §5: mantener layout multicanal cuando el
-    // origen es 5.1 → el WebView / dispositivo de salida hará el
-    // downmix a estéreo si toca. Bitrates elegidos para
-    // transparencia perceptual (~64k/canal AAC LC):
-    //   * ≤2ch o desconocido: 256k
-    //   * 3-6ch (5.1):        384k
-    //   * 7+ch (7.1):         512k
-    let (audio_channels, in_audio_codec) = probe_selected_audio(state, audio_idx).await;
-    let aac_bitrate = aac_bitrate_for_channels(audio_channels);
-    if std::env::var("VIDEODROME_DEBUG").is_ok() {
-        eprintln!(
-            "[hls] audio: src_codec={:?} src_channels={:?} → aac {}",
-            in_audio_codec, audio_channels, aac_bitrate
-        );
+    // Video: rama COPY vs TRANSCODE.
+    match mode {
+        HlsMode::Copy => {
+            // Audit §2: remux sin pérdida. Con -c:v copy no se
+            // puede forzar keyframes; los cortes de segmento caen
+            // donde el archivo YA los tiene (por eso construimos
+            // el grid desde el KeyframeIndex).
+            //
+            // `-copyts` conserva los timestamps del input (críticos
+            // para que los PTS del TS caigan alineados con el grid).
+            // Combinado con `-output_ts_offset` reproducimos el
+            // tiempo absoluto sin drift.
+            cmd.arg("-c:v")
+                .arg("copy")
+                // Sin `-avoid_negative_ts make_zero` (rompería el
+                // offset absoluto en modo copy). Sin `-fflags
+                // +genpts` (los PTS del input SON la fuente de
+                // verdad para el corte de segmento por keyframe).
+                //
+                // NB: overridamos el +genpts anterior — ffmpeg
+                // acepta múltiples -fflags y aplica el último.
+                .arg("-fflags")
+                .arg("+discardcorrupt");
+        }
+        HlsMode::Transcode => {
+            // Audit §5: CRF 18 High 5.2 + veryfast.
+            // Audit §8: si el input es HDR (SMPTE 2084 / HLG),
+            // hay que tonemap → SDR BT.709. La receta canónica
+            // (Hable) requiere `zscale` (libzimg). Homebrew core
+            // NO lo compila desde ffmpeg 8.x; hay que instalar
+            // desde el tap `homebrew-ffmpeg/ffmpeg`.
+            //
+            // Sin zscale, `colorspace` solo cambia primaries (no
+            // tonemap) y `tonemap` sin linealización previa
+            // produce basura → mejor NO poner filter chain y
+            // dejar que ffmpeg haga naive 10→8-bit downcast:
+            // HDR queda visualmente lavado pero al menos
+            // reproduce a resolución nativa sin pérdida
+            // espacial.
+            if probe_is_hdr_video(state).await {
+                if crate::ffmpeg::ffmpeg_has_filter("zscale") {
+                    // Cadena canónica FFmpeg wiki HDR10 → SDR:
+                    // linearize PQ → gamut BT.709 → tonemap Hable
+                    // → codificar en YUV 4:2:0 8-bit.
+                    let vf = "zscale=t=linear:npl=100,format=gbrpf32le,\
+                              zscale=p=bt709,tonemap=tonemap=hable:desat=0,\
+                              zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
+                    cmd.arg("-vf").arg(vf);
+                    if std::env::var("VIDEODROME_DEBUG").is_ok() {
+                        eprintln!("[hls] HDR → zscale+tonemap Hable (calidad máxima)");
+                    }
+                } else {
+                    // Sin zscale: naive downcast. `-pix_fmt
+                    // yuv420p` (que ya está más abajo en el argv)
+                    // hace el 10→8-bit sin tonemap. No metemos
+                    // `-vf` porque cualquier cadena intermedia
+                    // sin linealización produce peor resultado
+                    // que la conversión directa.
+                    eprintln!(
+                        "[hls] HDR sin `zscale` (ffmpeg sin libzimg) — reproduzco en \
+                         SDR sin tonemap (colores lavados). Para calidad HDR→SDR real: \
+                         `brew tap homebrew-ffmpeg/ffmpeg && brew install \
+                         homebrew-ffmpeg/ffmpeg/ffmpeg` (compila con libzimg)."
+                    );
+                }
+            }
+            cmd.arg("-c:v")
+                .arg("libx264")
+                .arg("-preset")
+                .arg("veryfast")
+                .arg("-crf")
+                .arg("18")
+                .arg("-profile:v")
+                .arg("high")
+                // Level 5.2 en vez de 4.1: 4.1 topa a 1080p@30 y
+                // libx264 con input 4K emite un stream "fuera de
+                // spec" que algunos players rechazan. 5.2 cubre
+                // 4K@60fps y todo H.264 razonable — WKWebView,
+                // WebView2 y WebKitGTK lo aceptan sin problema.
+                .arg("-level:v")
+                .arg("5.2")
+                .arg("-pix_fmt")
+                .arg("yuv420p")
+                .arg("-bf")
+                .arg("0")
+                // Keyframes forzados en múltiplos exactos de 4s (0,
+                // 4, 8, …). Requisito para que dos jobs distintos
+                // (uno desde 0, otro desde `-ss 1728`) corten
+                // segmentos en las mismas fronteras temporales, y
+                // por tanto sean intercambiables.
+                .arg("-force_key_frames")
+                .arg("expr:gte(t,n_forced*4)")
+                .arg("-x264-params")
+                .arg("scenecut=0:slices=1:sliced-threads=0")
+                // Reset de timestamps al mínimo tras el input
+                // (combina con `+genpts`). El `-output_ts_offset`
+                // de abajo reintroduce el tiempo absoluto en el
+                // mux de salida.
+                .arg("-avoid_negative_ts")
+                .arg("make_zero");
+        }
     }
-    cmd.arg("-c:a").arg("aac").arg("-b:a").arg(aac_bitrate);
+    // Audio: rama COPY (AAC/MP3 sin recodificar, audit §3) vs
+    // TRANSCODE AAC. Copy es cero pérdida y ahorra CPU; solo se
+    // usa para códecs que el mux MPEG-TS acepta directamente sin
+    // BSF complicados.
+    //
+    //   * AAC / MP3    → copy universalmente (todos los WebView
+    //                    decodifican, TS los acepta directo).
+    //   * AC-3 / E-AC-3 → copy SOLO si el cliente declara soporte
+    //                    (WKWebView macOS sí; WebView2 depende).
+    //                    Preserva Dolby Digital 5.1/7.1 original
+    //                    en cero pérdida.
+    //   * DTS / TrueHD → los WebView no los decodifican vía
+    //                    <video>; siempre transcode a AAC.
+    let (audio_channels, in_audio_codec) = probe_selected_audio(state, audio_idx).await;
+    let caps = current_client_capabilities();
+    let audio_copy_ok = match in_audio_codec.as_deref() {
+        Some("aac") | Some("mp3") => true,
+        Some("ac3") => caps.supports("ac3"),
+        Some("eac3") => caps.supports("eac3"),
+        _ => false,
+    };
+    if audio_copy_ok {
+        cmd.arg("-c:a").arg("copy");
+        // AAC en MPEG-TS: ffmpeg añade ADTS headers automáticamente
+        // al copiar desde MP4/MKV. AC-3 / E-AC-3 / MP3 van directo.
+        if std::env::var("VIDEODROME_DEBUG").is_ok() {
+            eprintln!(
+                "[hls] audio: -c:a copy (src={:?} channels={:?} mode={:?})",
+                in_audio_codec, audio_channels, mode
+            );
+        }
+    } else {
+        // Audit §5: AAC con bitrate escalado por canales, SIN
+        // forzar downmix. Bitrates elegidos para transparencia
+        // perceptual (~64k/canal AAC LC):
+        //   * ≤2ch o desconocido: 256k
+        //   * 3-6ch (5.1):        384k
+        //   * 7+ch (7.1):         512k
+        let aac_bitrate = aac_bitrate_for_channels(audio_channels);
+        if std::env::var("VIDEODROME_DEBUG").is_ok() {
+            eprintln!(
+                "[hls] audio: transcode aac {aac_bitrate} (src={:?} channels={:?} mode={:?})",
+                in_audio_codec, audio_channels, mode
+            );
+        }
+        cmd.arg("-c:a").arg("aac").arg("-b:a").arg(aac_bitrate);
+    }
     // Sin subs, sin data.
     cmd.arg("-sn").arg("-dn");
     // HLS output. `temp_file` es crítico para que solo veamos .ts
@@ -1640,7 +2289,7 @@ async fn spawn_hls(
         });
     }
     eprintln!(
-        "[hls] spawned ffmpeg: idx={idx} start={start_seconds}s dir={}",
+        "[hls] spawned ffmpeg: mode={mode:?} idx={idx} start={start_seconds}s dir={}",
         dir.display()
     );
     Ok(child)
@@ -1713,9 +2362,15 @@ async fn add_cors_headers(req: axum::extract::Request, next: axum::middleware::N
 async fn serve_probe(
     State(state): State<AppState>,
 ) -> Result<axum::Json<crate::ffmpeg::MediaInfo>, (StatusCode, String)> {
-    let info = ensure_probe(&state)
+    let mut info = ensure_probe(&state)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Audit §4: `direct_playable` se calcula por request con las
+    // caps del cliente EN VIGOR (no las que había cuando se pobló
+    // el `cached_probe`). Si el frontend registra caps DESPUÉS del
+    // primer probe, el próximo `/probe.json` ya refleja el cambio.
+    let caps = current_client_capabilities();
+    info.direct_playable = crate::ffmpeg::compute_direct_playable(&info, &caps);
     Ok(axum::Json(info))
 }
 

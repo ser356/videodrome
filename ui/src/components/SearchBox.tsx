@@ -1,5 +1,6 @@
 import { MagnifyingGlass } from '@phosphor-icons/react'
 import { useNavigate } from 'react-router-dom'
+import { useT } from '../lib/i18n'
 
 /**
  * Caja de búsqueda pill (glass). Enter navega a la pantalla intermedia
@@ -8,6 +9,7 @@ import { useNavigate } from 'react-router-dom'
  */
 export function SearchBox({ compact = false }: { compact?: boolean }) {
   const nav = useNavigate()
+  const t = useT()
   return (
     <form
       onSubmit={(e) => {
@@ -24,7 +26,7 @@ export function SearchBox({ compact = false }: { compact?: boolean }) {
       <input
         name="q"
         type="text"
-        placeholder="Buscar película…"
+        placeholder={t('search.boxPlaceholder')}
         className={`bg-transparent text-[13px] text-ink placeholder:text-dim focus:outline-none ${
           compact ? 'w-[200px]' : 'w-[260px]'
         }`}

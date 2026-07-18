@@ -17,6 +17,7 @@ import {
   type Recommendation,
 } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Vista `View::Recs` de la TUI adaptada al look "cabina de proyección".
@@ -35,6 +36,7 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  */
 export function Recommendations() {
   const nav = useNavigate()
+  const t = useT()
   const [minRating, setMinRating] = useState<number | null>(null)
   const [items, setItems] = useState<Recommendation[] | null>(null)
   const [hasMore, setHasMore] = useState(true)
@@ -95,7 +97,7 @@ export function Recommendations() {
   // Boot: leer minRating de Preferences y disparar primera página.
   useEffect(() => {
     if (!isTauri()) {
-      setError('Esta vista requiere la app de escritorio (Tauri).')
+      setError(t('series.tauriRequired'))
       return
     }
     let cancelled = false
@@ -195,7 +197,7 @@ export function Recommendations() {
       rec.movie.title,
       rec.movie.poster_path,
     ).catch((e) => {
-      setFlashMsg(`Error al descartar: ${String(e)}`)
+      setFlashMsg(t('recs.dismissError', { err: String(e) }))
     })
 
     // Fade-out (220ms) → eliminar localmente.
@@ -206,7 +208,7 @@ export function Recommendations() {
     )
     setSel((i) => Math.max(0, Math.min(i, (items?.length ?? 1) - 2)))
     setFlashMsg(
-      `Descartada: ${rec.movie.title}. Restaurar desde Ajustes.`,
+      t('recs.dismissedFlash', { title: rec.movie.title }),
     )
   }
 
@@ -235,21 +237,21 @@ export function Recommendations() {
   const hotkeys: Hotkey[] = [
     { key: 'j', hint: '', run: () => move(1) },
     { key: 'ArrowDown', hint: '', run: () => move(1) },
-    { key: 'k', hint: 'Mover', run: () => move(-1) },
+    { key: 'k', hint: t('hotkey.move'), run: () => move(-1) },
     { key: 'ArrowUp', hint: '', run: () => move(-1) },
     { key: 'ArrowRight', hint: '', run: () => move(1) },
     { key: 'ArrowLeft', hint: '', run: () => move(-1) },
     {
       key: 'Enter',
-      hint: 'Detalle',
+      hint: t('recs.detail'),
       run: () => items && items[sel] && setDetail(items[sel]),
     },
     {
       key: 't',
-      hint: 'Torrents',
+      hint: t('hotkey.torrents'),
       run: () => items && items[sel] && openTorrents(items[sel]),
     },
-    { key: 'r', hint: 'Recargar', run: refresh },
+    { key: 'r', hint: t('recs.reload'), run: refresh },
     { key: 'Escape', hint: '', run: () => nav('/') },
   ]
   useHotkeys(hotkeys, [items, sel, minRating], {
@@ -264,7 +266,7 @@ export function Recommendations() {
       </TopNav>
 
       <main className="mx-auto w-full max-w-[1400px] flex-1 px-8 py-8">
-        <h1 className="mb-8 text-[22px] font-semibold text-ink">Cartelera</h1>
+        <h1 className="mb-8 text-[22px] font-semibold text-ink">{t('recs.title')}</h1>
 
         {error && (
           <div className="rounded-md border border-danger/40 bg-danger/10 p-4 text-[14px] text-danger">
@@ -276,9 +278,9 @@ export function Recommendations() {
 
         {items && items.length === 0 && !loading && (
           <div className="rounded-lg border border-hairline bg-surface p-10 text-center">
-            <p className="text-[16px] text-ink">Sin resultados.</p>
+            <p className="text-[16px] text-ink">{t('recs.emptyTitle')}</p>
             <p className="mt-1 text-[13px] text-muted">
-              Baja el rating mínimo o comprueba tu historial en Letterboxd.
+              {t('recs.emptyHint')}
             </p>
           </div>
         )}
@@ -322,7 +324,7 @@ export function Recommendations() {
 
             {!hasMore && !loadingMore && (
               <p className="mt-10 text-center text-[12px] text-dim">
-                Fin de la cartelera. {items.length} recomendaciones.
+                {t('recs.endOfList', { n: items.length })}
               </p>
             )}
           </>
@@ -344,17 +346,17 @@ export function Recommendations() {
             const rec = menu.rec
             return [
               {
-                label: 'Ver detalle',
+                label: t('recs.menu.detail'),
                 hint: '↵',
                 onClick: () => setDetail(rec),
               },
               {
-                label: 'Ver torrents',
+                label: t('recs.menu.torrents'),
                 hint: 't',
                 onClick: () => openTorrents(rec),
               },
               {
-                label: 'No sugerir',
+                label: t('home.dismiss'),
                 destructive: true,
                 onClick: () => {
                   void dismissCurrent(rec)
@@ -421,7 +423,7 @@ function MovieCard({
           {src ? (
             <img
               src={src}
-              alt={`Poster de ${movie.title}`}
+              alt={movie.title}
               loading="lazy"
               draggable={false}
               className="pointer-events-none h-full w-full select-none object-cover"

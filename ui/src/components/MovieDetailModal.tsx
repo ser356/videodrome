@@ -8,6 +8,7 @@ import {
   type Recommendation,
 } from '../lib/api'
 import { useHotkeys } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Modal de detalle estilo Stremio: backdrop grande arriba con fade al
@@ -27,6 +28,7 @@ export function MovieDetailModal({
   onClose: () => void
   onOpenTorrents: (rec: Recommendation) => void
 }) {
+  const t = useT()
   const [view, setView] = useState<MovieView | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -85,7 +87,7 @@ export function MovieDetailModal({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={`Detalle de ${title}`}
+        aria-label={title}
         >
         {/* Backdrop header */}
         <div className="relative h-[260px] w-full shrink-0 overflow-hidden bg-surface-hi">
@@ -103,8 +105,8 @@ export function MovieDetailModal({
           <button
             onClick={onClose}
             className="focus-ring glass absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full text-body hover:text-ink"
-            aria-label="Cerrar"
-            title="Cerrar (Esc)"
+            aria-label={t('common.close')}
+            title={`${t('common.close')} (Esc)`}
           >
             <X size={16} weight="bold" />
           </button>
@@ -118,7 +120,7 @@ export function MovieDetailModal({
               {posterSrc && (
                 <img
                   src={posterSrc}
-                  alt={`Poster de ${title}`}
+                  alt={title}
                   className="h-full w-full object-cover"
                   onError={(e) => {
                     e.currentTarget.style.display = 'none'
@@ -189,7 +191,7 @@ export function MovieDetailModal({
               </div>
             ) : (
               <p className="mt-4 whitespace-pre-line text-[14px] leading-relaxed text-body">
-                {overview ?? 'Sin sinopsis disponible.'}
+                {overview ?? t('movieDetail.noOverview')}
               </p>
             )}
 
@@ -198,14 +200,14 @@ export function MovieDetailModal({
                 onClick={() => onOpenTorrents(rec)}
                 className="focus-ring inline-flex items-center gap-2 rounded-full bg-ink px-5 py-2.5 text-[13px] font-semibold text-canvas transition-transform hover:scale-[1.02]"
               >
-                Ver torrents
+                {t('movieDetail.viewTorrents')}
                 <CaretRight size={14} weight="bold" />
               </button>
               <button
                 onClick={onClose}
                 className="focus-ring rounded-full px-4 py-2.5 text-[13px] text-muted hover:text-ink"
               >
-                Cerrar
+                {t('common.close')}
               </button>
             </div>
           </div>

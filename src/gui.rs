@@ -1645,6 +1645,21 @@ async fn ffmpeg_available() -> Result<bool, String> {
     Ok(crate::ffmpeg::is_available())
 }
 
+/// Registra las capacidades del cliente (audit §4). El frontend
+/// llama esto al mount de `App.tsx` con lo que `canPlayType()`
+/// reporta para cada MIME representativo (h264 / hevc / hevc10 /
+/// av1 / aac / mp3 / ac3 / eac3 / opus / flac). El backend usa las
+/// caps para decidir DIRECT vs COPY vs TRANSCODE en `spawn_hls` y
+/// `compute_direct_playable`. Idempotente — llamar dos veces
+/// sobreescribe con la última.
+#[tauri::command]
+async fn set_client_capabilities(
+    caps: crate::ffmpeg::ClientCapabilities,
+) -> Result<(), String> {
+    stream::set_client_capabilities(caps);
+    Ok(())
+}
+
 #[tauri::command]
 async fn search_subtitles(
     stream_id: Option<u64>,
@@ -2091,6 +2106,7 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             start_stream_html,
             list_torrent_files,
             ffmpeg_available,
+            set_client_capabilities,
             stream_stats,
             stop_stream,
             get_resume,

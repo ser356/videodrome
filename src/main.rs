@@ -19,6 +19,8 @@ mod dismissed;
 mod ffmpeg;
 #[cfg(feature = "gui")]
 mod gui;
+#[cfg(feature = "gui")]
+mod keyframes;
 mod keychain;
 mod letterboxd;
 #[cfg(feature = "gui")]

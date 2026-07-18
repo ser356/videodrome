@@ -38,6 +38,7 @@ import { applyGlassOpacity } from '../lib/theme'
  */
 export function Settings() {
   const nav = useNavigate()
+  const t = useT()
 
   const [username, setUsername] = useState<string | null>(null)
   const [prefs, setPrefs] = useState<Preferences | null>(null)
@@ -84,7 +85,7 @@ export function Settings() {
   const onLogout = async () => {
     try {
       await logout()
-      flash('Sesión cerrada.')
+      flash(t('settings.logoutDone'))
       nav('/login')
     } catch (e) {
       setError(String(e))
@@ -94,7 +95,7 @@ export function Settings() {
   const onClearOne = async (kind: CacheEntry['kind']) => {
     try {
       await clearCache(kind)
-      flash(`Caché "${kind}" borrada.`)
+      flash(t('settings.cache.cleared', { kind }))
       refresh()
     } catch (e) {
       setError(String(e))
@@ -104,7 +105,7 @@ export function Settings() {
   const onClearAll = async () => {
     try {
       await clearCache('all')
-      flash('Todas las cachés borradas.')
+      flash(t('settings.cache.allCleared'))
       refresh()
     } catch (e) {
       setError(String(e))
@@ -116,7 +117,7 @@ export function Settings() {
     try {
       await setPreferences(next)
       setPrefs(next)
-      flash('Preferencias guardadas.')
+      flash(t('settings.saved'))
     } catch (e) {
       setError(String(e))
     } finally {
@@ -128,7 +129,7 @@ export function Settings() {
     try {
       await undismissRecommendation(id)
       setDismissed((prev) => prev?.filter((e) => e.id !== id) ?? null)
-      flash(`Restaurada: ${title}`)
+      flash(t('settings.dismissed.restored', { title }))
     } catch (e) {
       setError(String(e))
     }
@@ -144,7 +145,7 @@ export function Settings() {
   }
 
   const hotkeys: Hotkey[] = [
-    { key: 'Escape', hint: 'Volver', run: goBack, ignoreInInput: false },
+    { key: 'Escape', hint: t('common.back'), run: goBack, ignoreInInput: false },
   ]
   useHotkeys(hotkeys, [])
 
@@ -155,12 +156,12 @@ export function Settings() {
           onClick={goBack}
           className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
         >
-          Volver
+          {t('common.back')}
         </button>
       </TopNav>
 
       <main className="mx-auto flex w-full max-w-[880px] flex-1 flex-col gap-10 px-8 py-8">
-        <h1 className="text-[22px] font-semibold text-ink">Ajustes</h1>
+        <h1 className="text-[22px] font-semibold text-ink">{t('settings.title')}</h1>
 
         {error && (
           <div className="rounded-md border border-danger/40 bg-danger/10 p-4 text-[14px] text-danger">
@@ -168,12 +169,12 @@ export function Settings() {
           </div>
         )}
 
-        <Section title="Sesión">
+        <Section title={t('settings.session.section')}>
           <div className="flex items-center justify-between gap-4">
             <div>
               <div className="text-[13px] text-dim">Letterboxd</div>
               <div className="text-[15px] text-ink">
-                {username ?? <span className="text-muted">Sin sesión</span>}
+                {username ?? <span className="text-muted">{t('settings.session.noSession')}</span>}
               </div>
             </div>
             {username && (
@@ -181,13 +182,13 @@ export function Settings() {
                 onClick={onLogout}
                 className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-[13px] text-body hover:border-danger hover:text-danger"
               >
-                Cerrar sesión
+                {t('nav.logout')}
               </button>
             )}
           </div>
         </Section>
 
-        <Section title="Preferencias">
+        <Section title={t('settings.preferences.section')}>
           {prefs ? (
             <PreferencesEditor
               prefs={prefs}
@@ -195,27 +196,27 @@ export function Settings() {
               onSave={savePrefs}
             />
           ) : (
-            <div className="text-[13px] text-muted">Cargando…</div>
+            <div className="text-[13px] text-muted">{t('common.loading')}</div>
           )}
         </Section>
 
         <Section
-          title="Sugerencias descartadas"
+          title={t('settings.dismissed.section')}
           action={
             dismissed && dismissed.length > 0 ? (
               <span className="text-[11px] tabular-nums text-dim">
-                {dismissed.length}{' '}
-                {dismissed.length === 1 ? 'película' : 'películas'}
+                {dismissed.length === 1
+                  ? t('settings.dismissed.count1')
+                  : t('settings.dismissed.count', { n: dismissed.length })}
               </span>
             ) : null
           }
         >
           {dismissed === null ? (
-            <div className="text-[13px] text-muted">Cargando…</div>
+            <div className="text-[13px] text-muted">{t('common.loading')}</div>
           ) : dismissed.length === 0 ? (
             <p className="text-[13px] text-muted">
-              No has descartado ninguna recomendación. Usa clic derecho
-              sobre una peli en Cartelera → "No sugerir".
+              {t('settings.dismissed.empty')}
             </p>
           ) : (
             <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
@@ -231,14 +232,14 @@ export function Settings() {
         </Section>
 
         <Section
-          title="Caché"
+          title={t('settings.cache.section')}
           action={
             caches && caches.some((c) => c.exists) ? (
               <button
                 onClick={onClearAll}
                 className="focus-ring rounded-full border border-danger/40 px-3 py-1 text-[12px] text-danger hover:bg-danger/10"
               >
-                Borrar todo
+                {t('settings.cache.clearAll')}
               </button>
             ) : null
           }
@@ -250,10 +251,10 @@ export function Settings() {
               ))}
             </ul>
           ) : (
-            <div className="text-[13px] text-muted">Cargando…</div>
+            <div className="text-[13px] text-muted">{t('common.loading')}</div>
           )}
           <p className="mt-3 text-[11px] text-dim">
-            La sesión no se borra desde aquí. Usa "Cerrar sesión" arriba.
+            {t('settings.cache.sessionHint')}
           </p>
         </Section>
       </main>
@@ -378,8 +379,8 @@ function PreferencesEditor({
       </Field>
 
       <Field
-        label="TTL caché de streams (días)"
-        hint="Purga al arrancar: pelis no reproducidas en N días se borran del disco. Entre 1 y 365."
+        label={t('settings.cache.streamTtl')}
+        hint={t('settings.streamCacheTtlHint')}
       >
         <input
           type="number"
@@ -393,11 +394,11 @@ function PreferencesEditor({
       </Field>
 
       <Field
-        label={`Opacidad del liquid glass · ${glass}%`}
-        hint="0 = translúcido máximo (default). 100 = superficies casi sólidas, más legibles sobre grids de pósters."
+        label={`${t('settings.glass.opacity')} · ${glass}%`}
+        hint={t('settings.glass.hint')}
       >
         <div className="flex items-center gap-3">
-          <span className="text-[11px] text-dim">Cristal</span>
+          <span className="text-[11px] text-dim">{t('settings.glass.crystal')}</span>
           <input
             type="range"
             min={0}
@@ -407,13 +408,13 @@ function PreferencesEditor({
             onChange={(e) => setGlass(Number(e.target.value))}
             className="focus-ring h-2 flex-1 cursor-pointer appearance-none rounded-full bg-surface accent-accent"
           />
-          <span className="text-[11px] text-dim">Sólido</span>
+          <span className="text-[11px] text-dim">{t('settings.glass.solid')}</span>
         </div>
       </Field>
 
       <Field
-        label="Reproductor"
-        hint="Player embebido dentro de la app o VLC como app externa. El clic derecho sobre un torrent siempre ofrece VLC como escape hatch aunque el default sea embebido."
+        label={t('settings.player.default')}
+        hint={t('settings.player.hint')}
       >
         <div className="flex gap-2">
           <button
@@ -425,7 +426,7 @@ function PreferencesEditor({
                 : 'border-hairline bg-surface text-body hover:bg-surface-hi'
             }`}
           >
-            Player embebido
+            {t('settings.player.html')}
           </button>
           <button
             type="button"
@@ -436,7 +437,7 @@ function PreferencesEditor({
                 : 'border-hairline bg-surface text-body hover:bg-surface-hi'
             }`}
           >
-            VLC externo
+            {t('settings.player.vlc')}
           </button>
         </div>
       </Field>
@@ -492,23 +493,31 @@ function CacheRow({
   entry: CacheEntry
   onClear: () => void
 }) {
+  const t = useT()
+  // Traducir el label por `kind` (id estable del backend). Cae al
+  // `entry.label` original (español) si no hay clave localizada.
+  const localizedLabel = (() => {
+    const key = `settings.cache.label.${entry.kind}`
+    const raw = t(key)
+    return raw === key ? entry.label : raw
+  })()
   return (
     <li className="flex items-center gap-4 py-3">
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
-          <span className="text-[14px] text-ink">{entry.label}</span>
+          <span className="text-[14px] text-ink">{localizedLabel}</span>
           {entry.exists ? (
             <span className="text-[11px] tabular-nums text-good">
               {formatSize(entry.size_bytes)}
             </span>
           ) : (
-            <span className="text-[11px] text-dim">vacía</span>
+            <span className="text-[11px] text-dim">{t('settings.cache.empty')}</span>
           )}
         </div>
         <div className="mt-0.5 truncate text-[11px] text-dim">{entry.path}</div>
         {entry.exists && (
           <div className="mt-0.5 text-[11px] text-muted">
-            Actualizada {formatAge(entry.modified_at)}
+            {t('settings.cache.updatedAgo', { age: formatAge(entry.modified_at, t) })}
           </div>
         )}
       </div>
@@ -517,19 +526,19 @@ function CacheRow({
         onClick={onClear}
         className="focus-ring shrink-0 rounded-full border border-hairline px-3 py-1 text-[12px] text-body hover:border-danger hover:text-danger disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-hairline disabled:hover:text-body"
       >
-        Borrar
+        {t('settings.cache.clear')}
       </button>
     </li>
   )
 }
 
-function formatAge(unixSeconds: number): string {
+function formatAge(unixSeconds: number, t: (k: string, v?: Record<string, string | number>) => string): string {
   if (!unixSeconds) return ''
   const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds)
-  if (diff < 60) return `hace ${diff}s`
-  if (diff < 3600) return `hace ${Math.floor(diff / 60)}min`
-  if (diff < 86400) return `hace ${Math.floor(diff / 3600)}h`
-  return `hace ${Math.floor(diff / 86400)}d`
+  if (diff < 60) return t('time.secondsShort', { n: diff })
+  if (diff < 3600) return t('time.minutesShort', { n: Math.floor(diff / 60) })
+  if (diff < 86400) return t('time.hoursShort', { n: Math.floor(diff / 3600) })
+  return t('time.daysShort', { n: Math.floor(diff / 86400) })
 }
 
 function DismissedCard({
@@ -539,6 +548,7 @@ function DismissedCard({
   entry: DismissedEntry
   onRestore: () => void
 }) {
+  const t = useT()
   const src = tmdbPoster(entry.poster_path, 'w342')
   return (
     <li className="flex flex-col gap-2 animate-card-in">
@@ -546,7 +556,7 @@ function DismissedCard({
         {src ? (
           <img
             src={src}
-            alt={`Poster de ${entry.title}`}
+            alt={entry.title}
             loading="lazy"
             draggable={false}
             className="pointer-events-none h-full w-full select-none object-cover opacity-70"
@@ -565,7 +575,7 @@ function DismissedCard({
         onClick={onRestore}
         className="focus-ring rounded-full border border-hairline px-3 py-1 text-[11px] text-body hover:border-accent hover:text-accent"
       >
-        Restaurar
+        {t('home.restore')}
       </button>
     </li>
   )
