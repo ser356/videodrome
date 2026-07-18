@@ -35,7 +35,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::Arc;
+#[cfg(feature = "gui")]
+use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -70,9 +72,16 @@ const RESUME_FILE: &str = "resume.json";
 // Antes de que el frontend registre nada, se devuelve
 // `ClientCapabilities::safe_default()` (H.264+AAC+MP3) — la matriz
 // más restrictiva, equivalente al comportamiento pre-§4.
+//
+// Todo el bloque vive tras `#[cfg(feature = "gui")]` porque
+// `crate::ffmpeg` está gateado a esa feature. Sin gui la CLI/TUI no
+// tiene ni WebView ni caps que reportar; los helpers HLS que
+// consumen `current_client_capabilities` también son gui-only.
 
+#[cfg(feature = "gui")]
 static CLIENT_CAPABILITIES: OnceLock<RwLock<crate::ffmpeg::ClientCapabilities>> = OnceLock::new();
 
+#[cfg(feature = "gui")]
 fn client_caps_slot() -> &'static RwLock<crate::ffmpeg::ClientCapabilities> {
     CLIENT_CAPABILITIES.get_or_init(|| RwLock::new(crate::ffmpeg::ClientCapabilities::default()))
 }
@@ -81,6 +90,7 @@ fn client_caps_slot() -> &'static RwLock<crate::ffmpeg::ClientCapabilities> {
 /// llamado desde el comando Tauri `set_client_capabilities` con lo
 /// que `canPlayType()` reporta al arranque del frontend. Sobreescribe
 /// el valor anterior (una sola WebView, no hay ambigüedad).
+#[cfg(feature = "gui")]
 pub fn set_client_capabilities(caps: crate::ffmpeg::ClientCapabilities) {
     if let Ok(mut w) = client_caps_slot().write() {
         *w = caps;
@@ -91,6 +101,7 @@ pub fn set_client_capabilities(caps: crate::ffmpeg::ClientCapabilities) {
 /// (codecs vacío), devuelve el safe_default en su lugar — así los
 /// consumidores nunca ven "cero códecs" (que sería equivalente a
 /// "el cliente no puede reproducir nada").
+#[cfg(feature = "gui")]
 pub fn current_client_capabilities() -> crate::ffmpeg::ClientCapabilities {
     let caps = client_caps_slot().read().ok().map(|g| g.clone());
     match caps {
