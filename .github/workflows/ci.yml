@@ -112,3 +112,20 @@ jobs:
 
       - name: cargo test --features gui
         run: cargo test --features gui
+
+      # Fixture E-AC-3 5.1 → verificar que la argv de spawn_hls
+      # produce un segmento AAC 2ch en Windows. Chromium/WebView2
+      # rechaza AAC >2ch con `kUnsupportedConfig`, y el test unitario
+      # sólo verifica argv — este ejercita ffmpeg de verdad y valida
+      # el output con ffprobe. Ignored por defecto (`-- --ignored`)
+      # porque necesita el binario, que sólo instalamos en Windows.
+      # Si un día se activa el player embebido en Linux hay que
+      # replicar este step en un job Linux con `apt install ffmpeg`.
+      - name: Instalar ffmpeg (Windows, para test de fixture AAC 2.0)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+        shell: pwsh
+
+      - name: cargo test (fixture AAC 2.0 downmix)
+        if: runner.os == 'Windows'
+        run: cargo test --features gui windows_aac_downmix_produces_stereo -- --ignored --nocapture

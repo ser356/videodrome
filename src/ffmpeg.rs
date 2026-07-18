@@ -68,7 +68,7 @@ fn resolve_scoop_shim(p: &Path) -> PathBuf {
         if !t.starts_with("path") {
             continue;
         }
-        let Some(raw) = t.splitn(2, '=').nth(1) else {
+        let Some((_, raw)) = t.split_once('=') else {
             break;
         };
         let real = PathBuf::from(raw.trim().trim_matches('"'));

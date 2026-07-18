@@ -92,7 +92,7 @@ problemas) en [docs/WINDOWS.md](docs/WINDOWS.md).
 ### Linux · tarball CLI
 
 ```bash
-curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.3-linux-x86_64.tar.gz | tar -xz
+curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.5-linux-x86_64.tar.gz | tar -xz
 sudo mv videodrome /usr/local/bin/
 sudo apt install ffmpeg
 ```
@@ -277,10 +277,9 @@ prefieres VLC externo hay un toggle en Ajustes (`default_player`) y
 #### `keychain` (solo macOS)
 
 ```bash
-videodrome keychain import   # lee .env / entorno y guarda en Keychain
-videodrome keychain export --to ~/.config/videodrome/.env  # dump inverso
-videodrome keychain clear    # borra las credenciales del Keychain
-videodrome keychain clear    # borra las credenciales del Keychain
+videodrome keychain import
+videodrome keychain export --to ~/.config/videodrome/.env
+videodrome keychain clear
 ```
 
 Ver la sección [Configuración](#configuración) abajo.
@@ -298,16 +297,27 @@ la GUI captura por ti en el login. Si prefieres el flujo `.env`:
 
 ### `.env` (Linux/Windows)
 
-```bash
-mkdir -p ~/.config/videodrome
-```
+Ruta canónica (según SO):
+
+- Linux: `~/.config/videodrome/.env`
+- Windows: `%APPDATA%\videodrome\.env`
+
+Contenido mínimo:
 
 ```env
 LETTERBOXD_REFRESH_TOKEN=<tu_refresh_token>
 LETTERBOXD_USERNAME=<tu_username>
 ```
 
-Búsqueda: primero `~/.config/videodrome/.env`, luego `.env` en el CWD.
+Búsqueda en cascada: `<config_dir>/videodrome/.env` → `~/.config/videodrome/.env`
+(legacy en Windows) → `.env` en el CWD.
+
+Opcional para activar el provider Torznab (Jackett / Prowlarr):
+
+```env
+TORZNAB_URL=http://localhost:9117/api/v2.0/indexers/all/results/torznab
+TORZNAB_APIKEY=<tu_api_key>
+```
 
 ### Keychain (macOS)
 
@@ -315,9 +325,9 @@ En macOS las credenciales viven en el Keychain. La GUI las guarda
 automáticamente tras el login. Import manual desde `.env`:
 
 ```bash
-vim ~/.config/videodrome/.env       # variables que quieras importar
-videodrome keychain import          # vuelca al Keychain
-rm ~/.config/videodrome/.env        # opcional: limpia el .env
+vim ~/.config/videodrome/.env
+videodrome keychain import
+rm ~/.config/videodrome/.env
 ```
 
 Los items aparecen en el Keychain con `Cuenta = videodrome` y
@@ -327,58 +337,97 @@ Keychain **local** (no iCloud): en un Mac nuevo hay que volver a
 importar. La sync iCloud requiere firma con perfil Apple, que un CLI
 sin firmar no tiene.
 
+### Preferencias (GUI)
+
+La vista **Ajustes** persiste en `preferences.json` (junto al `.env`).
+Los campos editables:
+
+| Campo | Descripción | Por defecto |
+|---|---|---|
+| `default_min_rating` | Rating mínimo por defecto en Recs (0.5 – 5.0) | `4.0` |
+| `subtitle_languages` | Idiomas de subs para OpenSubtitles (ISO 639-1, coma) | `en,es` |
+| `stream_cache_ttl_days` | Días antes de purgar caché de streams | `7` |
+| `ui_language` | Idioma UI (`en`/`es`/`fr`/`de`/`it`/`pt`) | auto |
+| `default_player` | `html` (embebido) o `vlc` (externo) | `html` |
+| `quality_mode` | `auto` / `copy` (sin pérdida, fuerza copy) / `transcode` (CRF 18) | `auto` |
+| `hls_disk_budget_gb` | Presupuesto de disco de segmentos `.ts` con LRU | `8` |
+| `glass_opacity` | Opacidad de superficies "liquid glass" (0–100) | `0` |
+
 ---
 
-## Caché
+## Rutas del sistema
 
-En `~/.config/videodrome/`:
+| Uso | macOS | Linux | Windows |
+|---|---|---|---|
+| Config + `.env` + prefs + tokens | `~/Library/Application Support/videodrome/` | `~/.config/videodrome/` | `%APPDATA%\videodrome\` |
+| Caché de streams (segmentos `.ts`, resume) | `~/Library/Caches/videodrome/streams/` | `~/.cache/videodrome/streams/` | `%LOCALAPPDATA%\videodrome\streams\` |
+| Logs (`debug.log`) | `~/Library/Application Support/videodrome/` | `~/.local/share/videodrome/` | `%LOCALAPPDATA%\videodrome\` |
+
+### Ficheros de caché (config_dir)
 
 | Fichero | TTL |
 |---|---|
 | `token.json` | renovación automática al expirar |
+| `credentials.json` | persistente (fallback de Keychain) |
 | `log_entries.json` | 1 h |
 | `watchlist.json` | 1 h |
 | `tmdb_recs_cache.json` | 24 h |
 | `search_cache.json` | 24 h (hits de TMDB por texto en la vista Search) |
-| `torrent_search_cache.json` | 30 min (con torrents) · 5 min (vacío) |
-| `preferences.json` | persistente (defaults de la vista Recs, idiomas de subs) |
+| `torrent_search_cache.json` | 30 min con hits · 60 s si algún provider fallaba · 5 min si el resultado quedó vacío |
+| `preferences.json` | persistente |
 
 Desde la GUI, la vista **Ajustes** permite limpiar cada caché
-individualmente o todas de golpe.
+individualmente o todas de golpe, incluyendo la caché de streams
+(`<cache_dir>/videodrome/streams/`, con segmentos `.ts` y ficheros
+`resume.json` por infohash).
 
 ---
 
 ## Desarrollo
 
-```bash
-# CLI/TUI (sin GUI)
-cargo run -- recommend --count 5
+CLI/TUI (sin GUI):
 
-# GUI (Tauri dev, hot-reload React + backend)
+```bash
+cargo run -- recommend --count 5
+```
+
+GUI (Tauri dev, hot-reload React + backend):
+
+```bash
 cd ui && npm ci && cd ..
 cargo tauri dev --features gui
 ```
 
 Feature flag `gui` es opt-in (default `[]`) para que `cargo build`
-compile CLI-only sin webkit ni `ui/dist`. El CI valida el CLI en cada
-PR; la GUI se valida en `release.yml`.
+compile CLI-only sin webkit ni `ui/dist`. El CI valida el CLI en
+Linux/macOS/Windows y la GUI en macOS/Windows en cada PR; `release.yml`
+publica los assets al taggear.
+
+Antes de tagear, checklist local (el CI de release NO corre clippy):
+
+```bash
+cargo check
+cargo check --features gui
+cargo clippy --all-targets -- -D warnings
+cargo clippy --features gui --all-targets -- -D warnings
+cargo test --features gui
+```
 
 ---
 
 ## Reportar bugs (logs)
 
-Los `println!`/`eprintln!` se han migrado a `tracing`. En Windows con
-subsistema GUI el stderr no existe, así que la app soporta escribir el
-log a fichero:
+Todo el stderr se ha migrado a `tracing`. En Windows con subsistema
+GUI el stderr no existe, así que la app soporta escribir el log a
+fichero. Activar log al destino por defecto (ver tabla de rutas):
 
 ```bash
-# activar log al destino por defecto:
-#   macOS:   ~/Library/Application Support/videodrome/debug.log
-#   Linux:   ~/.local/share/videodrome/debug.log
-#   Windows: %LOCALAPPDATA%\videodrome\debug.log
 VIDEODROME_LOG=1 videodrome
+```
 
-# o forzar una ruta concreta:
+Forzar una ruta concreta:
+
+```bash
 VIDEODROME_LOG=/tmp/videodrome-bug.log videodrome
 ```
 
@@ -388,6 +437,10 @@ Nivel controlable con `VIDEODROME_LOG_LEVEL` (formato `EnvFilter`):
 VIDEODROME_LOG=1 VIDEODROME_LOG_LEVEL=debug videodrome
 VIDEODROME_LOG=1 VIDEODROME_LOG_LEVEL="info,videodrome::stream=debug" videodrome
 ```
+
+Targets útiles para filtrar: `video`, `probe`, `warmup`, `hls`,
+`hls-evict`, `ffmpeg-hls`, `torrent`, `resume`, `subs`, `tmdb`,
+`gui`, `eztv`, `torrentio`, `ffmpeg`, `logging`.
 
 Al abrir issue, reproduce el bug con `VIDEODROME_LOG=1` y adjunta el
 `debug.log`. La app corre 100% local — el log solo contiene rangos de
