@@ -33,6 +33,53 @@
     a:hover { text-decoration: underline; }
     small { color: var(--dim); }
     .tag { display: inline-block; margin-left: .5rem; padding: .1rem .5rem; font-size: .7rem; border: 1px solid var(--accent); color: var(--accent); border-radius: 999px; vertical-align: middle; }
+
+    /* Bloque `pre` con botón "copiar" arriba a la derecha. El wrapper
+       hereda el borde/radius del `pre` original; el `pre` se queda sin
+       marco propio para no doblar líneas. Botón siempre visible en
+       táctil, y en hover-capable aparece solo al pasar por encima
+       (menos ruido visual pero descubrible). */
+    .code {
+      position: relative;
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 10px;
+      margin: 1rem 0;
+    }
+    .code pre {
+      margin: 0;
+      padding: 1rem 3.5rem 1rem 1.25rem;
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+    }
+    .copy-btn {
+      position: absolute;
+      top: .5rem;
+      right: .5rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      background: rgba(255,255,255,.06);
+      color: var(--dim);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      cursor: pointer;
+      font: inherit;
+      transition: color .12s ease, background .12s ease, border-color .12s ease, opacity .12s ease;
+      opacity: 0;
+    }
+    .code:hover .copy-btn,
+    .code:focus-within .copy-btn,
+    .copy-btn:focus-visible { opacity: 1; }
+    @media (hover: none) { .copy-btn { opacity: 1; } }
+    .copy-btn:hover { color: var(--fg); background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.16); }
+    .copy-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .copy-btn.copied { color: var(--accent); border-color: var(--accent); background: rgba(255,128,0,.12); }
+    .copy-btn svg { width: 16px; height: 16px; display: block; }
   </style>
 </head>
 <body>
@@ -50,7 +97,7 @@
   <h2>Instalación</h2>
 
   <h3>Un solo comando · macOS y Linux</h3>
-<pre><code>curl -fsSL https://ser356.github.io/videodrome/setup.sh | bash</code></pre>
+<div class="code"><button class="copy-btn" type="button" aria-label="Copiar comando"></button><pre><code>curl -fsSL https://ser356.github.io/videodrome/setup.sh | bash</code></pre></div>
   <small>
     Detecta el sistema, instala Homebrew si falta (macOS) o descarga el
     tarball en <code>~/.local/bin</code> (Linux). En macOS resuelve VLC
@@ -60,7 +107,7 @@
   </small>
 
   <h3>Windows · one-liner (PowerShell)</h3>
-<pre><code>irm https://ser356.github.io/videodrome/install.ps1 | iex</code></pre>
+<div class="code"><button class="copy-btn" type="button" aria-label="Copiar comando"></button><pre><code>irm https://ser356.github.io/videodrome/install.ps1 | iex</code></pre></div>
   <small>
     Instala Scoop si falta, añade los buckets necesarios, descarga el
     binario prebuilt (~30 s). Trae VLC como dependencia. Requiere
@@ -70,8 +117,8 @@
   <h2>Instalación manual</h2>
 
   <h3>macOS · Homebrew Cask</h3>
-<pre><code>brew tap ser356/cask https://github.com/ser356/homebrew-cask
-brew install --cask videodrome</code></pre>
+<div class="code"><button class="copy-btn" type="button" aria-label="Copiar comando"></button><pre><code>brew tap ser356/cask https://github.com/ser356/homebrew-cask
+brew install --cask videodrome</code></pre></div>
   <small>
     Copia <code>Videodrome.app</code> a <code>/Applications</code>
     (aparece en Launchpad) y crea un symlink <code>videodrome</code> en
@@ -80,25 +127,80 @@ brew install --cask videodrome</code></pre>
   </small>
 
   <h3>Linux · tarball</h3>
-<pre><code>curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.6-linux-x86_64.tar.gz | tar -xz
+<div class="code"><button class="copy-btn" type="button" aria-label="Copiar comando"></button><pre><code>curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.1.6-linux-x86_64.tar.gz | tar -xz
 sudo mv videodrome /usr/local/bin/
-sudo apt install vlc</code></pre>
+sudo apt install vlc</code></pre></div>
   <small>
     Linux solo tiene CLI/TUI por ahora (sin bundle GUI).
   </small>
 
   <h2>Uso</h2>
 
-  <pre><code># GUI: doble click en Launchpad / Start Menu
+<div class="code"><button class="copy-btn" type="button" aria-label="Copiar comando"></button><pre><code># GUI: doble click en Launchpad / Start Menu
 
 # CLI (mismo binario):
 videodrome recommend --count 30 --min-rating 4.0
 videodrome torrents "Alien" --year 1979
-videodrome tui                        # TUI en terminal</code></pre>
+videodrome tui                        # TUI en terminal</code></pre></div>
 
   <p>
     La primera vez la GUI te pide login de Letterboxd. Todo lo demás
     (TMDB, OpenSubtitles) va bakeado en el binario.
   </p>
+
+  <script>
+    // Icono copia (default) + tick (ok). Se inyectan como SVG inline
+    // para no depender de librerías de iconos. `stroke: currentColor`
+    // deja que el CSS de `.copy-btn.copied` los tiña de naranja.
+    const ICON_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>';
+    const ICON_OK   = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+
+    // Fallback para navegadores viejos sin `navigator.clipboard`
+    // (o para file:// donde el API está bloqueado): pintamos el texto
+    // en un `<textarea>` off-screen, select + execCommand('copy').
+    // No es bonito pero funciona hasta en Safari 12.
+    function legacyCopy(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (_) { /* silent */ }
+      document.body.removeChild(ta);
+    }
+
+    async function copyBlock(btn) {
+      const block = btn.closest('.code');
+      const code = block && block.querySelector('code');
+      if (!code) return;
+      const text = code.innerText.replace(/\u00A0/g, ' ');
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          legacyCopy(text);
+        }
+        btn.classList.add('copied');
+        btn.innerHTML = ICON_OK;
+        btn.setAttribute('aria-label', 'Copiado');
+        clearTimeout(btn._resetTimer);
+        btn._resetTimer = setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerHTML = ICON_COPY;
+          btn.setAttribute('aria-label', 'Copiar comando');
+        }, 1400);
+      } catch (_) {
+        // Silencio: si el user no da permiso, mantenemos el icono
+        // default y no perturbamos el flujo (siempre puede seleccionar
+        // a mano el texto).
+      }
+    }
+
+    for (const btn of document.querySelectorAll('.copy-btn')) {
+      btn.innerHTML = ICON_COPY;
+      btn.addEventListener('click', () => copyBlock(btn));
+    }
+  </script>
 </body>
 </html>
