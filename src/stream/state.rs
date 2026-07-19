@@ -7,9 +7,9 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 #[cfg(feature = "gui")]
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 #[cfg(feature = "gui")]
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 #[cfg(feature = "gui")]
 use std::sync::Mutex as StdMutex;

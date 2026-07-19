@@ -15,7 +15,9 @@ use tokio::io::{AsyncSeekExt, SeekFrom};
 use tokio_util::sync::CancellationToken;
 
 use super::super::state::{current_client_capabilities, AppState, HlsJob, HlsMode, HLS_SEG_SECS};
-use super::argv::{audio_transcode_argv, probe_is_hdr_video, probe_selected_audio, probe_video_height};
+use super::argv::{
+    audio_transcode_argv, probe_is_hdr_video, probe_selected_audio, probe_video_height,
+};
 
 #[allow(unused_imports)]
 use crate::winutil::HideConsoleExt;

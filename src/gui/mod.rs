@@ -56,9 +56,9 @@ use crate::torrents::{
 
 pub(super) mod cache;
 use self::cache::{
-    config_dir, current_ui_lang, load_search_cache, load_torrent_cache, normalize_query,
-    now_unix, save_search_cache, torrent_cache_get_fresh, torrent_cache_key,
-    torrent_cache_key_with_ep, torrent_cache_put,
+    config_dir, current_ui_lang, load_search_cache, load_torrent_cache, normalize_query, now_unix,
+    save_search_cache, torrent_cache_get_fresh, torrent_cache_key, torrent_cache_key_with_ep,
+    torrent_cache_put,
 };
 
 const SEARCH_CACHE_FILE: &str = "search_cache.json";

@@ -759,7 +759,9 @@ pub(super) async fn serve_embedded_subtitle(
     let mut resp = Response::new(body.into());
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        "text/vtt; charset=utf-8".parse().expect("static mime type literal — always valid"),
+        "text/vtt; charset=utf-8"
+            .parse()
+            .expect("static mime type literal — always valid"),
     );
     Ok(resp)
 }

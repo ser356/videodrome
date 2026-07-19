@@ -548,7 +548,13 @@ impl<'a> TmdbClient<'a> {
                 // servir cache aunque haya expirado (TTL infinito en
                 // modo desespero) — el user prefiere resultados viejos
                 // a un error.
-                if let Some(cached) = self.search_cache.lock().expect("mutex poisoned").get(&key).cloned() {
+                if let Some(cached) = self
+                    .search_cache
+                    .lock()
+                    .expect("mutex poisoned")
+                    .get(&key)
+                    .cloned()
+                {
                     return Ok(cached.value);
                 }
                 return Err(anyhow::Error::new(e).context(format!(
@@ -558,7 +564,13 @@ impl<'a> TmdbClient<'a> {
         };
         if !resp.status().is_success() {
             // 4xx/5xx: mismo fallback, sirve cache aunque expire.
-            if let Some(cached) = self.search_cache.lock().expect("mutex poisoned").get(&key).cloned() {
+            if let Some(cached) = self
+                .search_cache
+                .lock()
+                .expect("mutex poisoned")
+                .get(&key)
+                .cloned()
+            {
                 return Ok(cached.value);
             }
             anyhow::bail!("TMDB /search/movie devolvi\u{f3} {}", resp.status());
@@ -776,7 +788,13 @@ impl<'a> TmdbClient<'a> {
                 // arriesgamos casi nada dando algo viejo.
                 #[cfg(feature = "gui")]
                 {
-                    if let Some(stale) = self.details_cache.lock().expect("mutex poisoned").get(&tmdb_id).cloned() {
+                    if let Some(stale) = self
+                        .details_cache
+                        .lock()
+                        .expect("mutex poisoned")
+                        .get(&tmdb_id)
+                        .cloned()
+                    {
                         return Ok(Some(stale.value));
                     }
                 }
@@ -991,7 +1009,13 @@ impl<'a> TmdbClient<'a> {
             Ok(None) => Ok(None),
             Err(err) => {
                 // 1) Sirve stale cache si lo hay.
-                if let Some(stale) = self.view_cache.lock().expect("mutex poisoned").get(&tmdb_id).cloned() {
+                if let Some(stale) = self
+                    .view_cache
+                    .lock()
+                    .expect("mutex poisoned")
+                    .get(&tmdb_id)
+                    .cloned()
+                {
                     return Ok(Some(stale.value));
                 }
                 // 2) Cinemeta fallback: solo posible si tenemos imdb_id
@@ -1406,7 +1430,13 @@ impl<'a> TmdbClient<'a> {
         }
         if !resp.status().is_success() {
             // Servir stale si lo hay, igual que las otras APIs.
-            if let Some(stale) = self.season_cache.lock().expect("mutex poisoned").get(&key).cloned() {
+            if let Some(stale) = self
+                .season_cache
+                .lock()
+                .expect("mutex poisoned")
+                .get(&key)
+                .cloned()
+            {
                 return Ok(stale.value);
             }
             anyhow::bail!(

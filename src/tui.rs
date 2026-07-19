@@ -772,7 +772,10 @@ async fn run_app(
                                     stream_tx = Some(tx);
                                     stream_rx = Some(rx);
                                 }
-                                let tx = stream_tx.as_ref().expect("stream_tx just assigned in block above").clone();
+                                let tx = stream_tx
+                                    .as_ref()
+                                    .expect("stream_tx just assigned in block above")
+                                    .clone();
                                 app.stream_msg = Some(format!("Iniciando stream: {}…", t.title));
                                 tokio::spawn(async move {
                                     let _ = tx.send(StreamEvent::Starting(

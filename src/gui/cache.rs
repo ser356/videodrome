@@ -1,12 +1,11 @@
 use super::{
-    CachedSearch, CachedTorrentSearch, TorrentSearchResult,
-    SEARCH_CACHE_FILE, TORRENT_CACHE_FILE,
-    TORRENT_CACHE_TTL_HITS, TORRENT_CACHE_TTL_EMPTY, TORRENT_CACHE_TTL_PARTIAL_FAIL,
+    CachedSearch, CachedTorrentSearch, TorrentSearchResult, SEARCH_CACHE_FILE, TORRENT_CACHE_FILE,
+    TORRENT_CACHE_TTL_EMPTY, TORRENT_CACHE_TTL_HITS, TORRENT_CACHE_TTL_PARTIAL_FAIL,
 };
+use anyhow::Context;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::Context;
 
 pub(super) fn now_unix() -> u64 {
     SystemTime::now()
