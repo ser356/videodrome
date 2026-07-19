@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' https://image.tmdb.org data:; connect-src 'self' https://api.themoviedb.org https://api.letterboxd.com https://api.opensubtitles.com http://127.0.0.1:* ipc: http://ipc.localhost; media-src 'self' http://127.0.0.1:* blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "csp": "default-src 'self'; img-src 'self' https://image.tmdb.org https://images.metahub.space data:; connect-src 'self' https://api.themoviedb.org https://api.letterboxd.com https://api.opensubtitles.com http://127.0.0.1:* ipc: http://ipc.localhost; media-src 'self' http://127.0.0.1:* blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
     }
   },
   "bundle": {

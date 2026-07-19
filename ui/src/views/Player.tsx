@@ -192,6 +192,14 @@ export function Player() {
   // fondo negro plano.
   const [backdropUrl, setBackdropUrl] = useState<string | null>(null)
 
+  // Logo art (PNG con transparencia del rótulo oficial de la peli).
+  // Servido por Metahub — el mismo mirror que usa Stremio para su
+  // "loading screen con el título estilizado". URL construida por
+  // imdb_id; 404 si no hay logo → el StremioLoader detecta el
+  // `onError` y cae al `<h1>` de texto plano. `null` cuando aún no
+  // tenemos imdb_id o el user vino por búsqueda directa sin TMDB.
+  const [logoUrl, setLogoUrl] = useState<string | null>(null)
+
   // Refs "volátiles" para valores que cambian a alta frecuencia
   // (`currentTime`, cada `timeupdate` ≈ 250ms) o cuyo estado
   // necesita ser leído por handlers que NO deben re-suscribirse en
@@ -418,6 +426,22 @@ export function Player() {
     // resto del state (que puede pasar en cada re-render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.tmdbId])
+
+  // Logo art via Metahub (el mismo CDN que usa Stremio). URL directa
+  // por imdb_id, sin API key: si el título tiene "HD Movie Logo" en
+  // Fanart.tv, Metahub lo sirve; si no, 404 y el `<img onError>` del
+  // loader cae al `<h1>` de texto. Series usan el imdb_id del show
+  // (parent), que también funciona. Normalizamos el prefijo `tt`
+  // por si algún caller nos manda el id pelado.
+  useEffect(() => {
+    const raw = state?.imdbId
+    if (!raw) {
+      setLogoUrl(null)
+      return
+    }
+    const id = raw.startsWith('tt') ? raw : `tt${raw}`
+    setLogoUrl(`https://images.metahub.space/logo/medium/${id}/img`)
+  }, [state?.imdbId])
 
   // Subtítulos: modelo Stremio-like. Al arrancar el player pedimos
   // TODOS los subs de OpenSubtitles para este imdb_id (sin filtro de
@@ -1345,6 +1369,7 @@ export function Player() {
         <StremioLoader
           title={state.title}
           backdropUrl={backdropUrl}
+          logoUrl={logoUrl}
           stats={!hasStartedPlayback && !seeking && !audioSwitching ? stats : null}
         />
       )}
@@ -2194,10 +2219,12 @@ function SubsPanel({
 function StremioLoader({
   title,
   backdropUrl,
+  logoUrl,
   stats,
 }: {
   title: string
   backdropUrl: string | null
+  logoUrl: string | null
   stats?: StreamStats | null
 }) {
   const bytesPerSec = stats ? stats.down_mbps * 1024 * 1024 : 0
@@ -2205,6 +2232,16 @@ function StremioLoader({
   const pct = hasProgress
     ? (stats!.progress_bytes / stats!.total_bytes) * 100
     : null
+  // Metahub sirve el rótulo oficial de la peli (mismo CDN que
+  // Stremio); 404 cuando no hay logo para ese imdb_id. En ese caso
+  // — o si no tenemos imdb_id de partida — caemos al favicon de la
+  // app + título en texto pequeño debajo, para que la pantalla siga
+  // siendo icónica y no un `<h1>` grande solo.
+  const [logoFailed, setLogoFailed] = useState(false)
+  useEffect(() => {
+    setLogoFailed(false)
+  }, [logoUrl])
+  const showLogo = logoUrl != null && !logoFailed
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden bg-black">
       {backdropUrl && (
@@ -2225,9 +2262,25 @@ function StremioLoader({
         }}
       />
       <div className="relative flex h-full w-full flex-col items-center justify-center gap-6 px-8 text-center">
-        <h1 className="text-balance text-[26px] font-medium tracking-tight text-ink drop-shadow-[0_2px_8px_rgba(0,0,0,0.9)] sm:text-[32px]">
-          {title}
-        </h1>
+        {showLogo ? (
+          <img
+            src={logoUrl!}
+            alt={title}
+            onError={() => setLogoFailed(true)}
+            className="max-h-[28vh] max-w-[60vw] object-contain drop-shadow-[0_4px_16px_rgba(0,0,0,0.9)]"
+          />
+        ) : (
+          <div className="flex flex-col items-center gap-4">
+            <img
+              src="/favicon.svg"
+              alt="Videodrome"
+              className="h-20 w-20 opacity-90 drop-shadow-[0_4px_16px_rgba(0,0,0,0.9)] sm:h-24 sm:w-24"
+            />
+            <h1 className="text-balance text-[20px] font-medium tracking-tight text-ink drop-shadow-[0_2px_8px_rgba(0,0,0,0.9)] sm:text-[24px]">
+              {title}
+            </h1>
+          </div>
+        )}
         <div className="flex items-center gap-3 text-[12px] uppercase tracking-[0.18em] text-dim drop-shadow-[0_1px_4px_rgba(0,0,0,0.9)]">
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
           <span>
