@@ -1,3 +1,9 @@
+// POLÍTICA DE MUTEX: Si un Mutex<T> está envenenado significa que un hilo
+// entró en pánico mientras lo sostenía — invariante del proceso rota. En un
+// proceso de un solo WebView (Tauri) la única recuperación sensata es propagar
+// el pánico. Por eso todos los `lock()` usan `.expect("mutex poisoned")` en
+// lugar de `.unwrap()`: semánticamente equivalentes pero el mensaje documenta
+// el invariante. Ver también `tmdb.rs` con la misma política.
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::path::PathBuf;
@@ -145,7 +151,7 @@ impl<'a> LetterboxdClient<'a> {
     }
 
     async fn get_member_id(&self) -> Result<String> {
-        if let Some(id) = self.member_id.lock().unwrap().clone() {
+        if let Some(id) = self.member_id.lock().expect("mutex poisoned").clone() {
             return Ok(id);
         }
 
@@ -164,7 +170,7 @@ impl<'a> LetterboxdClient<'a> {
         }
 
         let me: MeResponse = resp.json().await.context("Error al parsear /me")?;
-        *self.member_id.lock().unwrap() = Some(me.member.id.clone());
+        *self.member_id.lock().expect("mutex poisoned") = Some(me.member.id.clone());
         Ok(me.member.id)
     }
 

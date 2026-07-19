@@ -5940,6 +5940,7 @@ dependencies = [
  "futures",
  "indicatif",
  "keyring",
+ "libc",
  "librqbit",
  "quick-xml 0.37.5",
  "ratatui",

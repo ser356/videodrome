@@ -35,7 +35,7 @@ impl Progress for CliProgress {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
                 ProgressStyle::with_template("{spinner:.cyan}  {msg}")
-                    .unwrap()
+                    .expect("indicatif template is a hardcoded literal — always valid")
                     .tick_strings(TICK_STRINGS),
             );
             pb
@@ -45,7 +45,7 @@ impl Progress for CliProgress {
                 ProgressStyle::with_template(
                     "{spinner:.cyan}  {msg}  {bar:28.cyan/white.dim}  {pos}/{len}",
                 )
-                .unwrap()
+                .expect("indicatif template is a hardcoded literal — always valid")
                 .tick_strings(TICK_STRINGS),
             );
             pb

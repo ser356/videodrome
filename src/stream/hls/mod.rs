@@ -20,6 +20,7 @@ pub(super) mod argv;
 pub(super) mod evict;
 pub(super) mod grid;
 mod job;
+mod throttle;
 
 /// Parsea `seg-NNNNN.ts` → `NNNNN` como u64. `None` si el nombre no
 /// respeta el formato exacto (validación fuerte, path traversal-safe).

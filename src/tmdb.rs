@@ -1,3 +1,9 @@
+// POLÍTICA DE MUTEX: Si un Mutex<T> está envenenado significa que un hilo
+// entró en pánico mientras lo sostenía — invariante del proceso rota. En un
+// proceso de un solo WebView (Tauri) la única recuperación sensata es propagar
+// el pánico. Por eso todos los `lock()` usan `.expect("mutex poisoned")` en
+// lugar de `.unwrap()`: semánticamente equivalentes pero el mensaje documenta
+// el invariante. Ver también `letterboxd.rs` con la misma política.
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -324,7 +330,7 @@ impl<'a> TmdbClient<'a> {
     /// Recomendaciones de TMDB para una película, cacheadas en disco (TTL 24h)
     /// para no repetir la misma consulta en ejecuciones sucesivas.
     pub async fn get_recommendations(&self, tmdb_id: u64) -> Result<Vec<TmdbMovie>> {
-        if let Some(cached) = self.cache.lock().unwrap().get(&tmdb_id) {
+        if let Some(cached) = self.cache.lock().expect("mutex poisoned").get(&tmdb_id) {
             if now_unix().saturating_sub(cached.timestamp) < RECS_CACHE_TTL_SECS {
                 return Ok(cached.movies.clone());
             }
@@ -365,7 +371,7 @@ impl<'a> TmdbClient<'a> {
             .await
             .context("Error al parsear respuesta de TMDB")?;
 
-        self.cache.lock().unwrap().insert(
+        self.cache.lock().expect("mutex poisoned").insert(
             tmdb_id,
             CachedRecs {
                 timestamp: now_unix(),
@@ -378,7 +384,7 @@ impl<'a> TmdbClient<'a> {
 
     /// Persiste en disco la caché de recomendaciones acumulada en esta sesión.
     pub fn save_cache(&self) {
-        save_cache(&self.cache.lock().unwrap());
+        save_cache(&self.cache.lock().expect("mutex poisoned"));
     }
 
     /// Resuelve un IMDb ID a título + año usando el endpoint `/find`.
@@ -493,7 +499,7 @@ impl<'a> TmdbClient<'a> {
         // extra del director.
         {
             let key = q.to_lowercase();
-            let mut guard = self.search_cache.lock().unwrap();
+            let mut guard = self.search_cache.lock().expect("mutex poisoned");
             guard.insert(
                 key,
                 Timestamped {
@@ -542,7 +548,7 @@ impl<'a> TmdbClient<'a> {
                 // servir cache aunque haya expirado (TTL infinito en
                 // modo desespero) — el user prefiere resultados viejos
                 // a un error.
-                if let Some(cached) = self.search_cache.lock().unwrap().get(&key).cloned() {
+                if let Some(cached) = self.search_cache.lock().expect("mutex poisoned").get(&key).cloned() {
                     return Ok(cached.value);
                 }
                 return Err(anyhow::Error::new(e).context(format!(
@@ -552,7 +558,7 @@ impl<'a> TmdbClient<'a> {
         };
         if !resp.status().is_success() {
             // 4xx/5xx: mismo fallback, sirve cache aunque expire.
-            if let Some(cached) = self.search_cache.lock().unwrap().get(&key).cloned() {
+            if let Some(cached) = self.search_cache.lock().expect("mutex poisoned").get(&key).cloned() {
                 return Ok(cached.value);
             }
             anyhow::bail!("TMDB /search/movie devolvi\u{f3} {}", resp.status());
@@ -567,7 +573,7 @@ impl<'a> TmdbClient<'a> {
         // siguiente vez (por si el user tecleó mal o TMDB indexa la
         // peli después).
         if !body.results.is_empty() {
-            let mut guard = self.search_cache.lock().unwrap();
+            let mut guard = self.search_cache.lock().expect("mutex poisoned");
             guard.insert(
                 key,
                 Timestamped {
@@ -588,7 +594,7 @@ impl<'a> TmdbClient<'a> {
     fn cached_search(&self, query: &str) -> Option<Vec<TmdbMovie>> {
         let key = query.trim().to_lowercase();
         get_fresh(
-            &self.search_cache.lock().unwrap(),
+            &self.search_cache.lock().expect("mutex poisoned"),
             &key,
             LONG_CACHE_TTL_SECS,
         )
@@ -739,7 +745,7 @@ impl<'a> TmdbClient<'a> {
         #[cfg(feature = "gui")]
         {
             if let Some(cached) = get_fresh(
-                &self.details_cache.lock().unwrap(),
+                &self.details_cache.lock().expect("mutex poisoned"),
                 &tmdb_id,
                 LONG_CACHE_TTL_SECS,
             ) {
@@ -751,7 +757,7 @@ impl<'a> TmdbClient<'a> {
             Ok(Some(details)) => {
                 #[cfg(feature = "gui")]
                 {
-                    let mut guard = self.details_cache.lock().unwrap();
+                    let mut guard = self.details_cache.lock().expect("mutex poisoned");
                     guard.insert(
                         tmdb_id,
                         Timestamped {
@@ -770,7 +776,7 @@ impl<'a> TmdbClient<'a> {
                 // arriesgamos casi nada dando algo viejo.
                 #[cfg(feature = "gui")]
                 {
-                    if let Some(stale) = self.details_cache.lock().unwrap().get(&tmdb_id).cloned() {
+                    if let Some(stale) = self.details_cache.lock().expect("mutex poisoned").get(&tmdb_id).cloned() {
                         return Ok(Some(stale.value));
                     }
                 }
@@ -962,7 +968,7 @@ impl<'a> TmdbClient<'a> {
     pub async fn get_movie_view(&self, tmdb_id: u64) -> Result<Option<MovieView>> {
         // Fast path: cache fresco.
         if let Some(cached) = get_fresh(
-            &self.view_cache.lock().unwrap(),
+            &self.view_cache.lock().expect("mutex poisoned"),
             &tmdb_id,
             LONG_CACHE_TTL_SECS,
         ) {
@@ -971,7 +977,7 @@ impl<'a> TmdbClient<'a> {
 
         match self.fetch_movie_view_uncached(tmdb_id).await {
             Ok(Some(view)) => {
-                let mut guard = self.view_cache.lock().unwrap();
+                let mut guard = self.view_cache.lock().expect("mutex poisoned");
                 guard.insert(
                     tmdb_id,
                     Timestamped {
@@ -985,7 +991,7 @@ impl<'a> TmdbClient<'a> {
             Ok(None) => Ok(None),
             Err(err) => {
                 // 1) Sirve stale cache si lo hay.
-                if let Some(stale) = self.view_cache.lock().unwrap().get(&tmdb_id).cloned() {
+                if let Some(stale) = self.view_cache.lock().expect("mutex poisoned").get(&tmdb_id).cloned() {
                     return Ok(Some(stale.value));
                 }
                 // 2) Cinemeta fallback: solo posible si tenemos imdb_id
@@ -993,7 +999,7 @@ impl<'a> TmdbClient<'a> {
                 let imdb = self
                     .details_cache
                     .lock()
-                    .unwrap()
+                    .expect("mutex poisoned")
                     .get(&tmdb_id)
                     .and_then(|d| d.value.imdb_id.clone());
                 if let Some(imdb_id) = imdb {
@@ -1204,7 +1210,7 @@ impl<'a> TmdbClient<'a> {
     #[allow(dead_code)]
     pub async fn get_series_details(&self, tmdb_id: u64) -> Result<Option<SeriesDetails>> {
         if let Some(cached) = get_fresh(
-            &self.series_details_cache.lock().unwrap(),
+            &self.series_details_cache.lock().expect("mutex poisoned"),
             &tmdb_id,
             LONG_CACHE_TTL_SECS,
         ) {
@@ -1212,7 +1218,7 @@ impl<'a> TmdbClient<'a> {
         }
         match self.fetch_series_details_uncached(tmdb_id).await {
             Ok(Some(details)) => {
-                let mut guard = self.series_details_cache.lock().unwrap();
+                let mut guard = self.series_details_cache.lock().expect("mutex poisoned");
                 guard.insert(
                     tmdb_id,
                     Timestamped {
@@ -1228,7 +1234,7 @@ impl<'a> TmdbClient<'a> {
                 if let Some(stale) = self
                     .series_details_cache
                     .lock()
-                    .unwrap()
+                    .expect("mutex poisoned")
                     .get(&tmdb_id)
                     .cloned()
                 {
@@ -1354,7 +1360,7 @@ impl<'a> TmdbClient<'a> {
     pub async fn get_season(&self, tmdb_id: u64, season: u16) -> Result<Vec<SeriesEpisode>> {
         let key = format!("{tmdb_id}:{season}");
         if let Some(cached) = get_fresh(
-            &self.season_cache.lock().unwrap(),
+            &self.season_cache.lock().expect("mutex poisoned"),
             &key,
             LONG_CACHE_TTL_SECS,
         ) {
@@ -1400,7 +1406,7 @@ impl<'a> TmdbClient<'a> {
         }
         if !resp.status().is_success() {
             // Servir stale si lo hay, igual que las otras APIs.
-            if let Some(stale) = self.season_cache.lock().unwrap().get(&key).cloned() {
+            if let Some(stale) = self.season_cache.lock().expect("mutex poisoned").get(&key).cloned() {
                 return Ok(stale.value);
             }
             anyhow::bail!(
@@ -1427,7 +1433,7 @@ impl<'a> TmdbClient<'a> {
             })
             .collect();
 
-        let mut guard = self.season_cache.lock().unwrap();
+        let mut guard = self.season_cache.lock().expect("mutex poisoned");
         guard.insert(
             key,
             Timestamped {

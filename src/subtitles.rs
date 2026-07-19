@@ -299,7 +299,7 @@ pub async fn search(
 ///     idiomas no listados van al final).
 ///
 /// Se extrae del cuerpo de `search()` para ser testeable sin red.
-fn rank_subtitles(subs: &mut Vec<Subtitle>, languages: &str) {
+fn rank_subtitles(subs: &mut [Subtitle], languages: &str) {
     subs.sort_by_key(|s| !s.from_trusted);
     if !languages.is_empty() {
         let order: Vec<&str> = languages.split(',').map(str::trim).collect();

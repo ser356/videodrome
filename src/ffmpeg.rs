@@ -259,6 +259,152 @@ fn load_ffmpeg_filters() -> std::collections::HashSet<String> {
     set
 }
 
+// ── Hardware encoder probe (audit "sparse+throttle+hwaccel" §4) ────────────
+//
+// Objetivo: reducir CPU en el transcode a fracción de un core (~40 %
+// vs ~1000 % libx264 puro software en el caso HEVC 1080p de la
+// evidencia), moviendo encode y decode al hardware del sistema.
+//
+// El chequeo no puede basarse solo en `-encoders` (ffmpeg puede tener
+// el encoder COMPILADO pero fallar por drivers ausentes, VRAM
+// agotada, o kernel/GPU incompatible). Probamos con un encode real
+// mínimo (`testsrc2` de 0.2 s a 320×240) y nos quedamos con el
+// primero que retorne exit 0.
+//
+// El orden de candidatos por SO es deliberado:
+//   - macOS: `h264_videotoolbox` (único razonable, Apple Silicon).
+//   - Windows: `h264_nvenc` → `h264_qsv` → `h264_amf` (calidad y
+//     estabilidad histórica descendente).
+//   - Linux (futuro): `h264_vaapi` — hueco reservado, no implementado.
+//
+// Kill-switch: `VIDEODROME_NO_HWACCEL=1` fuerza `None` → libx264. Es
+// el escape ante drivers caprichosos; se comprueba ANTES del primer
+// probe para que aparezca en el log del user desde el arranque.
+
+/// Encoder de vídeo aceleración por hardware detectado en el sistema.
+/// El nombre en enum expresa el nombre de encoder de ffmpeg
+/// (`h264_videotoolbox`, `h264_nvenc`, …) mapeado en `ffmpeg_name()`.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HwEncoder {
+    VideoToolbox,
+    Nvenc,
+    Qsv,
+    Amf,
+}
+
+impl HwEncoder {
+    /// Nombre del encoder tal como lo espera ffmpeg en `-c:v`.
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn ffmpeg_name(self) -> &'static str {
+        match self {
+            HwEncoder::VideoToolbox => "h264_videotoolbox",
+            HwEncoder::Nvenc => "h264_nvenc",
+            HwEncoder::Qsv => "h264_qsv",
+            HwEncoder::Amf => "h264_amf",
+        }
+    }
+}
+
+static HW_ENCODER: std::sync::OnceLock<Option<HwEncoder>> = std::sync::OnceLock::new();
+/// Marcado por `mark_hw_degraded()` cuando un encode hw falla en
+/// runtime (driver caprichoso, VRAM agotada). El resto de la sesión
+/// devuelve `None` desde `hw_encoder()` sin re-probar. Se resetea al
+/// reiniciar el proceso — un driver que se recupera con reboot no
+/// necesita chequeo perpetuo.
+static HW_DEGRADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Devuelve el encoder hw disponible tras probe (o `None` para caer
+/// a libx264). Cacheado en `OnceLock` tras el primer uso.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub fn hw_encoder() -> Option<HwEncoder> {
+    if HW_DEGRADED.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    *HW_ENCODER.get_or_init(detect_hw_encoder)
+}
+
+/// Marca el encoder hw como degradado por el resto de la sesión.
+/// Llamado por `spawn_hls` cuando ffmpeg con hw sale con error en la
+/// ventana de 500 ms — reintenta UNA vez con libx264 y a partir de
+/// ahí toda la sesión va software. Motivo: drivers hw fallan de
+/// formas creativas y por-título-que-toca (formato exótico, VRAM
+/// agotada, etc.); mejor un fallback en runtime que un test previo
+/// que se pase pero luego un vídeo real reviente.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub fn mark_hw_degraded() {
+    HW_DEGRADED.store(true, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!(
+        target: "ffmpeg",
+        "hw encoder marcado como degradado; resto de la sesión usará libx264"
+    );
+}
+
+fn detect_hw_encoder() -> Option<HwEncoder> {
+    if std::env::var("VIDEODROME_NO_HWACCEL")
+        .ok()
+        .filter(|v| !v.is_empty() && v != "0")
+        .is_some()
+    {
+        tracing::info!(
+            target: "ffmpeg",
+            "hw encoder: none (VIDEODROME_NO_HWACCEL activo, forzando libx264)"
+        );
+        return None;
+    }
+    let Some(bin) = ffmpeg_binary() else {
+        return None;
+    };
+    let candidates: &[HwEncoder] = if cfg!(target_os = "macos") {
+        &[HwEncoder::VideoToolbox]
+    } else if cfg!(windows) {
+        &[HwEncoder::Nvenc, HwEncoder::Qsv, HwEncoder::Amf]
+    } else {
+        // Linux: `h264_vaapi` es el candidato razonable pero
+        // requiere setup adicional (grupo `render`, `/dev/dri`).
+        // Hueco reservado — cuando llegue el soporte de Linux GUI
+        // se añade aquí y no se toca ningún otro sitio.
+        &[]
+    };
+    for &cand in candidates {
+        if probe_hw_encoder(&bin, cand.ffmpeg_name()) {
+            tracing::info!(target: "ffmpeg", encoder = cand.ffmpeg_name(), "hw encoder: {}", cand.ffmpeg_name());
+            return Some(cand);
+        }
+    }
+    tracing::info!(target: "ffmpeg", "hw encoder: none (libx264)");
+    None
+}
+
+fn probe_hw_encoder(bin: &Path, encoder: &str) -> bool {
+    // Encode de 0.2 s de testsrc2 320×240 → null. Un encoder sano
+    // termina en <100 ms; uno con driver roto exita con error
+    // inmediato. Sin timeout: seguimos el mismo patrón que
+    // `load_ffmpeg_filters` — si ffmpeg cuelga en un probe de
+    // 0.2 s, el user tiene un problema que necesita atención
+    // manual (driver corrupto).
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=duration=0.2:size=320x240:rate=30",
+        "-c:v",
+        encoder,
+        "-f",
+        "null",
+        "-",
+    ]);
+    cmd.hide_console();
+    match cmd.output() {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
+}
+
 // ── ffprobe ────────────────────────────────────────────────────────────────
 
 /// Info que ffprobe devuelve sobre un stream. Solo mapeamos los campos

@@ -15,7 +15,7 @@ use tokio::io::{AsyncSeekExt, SeekFrom};
 use tokio_util::sync::CancellationToken;
 
 use super::super::state::{current_client_capabilities, AppState, HlsJob, HlsMode, HLS_SEG_SECS};
-use super::argv::{audio_transcode_argv, probe_is_hdr_video, probe_selected_audio};
+use super::argv::{audio_transcode_argv, probe_is_hdr_video, probe_selected_audio, probe_video_height};
 
 #[allow(unused_imports)]
 use crate::winutil::HideConsoleExt;
@@ -51,6 +51,14 @@ pub(super) async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (St
         // activos. Si sobrevive al respawn, el nuevo ffmpeg se lleva
         // la mitad de la velocidad efectiva.
         if let Some(token) = old.warmup_cancel.as_ref() {
+            token.cancel();
+        }
+        // Cancelar la tarea de throttle ANTES del kill: si sobrevive,
+        // podría enviar SIGCONT a un pid reciclado por el kernel para
+        // otro proceso completamente ajeno tras el reap del child.
+        // SIGKILL funciona sobre procesos parados, así que no hace
+        // falta SIGCONT previo — matamos directamente.
+        if let Some(token) = old.throttle_cancel.as_ref() {
             token.cancel();
         }
         // Cancelar la Range GET del ffmpeg viejo contra `/video`:
@@ -119,34 +127,80 @@ pub(super) async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (St
     // 150 ms. Damos 500 ms de gracia — un spawn "sano" tarda
     // decenas de ms en abrir el input pero no exita nunca; uno
     // "malo" muere casi al instante.
+    //
+    // Snapshotamos el estado del hw encoder ANTES del sleep: si
+    // muere y usábamos hw, hay una retry con libx264 (audit
+    // "sparse+throttle+hwaccel" §4c). El probe de arranque no es
+    // suficiente por sí solo — los drivers hw fallan de formas
+    // creativas por-título-que-toca (formato exótico, VRAM
+    // agotada, resolución no soportada).
+    let hw_used = matches!(mode, HlsMode::Transcode) && crate::ffmpeg::hw_encoder().is_some();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let mut child = child;
+    let mut stderr_tail = stderr_tail;
     match child.try_wait() {
         Ok(Some(status)) if !status.success() => {
-            // Muerte inmediata con error. Marcamos el HlsState
-            // como fatal para que las siguientes requests devuelvan
-            // 500 sin respawnear. Cancelamos también el warm-up
-            // huérfano para no dejar el FileStream vivo.
-            if let Some(token) = warmup_cancel.as_ref() {
-                token.cancel();
-            }
             let tail = snapshot_stderr_tail(&stderr_tail);
             tracing::warn!(
                 target: "ffmpeg",
                 code = %status,
                 stderr_tail = %tail,
+                hw_used,
                 "ffmpeg (hls) exited during warmup window"
             );
-            let msg = format!(
-                "ffmpeg exited with {} in <500ms (probablemente filter/codec no soportado)",
-                status
-            );
-            tracing::error!(target: "hls", error = %msg, "FATAL");
-            let mut guard = state.hls.lock().await;
-            if let Some(hls) = guard.as_mut() {
-                hls.fatal_error = Some(msg.clone());
+            // Fallback runtime: si el fallo ocurrió con hw encoder
+            // activo, marcamos como degradado y reintentamos UNA
+            // vez con libx264. El resto de la sesión ya va software
+            // (HW_DEGRADED persiste hasta reiniciar el proceso).
+            if hw_used {
+                crate::ffmpeg::mark_hw_degraded();
+                tracing::info!(
+                    target: "hls",
+                    "reintentando spawn con libx264 (hw encoder degradado)"
+                );
+                let (new_child, new_tail) =
+                    spawn_hls(state, &dir, idx, audio_idx, mode, start_seconds).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let mut new_child = new_child;
+                if let Ok(Some(status2)) = new_child.try_wait() {
+                    if !status2.success() {
+                        // Ni siquiera libx264 arranca — es un fallo
+                        // real (filter missing, codec sin soporte,
+                        // PATH roto). Marcamos fatal y salimos.
+                        if let Some(token) = warmup_cancel.as_ref() {
+                            token.cancel();
+                        }
+                        let tail2 = snapshot_stderr_tail(&new_tail);
+                        let msg = format!(
+                            "ffmpeg exited with {} in <500ms tras retry con libx264: {}",
+                            status2, tail2
+                        );
+                        tracing::error!(target: "hls", error = %msg, "FATAL");
+                        let mut guard = state.hls.lock().await;
+                        if let Some(hls) = guard.as_mut() {
+                            hls.fatal_error = Some(msg.clone());
+                        }
+                        return Err((StatusCode::INTERNAL_SERVER_ERROR, msg));
+                    }
+                }
+                child = new_child;
+                stderr_tail = new_tail;
+            } else {
+                // Fallo sin hw encoder: fatal, no hay retry útil.
+                if let Some(token) = warmup_cancel.as_ref() {
+                    token.cancel();
+                }
+                let msg = format!(
+                    "ffmpeg exited with {} in <500ms (probablemente filter/codec no soportado)",
+                    status
+                );
+                tracing::error!(target: "hls", error = %msg, "FATAL");
+                let mut guard = state.hls.lock().await;
+                if let Some(hls) = guard.as_mut() {
+                    hls.fatal_error = Some(msg.clone());
+                }
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, msg));
             }
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, msg));
         }
         Ok(Some(_)) => {
             // Salió con éxito antes de producir nada — raro,
@@ -159,10 +213,28 @@ pub(super) async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (St
     }
     let mut guard = state.hls.lock().await;
     let hls = guard.as_mut().expect("dir");
+    // Throttle del transcode (audit "sparse+throttle+hwaccel" §2):
+    // solo se activa en mode = Transcode; en Copy es I/O-bound y
+    // no tiene sentido pausarlo (bufferear por delante es DESEABLE).
+    // La task se auto-termina al cancelarse el token en el próximo
+    // reemplazo del job.
+    let (pid, paused, throttle_cancel) = {
+        let pid = child.id();
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = if matches!(mode, HlsMode::Transcode) {
+            Some(super::throttle::spawn_throttle_task(state.clone()))
+        } else {
+            None
+        };
+        (pid, paused, cancel)
+    };
     hls.job = Some(HlsJob {
         child,
         start_idx: idx,
+        pid,
+        paused,
         warmup_cancel,
+        throttle_cancel,
         stderr_tail,
     });
     Ok(())
@@ -368,6 +440,35 @@ async fn spawn_hls(
         // más abajo re-aplica el timestamp absoluto al mux de salida.
         .arg("-fflags")
         .arg("+genpts");
+    // Hardware-accelerated DECODE (audit "sparse+throttle+hwaccel"
+    // §4b). Cubre la mitad de la factura CPU en fuentes HEVC/H.264
+    // (el otro 50% es el encode, ver más abajo). El flag va ANTES
+    // del `-i` — asocia el decoder al input inmediatamente
+    // siguiente. Si el códec del input no está soportado por el
+    // backend hw (p.ej. AV1 sobre VideoToolbox antiguo), ffmpeg cae
+    // a software decode automáticamente sin error.
+    //
+    // Solo aplica en Transcode; en Copy no hay decode+encode, solo
+    // remux — `-hwaccel` sería no-op y ensuciaría la línea de log.
+    //
+    // NO usamos `-hwaccel_output_format` (mantener frames en GPU
+    // hasta el encode): dispararía errores con los filtros de
+    // tonemap HDR y complicaría el fallback runtime a libx264. El
+    // punto dulce robustez/rendimiento es decode-hw → RAM → encode-hw.
+    if matches!(mode, HlsMode::Transcode) && crate::ffmpeg::hw_encoder().is_some() {
+        #[cfg(target_os = "macos")]
+        {
+            cmd.arg("-hwaccel").arg("videotoolbox");
+        }
+        #[cfg(windows)]
+        {
+            // `d3d11va` es genérico — funciona sobre cualquier GPU
+            // (NVIDIA/Intel/AMD) sin acoplarse al encoder elegido.
+            // dxva2 sería otra opción pero d3d11va es la ruta
+            // moderna que ffmpeg prefiere.
+            cmd.arg("-hwaccel").arg("d3d11va");
+        }
+    }
     if start_seconds > 0.0 {
         cmd.arg("-ss").arg(format!("{start_seconds}"));
     }
@@ -419,7 +520,15 @@ async fn spawn_hls(
                 .arg("+discardcorrupt");
         }
         HlsMode::Transcode => {
-            // Audit §5: CRF 18 High 5.2 + veryfast.
+            // Audit §5: CRF 18 High 5.2 + veryfast (libx264).
+            // Audit "sparse+throttle+hwaccel" §4: si hay hw encoder
+            // detectado, usar el argv específico del vendor
+            // (VideoToolbox / NVENC / QSV / AMF) en lugar de
+            // libx264. Mantiene `-force_key_frames`, `-pix_fmt`,
+            // `-bf 0`, `-avoid_negative_ts` en AMBAS ramas para
+            // que la rejilla de segmentos (cortes en múltiplos
+            // exactos de HLS_SEG_SECS) siga siendo compatible.
+            //
             // Audit §8: si el input es HDR (SMPTE 2084 / HLG),
             // hay que tonemap → SDR BT.709. La receta canónica
             // (Hable) requiere `zscale` (libzimg). Homebrew core
@@ -433,6 +542,13 @@ async fn spawn_hls(
             // HDR queda visualmente lavado pero al menos
             // reproduce a resolución nativa sin pérdida
             // espacial.
+            //
+            // El tonemap va SIEMPRE por CPU (aunque el encoder
+            // sea hw). Usar hwupload/hwdownload alrededor del
+            // filter chain sería más rápido pero introduce
+            // fragilidad — el punto dulce robustez/rendimiento
+            // es decode-hw → RAM → tonemap-CPU → encode-hw (ver
+            // comentario del `-hwaccel` arriba).
             if probe_is_hdr_video(state).await {
                 if crate::ffmpeg::ffmpeg_has_filter("zscale") {
                     // Cadena canónica FFmpeg wiki HDR10 → SDR:
@@ -459,34 +575,62 @@ async fn spawn_hls(
                     );
                 }
             }
-            cmd.arg("-c:v")
-                .arg("libx264")
-                .arg("-preset")
-                .arg("veryfast")
-                .arg("-crf")
-                .arg("18")
-                .arg("-profile:v")
-                .arg("high")
-                // Level 5.2 en vez de 4.1: 4.1 topa a 1080p@30 y
-                // libx264 con input 4K emite un stream "fuera de
-                // spec" que algunos players rechazan. 5.2 cubre
-                // 4K@60fps y todo H.264 razonable — WKWebView,
-                // WebView2 y WebKitGTK lo aceptan sin problema.
-                .arg("-level:v")
-                .arg("5.2")
-                .arg("-pix_fmt")
+            // Selección de encoder: hw si detectado, si no libx264.
+            match crate::ffmpeg::hw_encoder() {
+                Some(hw) => {
+                    let height = probe_video_height(state).await;
+                    let argv = super::argv::hw_encoder_argv(hw, height);
+                    tracing::info!(
+                        target: "hls",
+                        encoder = hw.ffmpeg_name(),
+                        height,
+                        argv = ?argv,
+                        "video: hw encode"
+                    );
+                    for a in &argv {
+                        cmd.arg(a);
+                    }
+                }
+                None => {
+                    cmd.arg("-c:v")
+                        .arg("libx264")
+                        .arg("-preset")
+                        .arg("veryfast")
+                        .arg("-crf")
+                        .arg("18")
+                        .arg("-profile:v")
+                        .arg("high")
+                        // Level 5.2 en vez de 4.1: 4.1 topa a 1080p@30 y
+                        // libx264 con input 4K emite un stream "fuera de
+                        // spec" que algunos players rechazan. 5.2 cubre
+                        // 4K@60fps y todo H.264 razonable — WKWebView,
+                        // WebView2 y WebKitGTK lo aceptan sin problema.
+                        .arg("-level:v")
+                        .arg("5.2")
+                        // x264-params: scenecut=0 evita keyframes
+                        // por detección de cambio de escena (romperían
+                        // la rejilla de 4s exactos); sliced-threads=0
+                        // conserva la referencia entre threads.
+                        .arg("-x264-params")
+                        .arg("scenecut=0:slices=1:sliced-threads=0");
+                }
+            }
+            // Args comunes a AMBAS ramas (libx264 y hw encoders).
+            // Van tras la selección del encoder para no repetir
+            // código y garantizar que la rejilla de segmentos sea
+            // compatible entre modos.
+            cmd.arg("-pix_fmt")
                 .arg("yuv420p")
                 .arg("-bf")
                 .arg("0")
                 // Keyframes forzados en múltiplos exactos de 4s (0,
-                // 4, 8, …). Requisito para que dos jobs distintos
-                // (uno desde 0, otro desde `-ss 1728`) corten
-                // segmentos en las mismas fronteras temporales, y
-                // por tanto sean intercambiables.
+                // 4, 8, …). Requisito NO NEGOCIABLE para que dos
+                // jobs distintos (uno desde 0, otro desde `-ss
+                // 1728`) corten segmentos en las mismas fronteras
+                // temporales, y por tanto sean intercambiables.
+                // VideoToolbox y NVENC lo respetan con ffmpeg ≥ 6.
                 .arg("-force_key_frames")
                 .arg("expr:gte(t,n_forced*4)")
-                .arg("-x264-params")
-                .arg("scenecut=0:slices=1:sliced-threads=0")
                 // Reset de timestamps al mínimo tras el input
                 // (combina con `+genpts`). El `-output_ts_offset`
                 // de abajo reintroduce el tiempo absoluto en el

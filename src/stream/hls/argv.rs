@@ -130,6 +130,110 @@ pub(in crate::stream) async fn probe_is_hdr_video(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
+/// Altura en píxeles del stream de vídeo principal del
+/// `cached_probe`. Se usa para elegir bitrate del hw encoder cuando
+/// el modelo no acepta CRF (VideoToolbox) — bitrates por resolución
+/// según audit §5 / §4b. `None` si no hay probe cacheado o el
+/// stream no expone `height`.
+pub(in crate::stream) async fn probe_video_height(state: &AppState) -> Option<u32> {
+    let guard = state.cached_probe.lock().await;
+    guard
+        .as_ref()?
+        .streams
+        .iter()
+        .find(|s| s.kind == crate::ffmpeg::StreamKind::Video)?
+        .height
+}
+
+/// Bitrate objetivo para encoders sin CRF (VideoToolbox), escalado
+/// por altura del vídeo. Los valores son "visualmente transparentes"
+/// para VT según el audit — el margen de calidad se compra con
+/// bitrate porque VT no soporta CRF.
+///
+///   ≤ 480p  → 2M
+///   ≤ 720p  → 4M
+///   ≤ 1080p → 8M
+///   > 1080p → 10M (downscale a 1080p sería otra opción, pero VT
+///                  con 4K encode directo es más simple; el
+///                  overhead extra queda absorbido por la GPU).
+///
+/// `None` en `height` cae al bucket 1080p (asunción conservadora
+/// para no infra-bitratear un 4K desconocido).
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub(in crate::stream) fn vt_bitrate_for_height(height: Option<u32>) -> &'static str {
+    match height {
+        Some(h) if h <= 480 => "2M",
+        Some(h) if h <= 720 => "4M",
+        Some(h) if h <= 1080 => "8M",
+        Some(_) => "10M",
+        None => "8M",
+    }
+}
+
+/// Argv específico del hw encoder elegido. NO incluye los args
+/// comunes (`-pix_fmt yuv420p`, `-bf 0`, `-force_key_frames`,
+/// `-avoid_negative_ts make_zero`) — esos los añade el caller
+/// SIEMPRE, en ambas ramas hw y libx264, para que la rejilla de
+/// segmentos siga siendo compatible.
+///
+/// Los presets están calibrados según audit §4b:
+///   - `h264_videotoolbox`: bitrate objetivo + maxrate 1.5×, high
+///     profile, `-realtime 0` (calidad sobre velocidad; a igual
+///     bitrate mejora ~1-2 dB PSNR).
+///   - `h264_nvenc`: preset p5 + rc vbr + cq 23 (equivalente
+///     perceptual a CRF 23 de libx264 según pruebas NVIDIA).
+///   - `h264_qsv`: global_quality 23 + veryfast (Intel Media SDK).
+///   - `h264_amf`: quality balanced + cqp con qp 22/24 (AMD AMF
+///     no tiene VBR de la misma calidad; CQP es lo más estable).
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub(in crate::stream) fn hw_encoder_argv(
+    encoder: crate::ffmpeg::HwEncoder,
+    height: Option<u32>,
+) -> Vec<String> {
+    use crate::ffmpeg::HwEncoder;
+    match encoder {
+        HwEncoder::VideoToolbox => {
+            let bitrate = vt_bitrate_for_height(height);
+            let maxrate = match bitrate {
+                "2M" => "3M",
+                "4M" => "6M",
+                "8M" => "12M",
+                "10M" => "15M",
+                _ => "12M",
+            };
+            vec![
+                "-c:v".into(), "h264_videotoolbox".into(),
+                "-b:v".into(), bitrate.into(),
+                "-maxrate".into(), maxrate.into(),
+                "-profile:v".into(), "high".into(),
+                "-realtime".into(), "0".into(),
+            ]
+        }
+        HwEncoder::Nvenc => vec![
+            "-c:v".into(), "h264_nvenc".into(),
+            "-preset".into(), "p5".into(),
+            "-rc".into(), "vbr".into(),
+            "-cq".into(), "23".into(),
+            "-b:v".into(), "0".into(),
+            "-profile:v".into(), "high".into(),
+        ],
+        HwEncoder::Qsv => vec![
+            "-c:v".into(), "h264_qsv".into(),
+            "-global_quality".into(), "23".into(),
+            "-preset".into(), "veryfast".into(),
+            "-profile:v".into(), "high".into(),
+        ],
+        HwEncoder::Amf => vec![
+            "-c:v".into(), "h264_amf".into(),
+            "-quality".into(), "balanced".into(),
+            "-rc".into(), "cqp".into(),
+            "-qp_i".into(), "22".into(),
+            "-qp_p".into(), "24".into(),
+            "-profile:v".into(), "high".into(),
+        ],
+    }
+}
+
 // ── audio_transcode_argv — matriz por SO ─────────────────────
 //
 // Garantía dura: la rama non-macOS SIEMPRE fuerza `-ac 2` y
@@ -370,4 +474,86 @@ fn windows_aac_downmix_produces_stereo() {
         stdout.contains("channels=2"),
         "segmento debe ser estéreo (Chromium rechaza >2ch), ffprobe: {stdout}"
     );
+}
+
+// ── hw_encoder_argv + vt_bitrate_for_height ──────────────────
+//
+// Tests unitarios sin ffmpeg. Verifican:
+//   1. La rejilla NO-negociable de args comunes NO se cuela en
+//      `hw_encoder_argv` (`-force_key_frames`, `-pix_fmt`, `-bf`,
+//      `-avoid_negative_ts` los añade el caller SIEMPRE).
+//   2. El encoder correcto se emite por vendor.
+//   3. Los buckets de bitrate por altura cubren los 4 casos
+//      documentados.
+
+#[cfg(test)]
+#[test]
+fn vt_bitrate_buckets_by_height() {
+    use super::argv::vt_bitrate_for_height;
+    assert_eq!(vt_bitrate_for_height(Some(240)), "2M");
+    assert_eq!(vt_bitrate_for_height(Some(480)), "2M");
+    assert_eq!(vt_bitrate_for_height(Some(720)), "4M");
+    assert_eq!(vt_bitrate_for_height(Some(1080)), "8M");
+    assert_eq!(vt_bitrate_for_height(Some(2160)), "10M");
+    // None cae al bucket 1080p (conservador: no infra-bitratear un
+    // 4K desconocido).
+    assert_eq!(vt_bitrate_for_height(None), "8M");
+}
+
+#[cfg(test)]
+#[test]
+fn hw_encoder_argv_starts_with_c_v_and_correct_encoder() {
+    use crate::ffmpeg::HwEncoder;
+    for (encoder, expected_name) in [
+        (HwEncoder::VideoToolbox, "h264_videotoolbox"),
+        (HwEncoder::Nvenc, "h264_nvenc"),
+        (HwEncoder::Qsv, "h264_qsv"),
+        (HwEncoder::Amf, "h264_amf"),
+    ] {
+        let argv = super::argv::hw_encoder_argv(encoder, Some(1080));
+        assert_eq!(argv[0], "-c:v");
+        assert_eq!(argv[1], expected_name, "encoder mismatch: {argv:?}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn hw_encoder_argv_omits_common_grid_args() {
+    // Los args de la rejilla (`-force_key_frames`, `-pix_fmt`,
+    // `-bf`, `-avoid_negative_ts`) los añade `spawn_hls` fuera
+    // de esta función para AMBAS ramas (libx264 y hw). Que
+    // aparezcan aquí duplicaría y ffmpeg tomaría el último —
+    // más contamos con no colar el bug.
+    use crate::ffmpeg::HwEncoder;
+    for encoder in [
+        HwEncoder::VideoToolbox,
+        HwEncoder::Nvenc,
+        HwEncoder::Qsv,
+        HwEncoder::Amf,
+    ] {
+        let argv = super::argv::hw_encoder_argv(encoder, Some(1080));
+        for banned in ["-force_key_frames", "-pix_fmt", "-bf", "-avoid_negative_ts"] {
+            assert!(
+                !argv.iter().any(|a| a == banned),
+                "{banned} debe añadirlo el caller, no hw_encoder_argv({encoder:?}): {argv:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn hw_encoder_argv_videotoolbox_scales_bitrate_with_height() {
+    use crate::ffmpeg::HwEncoder;
+    let argv_1080 = super::argv::hw_encoder_argv(HwEncoder::VideoToolbox, Some(1080));
+    let argv_2160 = super::argv::hw_encoder_argv(HwEncoder::VideoToolbox, Some(2160));
+    // El -b:v de 4K debe ser mayor que el de 1080p.
+    let bitrate_of = |argv: &[String]| -> String {
+        argv.windows(2)
+            .find(|w| w[0] == "-b:v")
+            .map(|w| w[1].clone())
+            .expect("-b:v")
+    };
+    assert_eq!(bitrate_of(&argv_1080), "8M");
+    assert_eq!(bitrate_of(&argv_2160), "10M");
 }

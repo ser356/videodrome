@@ -92,6 +92,11 @@ fn evict_once_sync(dir: &Path, budget_bytes: u64, playhead_idx: u64) -> Result<(
         let Some(idx) = parse_seg_idx(name) else {
             continue;
         };
+        // `len()` == uso real aquí: los `.ts` los escribe ffmpeg
+        // linealmente y renombra desde `.tmp` al cerrar (flag
+        // `temp_file`), sin preasignación sparse. Por eso NO usamos
+        // `st_blocks` como en `cache::dir_size_bytes` — no hay
+        // discrepancia lógica-vs-físico que corregir.
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         total += size;
         segs.push((idx, entry.path(), size));

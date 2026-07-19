@@ -64,6 +64,15 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     // directamente en `dir/`, sin subcarpetas anidadas profundas más
     // allá de una posible carpeta del propio torrent. Un walk iterativo
     // simple sobra.
+    //
+    // Medimos BLOQUES ASIGNADOS (no `len()` = tamaño lógico). librqbit
+    // prealoca cada fichero del torrent a su tamaño final con `set_len`,
+    // que en APFS/ext4/btrfs crea ficheros SPARSE: un torrent de 7 GB
+    // con el 3 % descargado figura como 7 GB lógicos pero solo ~200 MB
+    // en disco. Usar `len()` inflaba la UI de Ajustes ~20× (247 GB
+    // reportados vs 12 GB reales medidos con `du -sh`). En NTFS la
+    // preasignación de librqbit NO es sparse por defecto, así que
+    // `len()` es una aproximación aceptable — ver `file_disk_usage`.
     let mut total = 0u64;
     let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
     while let Some(p) = stack.pop() {
@@ -76,11 +85,33 @@ fn dir_size_bytes(dir: &Path) -> u64 {
             if ft.is_dir() {
                 stack.push(path);
             } else if let Ok(m) = entry.metadata() {
-                total = total.saturating_add(m.len());
+                total = total.saturating_add(file_disk_usage(&m));
             }
         }
     }
     total
+}
+
+/// Uso real en disco de un fichero. En Unix consulta `st_blocks` para
+/// obtener bytes físicamente asignados (crítico con ficheros sparse
+/// preallocated por librqbit). En Windows cae a `len()`: la
+/// preasignación de librqbit no crea sparse por defecto en NTFS, así
+/// que el tamaño lógico es una aproximación aceptable. Para exactitud
+/// perfecta en Windows habría que llamar a `GetCompressedFileSizeW`
+/// via `winapi` — coste no justificado hoy.
+#[cfg(unix)]
+fn file_disk_usage(md: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    // `st_blocks` SIEMPRE está en unidades de 512 B (POSIX),
+    // independiente del block size del filesystem. macOS y Linux lo
+    // exponen así; APFS interno usa 4 KiB pero el reporte respeta el
+    // contrato POSIX.
+    md.blocks().saturating_mul(512)
+}
+
+#[cfg(not(unix))]
+fn file_disk_usage(md: &std::fs::Metadata) -> u64 {
+    md.len()
 }
 
 /// Tamaño total en bytes de la caché.

@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 #[cfg(feature = "gui")]
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
+#[cfg(feature = "gui")]
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 #[cfg(feature = "gui")]
 use std::sync::Mutex as StdMutex;
@@ -233,6 +235,21 @@ pub(super) struct HlsJob {
     /// decidir si el job actual puede servirlo (dentro de la
     /// ventana) o hay que reiniciar en el idx pedido.
     pub(super) start_idx: u64,
+    /// PID del proceso ffmpeg, snapshotted al spawn para no depender
+    /// del `child` bajo lock. Se usa por la tarea de throttle
+    /// (`hls::throttle`) para SIGSTOP/SIGCONT en Unix. `None` si el
+    /// child no expone pid (proceso ya reap-eado). En Windows queda
+    /// sin usar — la rama Windows del throttle mata el job entero
+    /// (kill-and-resurrect), no lo pausa.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(super) pid: Option<u32>,
+    /// Estado "pausado" del proceso ffmpeg (SIGSTOP recibido en
+    /// Unix). Lo escribe la tarea de throttle al aplicar la
+    /// política; lo leen otros sitios solo para observabilidad
+    /// (log, futura UI). No influye en la corrección: SIGKILL
+    /// funciona sobre procesos parados sin necesidad de SIGCONT
+    /// previo, así que el kill de `ensure_hls_job` procede sin más.
+    pub(super) paused: Arc<AtomicBool>,
     /// Cancela la tarea de warm-up asociada al job (audit §2). El
     /// warm-up corre en paralelo con ffmpeg (NUNCA bloquea el spawn)
     /// y su único efecto secundario es la priorización de piezas en
@@ -240,6 +257,12 @@ pub(super) struct HlsJob {
     /// audio switch), cancelamos también su warm-up para no dejar un
     /// FileStream vivo compitiendo con el del nuevo ffmpeg.
     pub(super) warmup_cancel: Option<CancellationToken>,
+    /// Cancela la tarea de throttle asociada al job. Al reemplazar
+    /// el job hay que abortarla ANTES de matar el child — si no, la
+    /// task siguiente podría enviar SIGCONT a un pid reciclado por
+    /// el kernel para otro proceso completamente ajeno. `None`
+    /// cuando no hay throttle (mode = Copy o cold-start).
+    pub(super) throttle_cancel: Option<CancellationToken>,
     /// Últimas ~60 líneas de `child.stderr` capturadas por la task
     /// lectora spawneada en `spawn_hls`. Se consulta cuando el
     /// proceso sale con código ≠ 0 para poder loguear el motivo real

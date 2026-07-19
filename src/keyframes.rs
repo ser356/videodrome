@@ -112,7 +112,7 @@ impl KeyframeIndex {
         // Último segmento: hasta la duración total del stream si
         // la conocemos; si no, hasta el último keyframe (que es lo
         // que sabemos con certeza).
-        let end = self.duration.unwrap_or(*self.timestamps.last().unwrap());
+        let end = self.duration.unwrap_or(*self.timestamps.last().expect("timestamps non-empty: checked at fn start"));
         let last_len = (end - seg_start).max(0.001);
         out.push((seg_start, last_len));
         out
@@ -294,11 +294,13 @@ fn read_uint(buf: &[u8], len: usize) -> u64 {
 fn read_float(buf: &[u8], len: usize) -> Result<f64> {
     match len {
         4 => {
-            let arr: [u8; 4] = buf[..4].try_into().unwrap();
+            let arr: [u8; 4] = buf[..4].try_into()
+                .map_err(|_| anyhow::anyhow!("read_float: buffer too short for f32 (got {} bytes)", buf.len()))?;
             Ok(f32::from_be_bytes(arr) as f64)
         }
         8 => {
-            let arr: [u8; 8] = buf[..8].try_into().unwrap();
+            let arr: [u8; 8] = buf[..8].try_into()
+                .map_err(|_| anyhow::anyhow!("read_float: buffer too short for f64 (got {} bytes)", buf.len()))?;
             Ok(f64::from_be_bytes(arr))
         }
         n => bail!("float EBML con longitud rara: {n}"),

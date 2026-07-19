@@ -67,6 +67,13 @@ time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
 
+# Unix: SIGSTOP/SIGCONT al pid de ffmpeg (transcode throttle §2 del
+# audit "sparse+throttle+hwaccel"). `libc::kill` es la vía directa —
+# `nix` sería más idiomático pero mete otra dep con features grandes
+# para una llamada única.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Windows: lectura del registro para localizar VLC.exe si no está en
 # PATH ni en las rutas estándar (`Program Files\VideoLAN\VLC`). El
 # instalador oficial de VLC deja `HKLM\SOFTWARE\VideoLAN\VLC` con la
