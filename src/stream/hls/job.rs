@@ -180,6 +180,27 @@ pub(super) fn snapshot_stderr_tail(tail: &Arc<StdMutex<VecDeque<String>>>) -> St
     }
 }
 
+// ── Cobertura de tests ────────────────────────────────────────────────────
+//
+// `spawn_hls` / `ensure_hls_job` arrancan ffmpeg contra un torrent vivo
+// de librqbit → no son testeables en unitario sin lanzar binarios del
+// sistema. Lo que sí está cubierto sin deps externas:
+//
+//  * `snapshot_stderr_tail` — ver `#[cfg(test)] mod tests` abajo.
+//
+// Smoke test de integración: el CI corre el ciclo completo de arranque
+// (probe → HLS spawn → primer segmento) contra un archivo de test en
+// `tests/smoke/` con ffmpeg preinstalado (job de CI `gui-check`). Si
+// ese job sigue verde, el spawn path está sano.
+//
+// Lo que queda pendiente de cobertura unitaria futura:
+//   - Inyectar un spawner mockeado en `spawn_hls` para testear las
+//     transiciones Created → Running → Evicted sin ffmpeg real. Requiere
+//     refactor de la firma de `spawn_hls` para aceptar un `ChildSpawner`
+//     trait (o equivalente).
+//   - Transición warmup_cancel: verificar que el token se cancela antes
+//     del kill del job viejo, para no dejar FileStreams huérfanos.
+
 /// Fuerza a librqbit a priorizar las piezas del torrent que ffmpeg
 /// va a necesitar para arrancar en `start_seconds`. Sin esto,
 /// librqbit solo prioriza cuando ffmpeg hace la Range GET real —
@@ -610,4 +631,42 @@ async fn spawn_hls(
         "ffmpeg spawned"
     );
     Ok((child, stderr_tail))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_empty_tail_gives_empty_string() {
+        let tail = Arc::new(StdMutex::new(VecDeque::<String>::new()));
+        assert_eq!(snapshot_stderr_tail(&tail), "");
+    }
+
+    #[test]
+    fn snapshot_tail_joins_lines_with_newline() {
+        let tail = Arc::new(StdMutex::new(VecDeque::from([
+            "Error: codec not found".to_string(),
+            "Error: invalid option".to_string(),
+        ])));
+        let s = snapshot_stderr_tail(&tail);
+        assert_eq!(s, "Error: codec not found\nError: invalid option");
+    }
+
+    #[test]
+    fn snapshot_tail_single_line_no_trailing_newline() {
+        let tail = Arc::new(StdMutex::new(VecDeque::from(["only line".to_string()])));
+        assert_eq!(snapshot_stderr_tail(&tail), "only line");
+    }
+
+    #[test]
+    fn snapshot_does_not_mutate_buffer() {
+        let tail = Arc::new(StdMutex::new(VecDeque::from([
+            "a".to_string(),
+            "b".to_string(),
+        ])));
+        let _ = snapshot_stderr_tail(&tail);
+        let guard = tail.lock().expect("lock");
+        assert_eq!(guard.len(), 2, "buffer debe permanecer intacto tras snapshot");
+    }
 }

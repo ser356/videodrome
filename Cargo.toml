@@ -73,3 +73,7 @@ keyring = { version = "3", features = ["apple-native"] }
 # ruta del binario como valor por defecto; scoop/choco no siempre.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "allow"

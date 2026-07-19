@@ -201,6 +201,57 @@ fn audio_transcode_argv_keeps_multichannel_on_macos() {
 
 #[cfg(all(test, target_os = "macos"))]
 #[test]
+fn audio_transcode_argv_stereo_gives_256k_on_macos() {
+    // 2 canales → suelo 256k; WKWebView lo acepta sin downmix.
+    let argv = audio_transcode_argv(Some(2));
+    assert!(!argv.contains(&"-ac"), "macOS no fuerza downmix con 2ch");
+    let br = argv.windows(2).find(|w| w[0] == "-b:a").expect("-b:a");
+    assert_eq!(br[1], "256k", "estéreo → 256k en macOS");
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn audio_transcode_argv_unknown_channels_gives_256k_on_macos() {
+    // Sin dato de canales (None) → bitrate suelo 256k.
+    let argv = audio_transcode_argv(None);
+    assert!(!argv.contains(&"-ac"), "macOS no fuerza downmix con None");
+    let br = argv.windows(2).find(|w| w[0] == "-b:a").expect("-b:a");
+    assert_eq!(br[1], "256k", "None canales → 256k en macOS");
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn audio_transcode_argv_7_1_gives_512k_on_macos() {
+    // 8 canales (7.1) → bitrate máximo 512k en macOS.
+    let argv = audio_transcode_argv(Some(8));
+    assert!(!argv.contains(&"-ac"), "macOS no fuerza downmix con 7.1");
+    let br = argv.windows(2).find(|w| w[0] == "-b:a").expect("-b:a");
+    assert_eq!(br[1], "512k", "7.1 → 512k en macOS");
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn audio_transcode_argv_mono_gives_256k_on_macos() {
+    // 1 canal (mono) → suelo 256k.
+    let argv = audio_transcode_argv(Some(1));
+    let br = argv.windows(2).find(|w| w[0] == "-b:a").expect("-b:a");
+    assert_eq!(br[1], "256k", "mono → 256k en macOS");
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn audio_transcode_argv_always_starts_with_c_a_aac_on_macos() {
+    // El primer argumento siempre debe ser el par -c:a aac independientemente
+    // del número de canales.
+    for ch in [None, Some(1), Some(2), Some(6), Some(8)] {
+        let argv = audio_transcode_argv(ch);
+        assert_eq!(argv[0], "-c:a", "primer arg: {argv:?}");
+        assert_eq!(argv[1], "aac", "segundo arg: {argv:?}");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
 fn audio_transcode_argv_scales_bitrate_by_channels_on_macos() {
     assert_eq!(audio_transcode_argv(None).last().copied(), Some("256k"));
     assert_eq!(audio_transcode_argv(Some(2)).last().copied(), Some("256k"));

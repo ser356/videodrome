@@ -286,20 +286,30 @@ pub async fn search(
     // que el resultado final esté ordenado por idioma y, dentro,
     // por trusted → downloads (el orden por descargas ya viene del
     // servidor con `download_count desc`).
-    subs.sort_by_key(|s| !s.from_trusted);
-
-    if !languages.is_empty() {
-        let order: Vec<&str> = languages.split(',').map(str::trim).collect();
-        let rank = |lang: &str| -> usize {
-            order
-                .iter()
-                .position(|l| l.eq_ignore_ascii_case(lang))
-                .unwrap_or(usize::MAX)
-        };
-        subs.sort_by_key(|s| rank(&s.language));
-    }
+    rank_subtitles(&mut subs, languages);
 
     Ok(subs)
+}
+
+/// Ordena `subs` in-place según la política de scoring de candidatos:
+///
+///  1. `from_trusted` primero dentro de cada idioma (sort estable).
+///  2. Idioma preferido antes, según el orden de `languages`
+///     ("es,en,fr" → español antes que inglés, inglés antes que francés;
+///     idiomas no listados van al final).
+///
+/// Se extrae del cuerpo de `search()` para ser testeable sin red.
+fn rank_subtitles(subs: &mut Vec<Subtitle>, languages: &str) {
+    subs.sort_by_key(|s| !s.from_trusted);
+    if !languages.is_empty() {
+        let order: Vec<&str> = languages.split(',').map(str::trim).collect();
+        subs.sort_by_key(|s| {
+            order
+                .iter()
+                .position(|l| l.eq_ignore_ascii_case(&s.language))
+                .unwrap_or(usize::MAX)
+        });
+    }
 }
 
 /// Pide a OpenSubtitles el link de descarga temporal (`POST /download`) y
@@ -718,4 +728,217 @@ struct DownloadResponse {
     link: String,
     #[serde(default)]
     file_name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_sub(language: &str, from_trusted: bool, downloads: u64) -> Subtitle {
+        Subtitle {
+            file_id: 0,
+            language: language.to_string(),
+            release: String::new(),
+            downloads,
+            rating: 0.0,
+            hearing_impaired: false,
+            from_trusted,
+            file_name: None,
+            hash_match: false,
+        }
+    }
+
+    // ── compute_moviehash ─────────────────────────────────────────────────
+
+    #[test]
+    fn moviehash_all_zero_buffers_give_filesize() {
+        // Hash = file_len cuando los 128 KB son ceros (contribución cero).
+        let zeros = vec![0u8; 65536];
+        let result = compute_moviehash(0x0000_0000_0002_0000, &zeros, &zeros);
+        assert_eq!(result.as_deref(), Some("0000000000020000"));
+    }
+
+    #[test]
+    fn moviehash_known_vector() {
+        // file_len=0, primeros 64 KB = [1,0,0,0,0,0,0,0] repetido.
+        // Cada chunk LE u64 = 1. 65536/8 = 8192 chunks.
+        // hash = 0 + 8192 + 8192 = 16384 = 0x4000.
+        let mut buf = vec![0u8; 65536];
+        for i in (0..65536).step_by(8) {
+            buf[i] = 1;
+        }
+        let result = compute_moviehash(0, &buf, &buf);
+        assert_eq!(result.as_deref(), Some("0000000000004000"));
+    }
+
+    #[test]
+    fn moviehash_rejects_wrong_buffer_size() {
+        let short = vec![0u8; 100];
+        let ok = vec![0u8; 65536];
+        assert!(compute_moviehash(0, &short, &ok).is_none());
+        assert!(compute_moviehash(0, &ok, &short).is_none());
+        assert!(compute_moviehash(0, &short, &short).is_none());
+    }
+
+    #[test]
+    fn moviehash_wraps_on_overflow() {
+        // Verifica que la suma wrapping funciona: un buffer con todos 0xFF
+        // tiene cada chunk u64 = u64::MAX. 8192 chunks de u64::MAX sumarán
+        // en wrapping a 8192 * u64::MAX mod 2^64.
+        let buf = vec![0xFFu8; 65536];
+        let result = compute_moviehash(0, &buf, &buf);
+        assert!(result.is_some(), "moviehash debe funcionar con overflow");
+        let hex = result.expect("some");
+        assert_eq!(hex.len(), 16, "resultado siempre 16 hex chars");
+    }
+
+    // ── sanitize_filename ─────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_replaces_forbidden_chars() {
+        assert_eq!(sanitize_filename("sub/track.srt"), "sub_track.srt");
+        assert_eq!(sanitize_filename("C:\\path\\to.srt"), "C__path_to.srt");
+        assert_eq!(sanitize_filename("file:name?.srt"), "file_name_.srt");
+        assert_eq!(sanitize_filename("a<b>c.srt"), "a_b_c.srt");
+        assert_eq!(sanitize_filename("pipe|sep.srt"), "pipe_sep.srt");
+        assert_eq!(sanitize_filename("q\"uoted.srt"), "q_uoted.srt");
+    }
+
+    #[test]
+    fn sanitize_preserves_safe_filename() {
+        let name = "Movie.2007.1080p.BluRay-CLASSiC.srt";
+        assert_eq!(sanitize_filename(name), name);
+    }
+
+    // ── rank_subtitles — camino de scoring ────────────────────────────────
+
+    #[test]
+    fn sort_trusted_before_untrusted_same_language() {
+        // Dentro del mismo idioma, el sub verificado por moderador
+        // debe aparecer primero.
+        let mut subs = vec![
+            make_sub("es", false, 5000),
+            make_sub("es", true, 100),
+        ];
+        rank_subtitles(&mut subs, "es");
+        assert!(subs[0].from_trusted, "trusted debe ir primero");
+        assert!(!subs[1].from_trusted);
+    }
+
+    #[test]
+    fn sort_respects_language_preference_order() {
+        // Con preferencia "es,en", el español va primero aunque tenga
+        // menos descargas (simulamos lo que llega del API ya ordenado
+        // por downloads desc).
+        let mut subs = vec![
+            make_sub("en", false, 10_000),
+            make_sub("fr", false, 8_000),
+            make_sub("es", false, 3_000),
+        ];
+        rank_subtitles(&mut subs, "es,en");
+        assert_eq!(subs[0].language, "es");
+        assert_eq!(subs[1].language, "en");
+        assert_eq!(subs[2].language, "fr");
+    }
+
+    #[test]
+    fn sort_unlisted_language_goes_to_end() {
+        // Idioma no listado en la preferencia → al final.
+        let mut subs = vec![
+            make_sub("ja", false, 999),
+            make_sub("es", false, 1),
+        ];
+        rank_subtitles(&mut subs, "es,en");
+        assert_eq!(subs[0].language, "es");
+        assert_eq!(subs[1].language, "ja");
+    }
+
+    #[test]
+    fn sort_trusted_preserved_within_language_after_language_sort() {
+        // Tras ordenar por idioma, el orden trusted↑ dentro de cada
+        // grupo debe conservarse (sort_by_key es stable).
+        let mut subs = vec![
+            make_sub("es", false, 200),
+            make_sub("en", true, 50),
+            make_sub("es", true, 1),
+            make_sub("en", false, 100),
+        ];
+        rank_subtitles(&mut subs, "es,en");
+        assert_eq!(subs[0].language, "es");
+        assert!(subs[0].from_trusted, "es trusted primero en su grupo");
+        assert_eq!(subs[2].language, "en");
+        assert!(subs[2].from_trusted, "en trusted primero en su grupo");
+    }
+
+    #[test]
+    fn sort_empty_vec_does_not_panic() {
+        let mut subs: Vec<Subtitle> = vec![];
+        rank_subtitles(&mut subs, "es,en");
+        assert!(subs.is_empty());
+    }
+
+    // ── srt_to_vtt (feature = "gui") ─────────────────────────────────────
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn srt_to_vtt_basic_timestamp_conversion() {
+        let srt = b"1\n00:00:01,500 --> 00:00:03,750\nHello world\n\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.starts_with("WEBVTT\n\n"));
+        assert!(
+            vtt.contains("00:00:01.500 --> 00:00:03.750"),
+            "coma debe convertirse a punto en timestamps"
+        );
+        assert!(vtt.contains("Hello world"));
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn srt_to_vtt_preserves_utf8_accents() {
+        let srt = "1\n00:00:01,000 --> 00:00:02,000\nÁlvaro pregunta: ¿cómo estás?\n\n";
+        let vtt = srt_to_vtt(srt.as_bytes());
+        assert!(vtt.contains("Álvaro"), "Á debe preservarse");
+        assert!(vtt.contains("¿cómo estás?"), "accentos deben preservarse");
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn srt_to_vtt_strips_bom() {
+        let mut srt = vec![0xEFu8, 0xBB, 0xBF];
+        srt.extend_from_slice(b"1\n00:00:01,000 --> 00:00:02,000\nText\n\n");
+        let vtt = srt_to_vtt(&srt);
+        assert!(
+            vtt.starts_with("WEBVTT\n\n"),
+            "BOM eliminado: no debe haber carácter antes de WEBVTT"
+        );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn swap_timestamps_preserves_commas_in_text() {
+        let s = "00:00:01,500 --> 00:00:03,750\nHello, world!\n";
+        let out = swap_srt_timestamps(s);
+        assert!(
+            out.contains("01.500") && out.contains("03.750"),
+            "commas en timestamps convertidas"
+        );
+        assert!(out.contains("Hello, world!"), "coma en texto preservada");
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn fix_mojibake_corrects_double_encoded_spanish() {
+        assert_eq!(fix_mojibake("Ã¡"), "á");
+        assert_eq!(fix_mojibake("Ã©"), "é");
+        assert_eq!(fix_mojibake("Â¿"), "¿");
+        let s = "Ã¡Ã©Ã³Ãº";
+        assert_eq!(fix_mojibake(s), "áéóú");
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn try_fix_mojibake_leaves_clean_text_alone() {
+        let clean = "El señor preguntó: ¿dónde está el gato?";
+        assert_eq!(try_fix_mojibake(clean), clean);
+    }
 }

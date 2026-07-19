@@ -150,3 +150,96 @@ fn evict_once_sync(dir: &Path, budget_bytes: u64, playhead_idx: u64) -> Result<(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn write_seg(dir: &std::path::Path, idx: u64, size: usize) {
+        let path = dir.join(format!("seg-{idx:05}.ts"));
+        fs::write(path, vec![0u8; size]).expect("write test seg");
+    }
+
+    #[test]
+    fn no_eviction_when_under_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_seg(dir.path(), 0, 100);
+        write_seg(dir.path(), 1, 100);
+        evict_once_sync(dir.path(), 10_000, 5).expect("evict_once_sync");
+        assert!(dir.path().join("seg-00000.ts").exists());
+        assert!(dir.path().join("seg-00001.ts").exists());
+    }
+
+    #[test]
+    fn safety_window_protects_segments_near_playhead() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let playhead = 20u64;
+        // Rellena la safety window: abs_diff(idx, 20) <= EVICT_SAFETY_WINDOW (8).
+        // Todos en [12, 28]. Total 17 × 1 000 = 17 000, budget = 5 000 → sobre presupuesto.
+        for idx in 12u64..=28 {
+            write_seg(dir.path(), idx, 1_000);
+        }
+        evict_once_sync(dir.path(), 5_000, playhead).expect("evict_once_sync");
+        for idx in 12u64..=28 {
+            let path = dir.path().join(format!("seg-{idx:05}.ts"));
+            assert!(path.exists(), "seg-{idx:05}.ts debe estar protegido por safety window");
+        }
+    }
+
+    #[test]
+    fn evicts_segments_beyond_safety_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let playhead = 50u64;
+        // Safety window: abs_diff(idx, 50) <= 8 → [42, 58].
+        // Far behind (dist=50 > 8), near protected (dist=0 ≤ 8).
+        write_seg(dir.path(), 0, 500_000);   // dist=50, fuera de ventana
+        write_seg(dir.path(), 30, 500_000);  // dist=20, fuera de ventana
+        write_seg(dir.path(), 50, 500_000);  // dist=0, dentro de ventana (playhead)
+        // Budget 800_000, total 1_500_000 → se debe evictar al menos un segmento lejano.
+        evict_once_sync(dir.path(), 800_000, playhead).expect("evict_once_sync");
+        assert!(
+            dir.path().join("seg-00050.ts").exists(),
+            "playhead protegido por safety window"
+        );
+        let far0_exists = dir.path().join("seg-00000.ts").exists();
+        let far30_exists = dir.path().join("seg-00030.ts").exists();
+        assert!(
+            !far0_exists || !far30_exists,
+            "al menos un segmento lejano debe haber sido evictado"
+        );
+    }
+
+    #[test]
+    fn backward_evicted_before_forward_at_same_distance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let playhead = 50u64;
+        // dist=20 atrás vs dist=20 adelante — ambos fuera de la ventana (8).
+        // El evictor prioriza los de ATRÁS según la política de score.
+        write_seg(dir.path(), 30, 500_000); // detrás, dist=20
+        write_seg(dir.path(), 70, 500_000); // delante, dist=20
+        // Budget 600 000, total 1 000 000 → target 540 000 → basta evictar uno.
+        evict_once_sync(dir.path(), 600_000, playhead).expect("evict_once_sync");
+        assert!(
+            dir.path().join("seg-00070.ts").exists(),
+            "segmento de ADELANTE debe conservarse frente al de detrás"
+        );
+        assert!(
+            !dir.path().join("seg-00030.ts").exists(),
+            "segmento de DETRÁS debe evictarse primero"
+        );
+    }
+
+    #[test]
+    fn tmp_files_not_counted_nor_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // .ts.tmp = ffmpeg escribiendo ahora mismo — NUNCA tocar.
+        let tmp = dir.path().join("seg-00000.ts.tmp");
+        fs::write(&tmp, vec![0u8; 2_000_000]).expect("write tmp");
+        // El .ts completo sí cuenta; está bajo presupuesto (100 < 10 000).
+        write_seg(dir.path(), 0, 100);
+        evict_once_sync(dir.path(), 10_000, 100).expect("evict_once_sync");
+        assert!(tmp.exists(), ".ts.tmp no debe ser eliminado por el evictor");
+        assert!(dir.path().join("seg-00000.ts").exists(), ".ts bajo presupuesto conservado");
+    }
+}
