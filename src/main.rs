@@ -9,6 +9,12 @@
     all(target_os = "windows", feature = "gui", not(debug_assertions)),
     windows_subsystem = "windows"
 )]
+// `.unwrap()` en código de test es explícitamente OK — un fallo ahí
+// ES el mensaje de error del test. Si no hiciéramos esto, cada `mod
+// tests` tendría que llevar su propio `#![allow(...)]` y CI con `-D
+// warnings` reventaría por lints en tests (audit B1 puso `unwrap_used
+// = warn` en Cargo.toml precisamente para producción, no para tests).
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod auth;
 mod config;

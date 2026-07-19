@@ -352,9 +352,7 @@ fn detect_hw_encoder() -> Option<HwEncoder> {
         );
         return None;
     }
-    let Some(bin) = ffmpeg_binary() else {
-        return None;
-    };
+    let bin = ffmpeg_binary()?;
     let candidates: &[HwEncoder] = if cfg!(target_os = "macos") {
         &[HwEncoder::VideoToolbox]
     } else if cfg!(windows) {

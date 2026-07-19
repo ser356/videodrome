@@ -9,8 +9,8 @@
 //! esté en el minuto 2 o abandone a los 10.
 //!
 //! Política (histéresis para evitar ping-pong):
-//!   - PAUSAR   cuando ventaja > `PAUSE_ADVANTAGE_S` (120 s = 30
-//!              segmentos por delante del playhead).
+//!   - PAUSAR cuando ventaja > `PAUSE_ADVANTAGE_S` (120 s = 30
+//!     segmentos por delante del playhead).
 //!   - REANUDAR cuando ventaja < `RESUME_ADVANTAGE_S` (45 s).
 //!
 //! La histéresis 120/45 absorbe con margen los 4 s/segmento del

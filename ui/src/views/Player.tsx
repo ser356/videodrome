@@ -1245,29 +1245,28 @@ export function Player() {
 
       {/* Loader minimalista estilo Stremio: pantalla de arranque
           limpia con el backdrop de la peli de fondo (si TMDB nos lo
-          dio), título y un spinner. Se pinta en tres casos:
+          dio), título y un spinner. Se pinta en CUATRO casos:
             1. Arranque: aún no hemos tenido ni un `playing` (falta
                `stream` o `hasStartedPlayback = false`).
             2. Seek: user movió la seekbar y estamos esperando que
                el buffer se rellene en el offset nuevo.
             3. Cambio de pista de audio: backend está purgando
                segmentos y respawneando ffmpeg → tapa la transición.
-          Durante el arranque incluye speed / peers para que el user
-          sepa que el enjambre está descargando (audit §3.b) — en
-          seek / audio switch se omite (los datos ya están arriba
-          en la barra, y esas transiciones son cortas). */}
-      {(!stream || !hasStartedPlayback || seeking || audioSwitching) && !error && (
+            4. Re-buffering a mitad de peli: la red se cae, el
+               enjambre se queda sin seeders, o ffmpeg va lento —
+               el `<video>` dispara `waiting` → `buffering = true`.
+               Antes solo mostrábamos un mini-spinner mudo en la
+               esquina y el user creía que la app se había colgado.
+          Los stats (speed / peers / %) SIEMPRE se pintan cuando NO
+          es seek ni audio switch — es la única señal honesta de si
+          el enjambre está vivo o muerto. Audit §3.b. */}
+      {(!stream || !hasStartedPlayback || seeking || audioSwitching || buffering) && !error && (
         <StremioLoader
           title={state.title}
           backdropUrl={backdropUrl}
           logoUrl={logoUrl}
-          stats={!hasStartedPlayback && !seeking && !audioSwitching ? stats : null}
+          stats={!seeking && !audioSwitching ? stats : null}
         />
-      )}
-      {buffering && hasStartedPlayback && !seeking && !audioSwitching && !error && (
-        <div className="pointer-events-none absolute right-6 top-6">
-          <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
-        </div>
       )}
 
       {/* HUD de ajuste de sync del sub. Aparece 1.5s cuando el user

@@ -150,12 +150,12 @@ pub(in crate::stream) async fn probe_video_height(state: &AppState) -> Option<u3
 /// para VT según el audit — el margen de calidad se compra con
 /// bitrate porque VT no soporta CRF.
 ///
-///   ≤ 480p  → 2M
-///   ≤ 720p  → 4M
-///   ≤ 1080p → 8M
-///   > 1080p → 10M (downscale a 1080p sería otra opción, pero VT
-///                  con 4K encode directo es más simple; el
-///                  overhead extra queda absorbido por la GPU).
+///   - ≤ 480p  → 2M
+///   - ≤ 720p  → 4M
+///   - ≤ 1080p → 8M
+///   - `>` 1080p → 10M (downscale a 1080p sería otra opción, pero
+///     VT con 4K encode directo es más simple; el overhead extra
+///     queda absorbido por la GPU).
 ///
 /// `None` en `height` cae al bucket 1080p (asunción conservadora
 /// para no infra-bitratear un 4K desconocido).
