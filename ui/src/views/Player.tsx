@@ -11,12 +11,10 @@ import {
   MusicNotes,
   Pause,
   Play,
-  UsersThree,
 } from '@phosphor-icons/react'
 import {
   downloadSubtitle,
   fetchEmbeddedSubtitle,
-  formatSize,
   getMovieView,
   getPreferences,
   hlsUrl,
