@@ -14,7 +14,14 @@ use serde::{Deserialize, Serialize};
 
 const BASE_URL: &str = "https://api.themoviedb.org/3";
 const RECS_CACHE_FILE: &str = "tmdb_recs_cache.json";
-const RECS_CACHE_TTL_SECS: u64 = 24 * 3600;
+// TTL de 7 días para el endpoint `/movie/{id}/recommendations`. Antes
+// era 24h y la lista completa se re-mezclaba cada día (TMDB reordena
+// según señales globales) → una peli que aparecía ayer podía caerse
+// del top-N hoy sin que el user hubiese hecho nada. Con 7 días la
+// lista es estable durante una semana, y las nuevas semillas
+// (películas que el user ve mientras tanto) la invalidan de manera
+// natural al añadir freq nueva sobre pelis vecinas.
+const RECS_CACHE_TTL_SECS: u64 = 7 * 24 * 3600;
 
 // Caches adicionales anti-caída de TMDB. TTL más largo (7 días) porque
 // los metadatos de una peli son ~inmutables: título, runtime, imdb_id,

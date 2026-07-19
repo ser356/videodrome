@@ -479,7 +479,7 @@ export async function probeStream(streamUrl: string): Promise<MediaInfo> {
       }
     } catch (e) {
       if (e instanceof ProbeStalledError) throw e
-      throw new Error(`probe 504 (body no parseable): ${e}`)
+      throw new Error(`probe 504 (body no parseable): ${e}`, { cause: e })
     }
   }
   if (!r.ok) throw new Error(`probe ${r.status}`)

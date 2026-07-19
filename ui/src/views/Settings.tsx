@@ -80,6 +80,7 @@ export function Settings() {
   }, [])
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Fetch-on-mount via callback; setState de arranque va s\u00edncrono dentro de refresh.
     refresh()
   }, [refresh])
 

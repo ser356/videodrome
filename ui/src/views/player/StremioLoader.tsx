@@ -26,6 +26,7 @@ export function StremioLoader({
   // siendo icónica y no un `<h1>` grande solo.
   const [logoFailed, setLogoFailed] = useState(false)
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset s\u00edncrono cuando cambia el logoUrl; sin alternativa async.
     setLogoFailed(false)
   }, [logoUrl])
   const showLogo = logoUrl != null && !logoFailed

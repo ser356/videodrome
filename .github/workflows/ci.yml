@@ -101,6 +101,10 @@ jobs:
         working-directory: ui
         run: npm ci
 
+      - name: eslint (ui)
+        working-directory: ui
+        run: npm run lint
+
       - name: typecheck + build (ui)
         working-directory: ui
         run: |

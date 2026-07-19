@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom'
 import { BackButton } from '../components/BackButton'
 import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu'
 import { HotkeyBar } from '../components/HotkeyBar'
-import { MovieDetailModal } from '../components/MovieDetailModal'
 import { SearchBox } from '../components/SearchBox'
 import { Toast } from '../components/Toast'
 import { TopNav } from '../components/TopNav'
@@ -44,7 +43,6 @@ export function Recommendations() {
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [sel, setSel] = useState(0)
-  const [detail, setDetail] = useState<Recommendation | null>(null)
   const [dismissingId, setDismissingId] = useState<number | null>(null)
   const [menu, setMenu] = useState<{
     x: number
@@ -97,6 +95,7 @@ export function Recommendations() {
   // Boot: leer minRating de Preferences y disparar primera página.
   useEffect(() => {
     if (!isTauri()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Gate no-Tauri: setError síncrona es la señal esperada para el dev en web puro; no hay ciclo de re-render porque el resto del efecto retorna.
       setError(t('series.tauriRequired'))
       return
     }
@@ -164,10 +163,10 @@ export function Recommendations() {
 
   // Hover-preload de detalles: al pasar el ratón sobre una card
   // disparamos `getMovieView` en background. El backend cachea la
-  // respuesta 7d en disco, así que cuando el user haga click el modal
-  // se abre con la sinopsis lista sin espera. Set anti-duplicados
-  // por id — evita machacar TMDB si el user pasea el cursor por el
-  // grid varias veces.
+  // respuesta 7d en disco, así que cuando el user haga click la
+  // pantalla de Torrents pinta la sinopsis al instante sin espera.
+  // Set anti-duplicados por id — evita machacar TMDB si el user
+  // pasea el cursor por el grid varias veces.
   const preloadedRef = useRef<Set<number>>(new Set())
   const preloadDetail = useCallback((tmdbId: number) => {
     if (preloadedRef.current.has(tmdbId)) return
@@ -243,11 +242,6 @@ export function Recommendations() {
     { key: 'ArrowLeft', hint: '', run: () => move(-1) },
     {
       key: 'Enter',
-      hint: t('recs.detail'),
-      run: () => items && items[sel] && setDetail(items[sel]),
-    },
-    {
-      key: 't',
       hint: t('hotkey.torrents'),
       run: () => items && items[sel] && openTorrents(items[sel]),
     },
@@ -255,7 +249,7 @@ export function Recommendations() {
     { key: 'Escape', hint: '', run: () => nav('/') },
   ]
   useHotkeys(hotkeys, [items, sel, minRating], {
-    enabled: detail === null && menu === null,
+    enabled: menu === null,
   })
 
   return (
@@ -294,7 +288,7 @@ export function Recommendations() {
                   rec={rec}
                   active={i === sel}
                   dismissing={rec.movie.id === dismissingId}
-                  onClick={() => setDetail(rec)}
+                  onClick={() => openTorrents(rec)}
                   onMouseEnter={() => {
                     setSel(i)
                     preloadDetail(rec.movie.id)
@@ -346,13 +340,8 @@ export function Recommendations() {
             const rec = menu.rec
             return [
               {
-                label: t('recs.menu.detail'),
-                hint: '↵',
-                onClick: () => setDetail(rec),
-              },
-              {
                 label: t('recs.menu.torrents'),
-                hint: 't',
+                hint: '↵',
                 onClick: () => openTorrents(rec),
               },
               {
@@ -367,16 +356,6 @@ export function Recommendations() {
         />
       )}
 
-      {detail && (
-        <MovieDetailModal
-          rec={detail}
-          onClose={() => setDetail(null)}
-          onOpenTorrents={(r) => {
-            setDetail(null)
-            openTorrents(r)
-          }}
-        />
-      )}
     </div>
   )
 }

@@ -274,6 +274,7 @@ export function Player() {
   // Arranca el stream al montar; para al desmontar.
   useEffect(() => {
     if (!state?.magnet) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Gate no-magnet: setState síncrona única antes de retornar.
       setError(t('player.noMagnet'))
       return
     }
@@ -397,7 +398,6 @@ export function Player() {
     }
     // Solo depende del tmdbId — evitamos re-pedir cuando cambia el
     // resto del state (que puede pasar en cada re-render).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.tmdbId])
 
   // Logo art via Metahub (el mismo CDN que usa Stremio). URL directa
@@ -409,6 +409,7 @@ export function Player() {
   useEffect(() => {
     const raw = state?.imdbId
     if (!raw) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset síncrono cuando no hay imdb.
       setLogoUrl(null)
       return
     }
@@ -474,6 +475,7 @@ export function Player() {
   useEffect(() => {
     if (!stream) return
     let cancelled = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Loading flag síncrono; el resto se resuelve async.
     setSubsLoading(true)
     // Idiomas: `UI locale + prefs.subtitle_languages` con dedupe.
     // Así OpenSubtitles ordena los subs del idioma de la app arriba
@@ -521,6 +523,7 @@ export function Player() {
   const [rawVtt, setRawVtt] = useState<string | null>(null)
   useEffect(() => {
     if (!activeSub) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset síncrono cuando no hay sub activo.
       setRawVtt(null)
       return
     }
@@ -549,6 +552,7 @@ export function Player() {
   const [vttUrl, setVttUrl] = useState<string | null>(null)
   useEffect(() => {
     if (!rawVtt) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset síncrono cuando no hay vtt.
       setVttUrl(null)
       return
     }
@@ -590,6 +594,7 @@ export function Player() {
   // son de otra fuente, mantener el offset del anterior no tiene
   // sentido).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset síncrono de offset/speed al cambiar de sub.
     setSubOffset(0)
     setSubSpeed(1)
   }, [activeSub])
@@ -720,6 +725,7 @@ export function Player() {
   }, [paused])
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- bumpControls llama setControlsVisible síncrono al montar.
     bumpControls()
     return () => {
       if (hideTimerRef.current) window.clearTimeout(hideTimerRef.current)
@@ -870,21 +876,13 @@ export function Player() {
   // Ratón sobre la seek bar: hover-preview del tiempo.
   const [seekHover, setSeekHover] = useState<number | null>(null)
 
-  if (!state) {
-    return (
-      <div className="flex h-full items-center justify-center text-body">
-        <div className="text-center">
-          <p className="text-[15px]">Sin datos de reproducci&oacute;n.</p>
-          <button
-            onClick={() => nav(-1)}
-            className="mt-4 rounded-sm border border-hairline px-4 py-2 text-[13px] hover:bg-surface"
-          >
-            Volver
-          </button>
-        </div>
-      </div>
-    )
-  }
+  // NOTA: la guarda `if (!state)` que renderiza el fallback "sin datos"
+  // vive AL FINAL de la lista de hooks (justo antes del `return`
+  // principal). react-hooks/rules-of-hooks obliga a que todos los
+  // useRef/useCallback/useEffect posteriores se llamen en el mismo
+  // orden en cada render — poner el early return aquí rompe esa
+  // invariante para el ref/callback/efecto de switchAudioTrack + hls.js
+  // que hay más abajo.
 
   // Ruta del `<video>`. Dos modos, ambos servidos con URLs estables
   // (sin query params) para que el WebView pueda cachear libremente:
@@ -1028,6 +1026,7 @@ export function Player() {
         // Ni HLS nativo ni MSE — plataforma sin soporte de vídeo
         // decente. Cae al mensaje de error genérico; el user puede
         // volver atrás y cambiar a VLC en Ajustes.
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- Gate sin soporte de vídeo: setState síncrona antes de retornar.
         setError(t('player.hlsUnsupported'))
         return
       }
@@ -1108,6 +1107,25 @@ export function Player() {
     // catch fatal — meterlos en el array re-crearía hls.js sin motivo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoSrc, needsHls, activeAudioIdx])
+
+  // Guarda "sin datos" al final de la cadena de hooks (ver nota
+  // arriba). state puede venir a null si el usuario llega a /player
+  // por deep link sin location.state; no hay nada que reproducir.
+  if (!state) {
+    return (
+      <div className="flex h-full items-center justify-center text-body">
+        <div className="text-center">
+          <p className="text-[15px]">Sin datos de reproducci&oacute;n.</p>
+          <button
+            onClick={() => nav(-1)}
+            className="mt-4 rounded-sm border border-hairline px-4 py-2 text-[13px] hover:bg-surface"
+          >
+            Volver
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div

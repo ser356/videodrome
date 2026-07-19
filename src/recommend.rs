@@ -80,7 +80,15 @@ fn pre_score_candidates(
     v.sort_unstable_by(|a, b| {
         let sa = a.1 * a.0.vote_average / 2.0;
         let sb = b.1 * b.0.vote_average / 2.0;
-        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+        // Tie-break por TMDB id ASC — sin esto el orden de empates es
+        // el del `HashMap` (aleatorio entre ejecuciones), por lo que
+        // la peli que ayer entraba en el top-N hoy podía caerse al
+        // corte por un empate resuelto de forma distinta. Con id se
+        // vuelve determinista sin sesgar la calidad (los empates son
+        // por definición intercambiables).
+        sb.partial_cmp(&sa)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.id.cmp(&b.0.id))
     });
     v.truncate(fetch_count);
     v
@@ -115,6 +123,7 @@ pub async fn build_recommendations<P: Progress>(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.movie.id.cmp(&b.movie.id))
     });
     scored.truncate(count);
     Ok(scored)
@@ -209,6 +218,7 @@ pub async fn enrich_batch<P: Progress>(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.movie.id.cmp(&b.movie.id))
     });
     scored
 }

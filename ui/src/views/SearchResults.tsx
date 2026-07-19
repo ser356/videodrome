@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { HotkeyBar } from '../components/HotkeyBar'
+import { SearchBox } from '../components/SearchBox'
 import { TopNav } from '../components/TopNav'
 import {
   isTauri,
@@ -52,6 +53,12 @@ export function SearchResults() {
   }, [q])
 
   useEffect(() => {
+    // Fetch-on-param-change es setState síncrona en el cuerpo del
+    // efecto (setLoading/setError/setItems/setSel). React-hooks v7
+    // marca el patrón como "cascading render"; la alternativa
+    // (`useEffectEvent`) sigue experimental. Disable con
+    // justificación hasta que estabilice.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     runSearch()
   }, [runSearch])
 
@@ -103,6 +110,7 @@ export function SearchResults() {
   return (
     <div className="flex min-h-[100dvh] flex-col bg-canvas">
       <TopNav>
+        <SearchBox compact />
         <button
           onClick={() => nav('/search')}
           className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"

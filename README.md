@@ -92,7 +92,7 @@ problemas) en [docs/WINDOWS.md](docs/WINDOWS.md).
 ### Linux · tarball CLI
 
 ```bash
-curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.3.0-linux-x86_64.tar.gz | tar -xz
+curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.4.0-linux-x86_64.tar.gz | tar -xz
 sudo mv videodrome /usr/local/bin/
 sudo apt install ffmpeg
 ```
@@ -411,6 +411,7 @@ cargo check --features gui
 cargo clippy --all-targets -- -D warnings
 cargo clippy --features gui --all-targets -- -D warnings
 cargo test --features gui
+cd ui && npm run lint
 ```
 
 ---

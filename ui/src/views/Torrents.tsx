@@ -3,12 +3,14 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { ResumeDialog } from '../components/ResumeDialog'
+import { SearchBox } from '../components/SearchBox'
 import { StreamPanel } from '../components/StreamPanel'
 import { TopNav } from '../components/TopNav'
 import {
   audioFlag,
   ffmpegAvailable,
   formatSize,
+  getMovieView,
   getPreferences,
   getResume,
   isTauri,
@@ -18,6 +20,9 @@ import {
   searchTorrentsSeries,
   startStreamWithSub,
   stopStream,
+  tmdbBackdrop,
+  tmdbPoster,
+  type MovieView,
   type ProviderStatus,
   type Resume,
   type StreamInfo,
@@ -84,6 +89,34 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
   // Panel toggle: false = stream progress, true = magnet raw text
   const [showMagnet, setShowMagnet] = useState(false)
 
+  // Detalle TMDB de la película (solo mode='tmdb'). Pintamos un
+  // header estilo SeriesHeader con backdrop + poster + sinopsis por
+  // encima de la lista de torrents. Antes esto vivía en un
+  // `MovieDetailModal` que se abría al clicar una card en Recs;
+  // pasarlo aquí elimina un paso intermedio y unifica el shape con
+  // el flujo de series (donde SeriesDetail ya hace este papel).
+  const [movieView, setMovieView] = useState<MovieView | null>(null)
+  useEffect(() => {
+    if (mode !== 'tmdb') return
+    const id = Number(tmdbId ?? '')
+    if (!Number.isFinite(id) || id <= 0) return
+    let cancelled = false
+    // No reseteamos `movieView` de forma síncrona aquí: react-hooks
+    // v7 marca setState en cuerpo de efecto como "cascading render".
+    // Cada ruta /torrents/tmdb/:id remonta el componente (react-router
+    // trata los path params como key), así que no hay stale data
+    // entre distintos ids. La primera carga simplemente ve `null`
+    // hasta que el fetch resuelve.
+    getMovieView(id)
+      .then((v) => {
+        if (!cancelled) setMovieView(v)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [mode, tmdbId])
+
   // Reproductor por defecto (preferencia del user). Cuando es `html`
   // y ffmpeg está en PATH, Enter/click enruta al player embebido en
   // vez de spawnear VLC. Si el user tiene `html` pero no tiene
@@ -142,6 +175,14 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
   }, [mode, tmdbId, params, season, episode])
 
   useEffect(() => {
+    // react-hooks v7 marca `runSearch()` como setState-in-effect por
+    // los `setLoading(true) / setError(null) / setResult(null) /
+    // setSel(0)` síncronos. La alternativa oficial (`useEffectEvent`)
+    // sigue experimental; los patrones de fetch-on-param-change no
+    // tienen una forma limpia en React 19 sin librerías externas
+    // (tanstack query, etc.). Disable con justificación hasta que
+    // useEffectEvent estabilice.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     runSearch()
   }, [runSearch])
 
@@ -282,7 +323,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
   const maybePromptResume = async (torrentOverride: Torrent | null = null) => {
     const target = torrentOverride ?? current
     if (!target) return
-    let resume: Resume | null = null
+    let resume: Resume | null
     try {
       // Series: pasamos S/E → backend filtra a la entrada de ese
       // episodio dentro del store multi-file. Si no hay match
@@ -415,6 +456,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
   return (
     <div className="flex h-[100dvh] flex-col bg-canvas">
       <TopNav>
+        <SearchBox compact />
         <button
           onClick={goBack}
           className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
@@ -448,6 +490,14 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
             explicada como "no hay releases" sino como "knaben cayó". */}
         {result?.providers && result.providers.length > 0 && (
           <ProviderStatusLine providers={result.providers} />
+        )}
+
+        {/* Header rico de película (solo mode='tmdb'). Emula el
+            SeriesHeader de SeriesDetail — backdrop de fondo + poster
+            + metadata + sinopsis. Se pinta también sin resultados de
+            torrents para dar contexto al "0 resultados". */}
+        {mode === 'tmdb' && movieView && (
+          <MovieHeader view={movieView} />
         )}
 
         {error && (
@@ -836,6 +886,13 @@ function EmptyResultsPanel({
   const allProvidersFailed =
     providers.length > 0 && providers.every((p) => !p.ok)
 
+  // `Date.now()` viola `react-hooks/purity` en el cuerpo del componente.
+  // Cacheamos el "ahora" en un useState lazy — se calcula una sola vez
+  // al montar y sirve para comparar contra `release_date` sin
+  // reactividad (el panel es de vida corta: aparece cuando no hay
+  // resultados y desaparece con el próximo re-search).
+  const [now] = useState(() => Date.now())
+
   // Peli en cines o próxima: `release_date` de TMDB dentro de los
   // últimos 70 días o en el futuro. Usamos 10 semanas ≈ 70 días: es
   // el gap típico entre estreno en cines y ventana digital / VOD.
@@ -845,7 +902,6 @@ function EmptyResultsPanel({
     if (!result.release_date) return false
     const d = new Date(result.release_date)
     if (Number.isNaN(d.getTime())) return false
-    const now = Date.now()
     const seventyDaysMs = 70 * 24 * 3600 * 1000
     return d.getTime() > now - seventyDaysMs
   })()
@@ -906,3 +962,95 @@ function EmptyResultsPanel({
     </div>
   )
 }
+
+/** Header rico de película: backdrop de fondo + poster + metadata +
+ * sinopsis. Diseño alineado con `SeriesHeader` (SeriesDetail.tsx) para
+ * que ambos flujos —serie y peli— den la misma sensación al llegar a
+ * la selección de release. Antes esta info vivía en un modal previo
+ * que forzaba un click extra por peli; ahora es contexto inline.
+ *
+ * `line-clamp-4` porque la lista de torrents es el foco de la vista:
+ * si el user quiere la sinopsis completa la puede leer con hover del
+ * navegador (title attr no aplica bien a párrafos, así que mostramos
+ * lo que cabe). En panel colapsable evitamos crecer la vista y
+ * empujar la tabla fuera de viewport.
+ */
+function MovieHeader({ view }: { view: MovieView }) {
+  const backdrop = tmdbBackdrop(view.backdrop_path)
+  const poster = tmdbPoster(view.poster_path)
+  const year = view.release_date?.slice(0, 4) ?? null
+  const runtime = view.runtime
+  const rating = view.vote_average
+  const genres = view.genres
+
+  return (
+    <div className="relative overflow-hidden rounded-lg border border-hairline bg-surface">
+      {backdrop && (
+        <div
+          className="absolute inset-0 bg-cover bg-center opacity-25"
+          style={{ backgroundImage: `url(${backdrop})` }}
+          aria-hidden
+        />
+      )}
+      <div className="relative flex gap-5 p-5">
+        {poster && (
+          <img
+            src={poster}
+            alt={view.title}
+            className="h-[168px] w-[112px] shrink-0 rounded-poster object-cover shadow-lg"
+            draggable={false}
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="mb-1 flex items-baseline gap-3">
+            <h2 className="truncate text-[18px] font-semibold text-ink">
+              {view.title}
+            </h2>
+            {year && (
+              <span className="shrink-0 text-[13px] text-muted">{year}</span>
+            )}
+          </div>
+          <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-dim">
+            {runtime != null && runtime > 0 && (
+              <span>{formatRuntime(runtime)}</span>
+            )}
+            {rating > 0 && (
+              <>
+                {runtime != null && runtime > 0 && <span aria-hidden>·</span>}
+                <span className="inline-flex items-center gap-1">
+                  <span className="text-accent">★</span>
+                  {rating.toFixed(1)}
+                </span>
+              </>
+            )}
+            {genres.length > 0 && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="truncate">{genres.slice(0, 4).join(' · ')}</span>
+              </>
+            )}
+          </div>
+          {view.tagline && (
+            <p className="mb-2 truncate text-[12px] italic text-muted">
+              {view.tagline}
+            </p>
+          )}
+          {view.overview && (
+            <p className="line-clamp-4 text-[12.5px] leading-relaxed text-body">
+              {view.overview}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function formatRuntime(mins: number): string {
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  if (h === 0) return `${m} min`
+  if (m === 0) return `${h} h`
+  return `${h} h ${m} min`
+}
+

@@ -150,6 +150,7 @@ export function SubsPanel({
   // Sincroniza selectedLang si cambia la lista (nueva peli, refetch).
   useEffect(() => {
     if (selectedLang && langs.some((l) => l.code === selectedLang)) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset s\u00edncrono cuando el idioma actual desaparece de la lista.
     setSelectedLang(defaultLang)
   }, [defaultLang, langs, selectedLang])
 

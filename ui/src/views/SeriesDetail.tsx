@@ -50,6 +50,7 @@ export function SeriesDetail() {
   // Fetch series details on mount.
   useEffect(() => {
     if (!isTauri()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Gate no-Tauri: setState síncrona con return inmediato.
       setError(t('series.tauriRequired'))
       setLoading(false)
       return
@@ -75,12 +76,13 @@ export function SeriesDetail() {
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false))
-  }, [tmdbId])
+  }, [tmdbId, t])
 
   // Fetch episodes when the season changes.
   useEffect(() => {
     if (!isTauri() || !tmdbId || selectedSeason == null) return
     const id = Number(tmdbId)
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset síncrono al cambiar de temporada; el fetch es async.
     setEpsLoading(true)
     setEpisodes([])
     setSel(0)

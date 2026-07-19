@@ -38,6 +38,7 @@ export function Home() {
 
   useEffect(() => {
     if (!isTauri()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Gate no-Tauri: setState síncrona única para el dev en web puro; no cascada porque retornamos.
       setLoggedIn(false)
       return
     }
