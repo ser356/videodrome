@@ -57,6 +57,16 @@ pub struct TmdbMovie {
     /// la GUI enruta la búsqueda de torrents por `imdb_id` / query directa.
     pub id: u64,
     pub title: String,
+    /// Título en el idioma original (típicamente inglés — lo que
+    /// scene/P2P usa en el naming). Puede coincidir con `title` si
+    /// la peli es del idioma que TMDB nos devuelve. Se puebla desde
+    /// `/search/movie` (siempre presente) y `/search/multi`. Crítico
+    /// para el probe de `torrent_count` en `search_movies_tmdb`:
+    /// buscar "La pasión de China Blue" en scene devuelve 0 hits,
+    /// buscar "Crimes of Passion" devuelve decenas. `#[serde(default)]`
+    /// para compat con cache disk pre-Fase.
+    #[serde(default)]
+    pub original_title: Option<String>,
     #[serde(default)]
     pub vote_average: f32,
     #[allow(dead_code)]
@@ -735,6 +745,7 @@ impl<'a> TmdbClient<'a> {
                 Some(TmdbMovie {
                     id: c.id,
                     title,
+                    original_title: None,
                     vote_average: c.vote_average,
                     popularity: c.popularity,
                     release_date: c.release_date,
@@ -1165,6 +1176,15 @@ impl<'a> TmdbClient<'a> {
             title: Option<String>,
             #[serde(default)]
             name: Option<String>,
+            /// Título original (idioma nativo) — pelis: `original_title`,
+            /// series: `original_name`. Necesario para el probe de
+            /// `torrent_count` en `search_movies_tmdb`: buscar el
+            /// título localizado en apibay/knaben da 0 hits, buscar
+            /// el original da los reales del scene.
+            #[serde(default)]
+            original_title: Option<String>,
+            #[serde(default)]
+            original_name: Option<String>,
             #[serde(default)]
             release_date: Option<String>,
             #[serde(default)]
@@ -1216,6 +1236,11 @@ impl<'a> TmdbClient<'a> {
             if title.is_empty() {
                 continue;
             }
+            let original_title = match kind {
+                MediaKind::Movie => hit.original_title,
+                MediaKind::Series => hit.original_name,
+            }
+            .filter(|s| !s.is_empty() && s != &title);
             let release_date = match kind {
                 MediaKind::Movie => hit.release_date,
                 MediaKind::Series => hit.first_air_date,
@@ -1223,6 +1248,7 @@ impl<'a> TmdbClient<'a> {
             out.push(TmdbMovie {
                 id: hit.id,
                 title,
+                original_title,
                 vote_average: hit.vote_average,
                 popularity: hit.popularity,
                 release_date: release_date.filter(|s| !s.is_empty()),
@@ -1776,6 +1802,7 @@ pub async fn search_cinemeta_movies(http: &reqwest::Client, query: &str) -> Resu
             TmdbMovie {
                 id: 0,
                 title: m.name,
+                original_title: None,
                 vote_average: vote,
                 popularity: 0.0,
                 release_date: year.map(|y| format!("{y}-01-01")),
@@ -1893,6 +1920,7 @@ mod tests {
         let m = TmdbMovie {
             id: 1,
             title: "X".into(),
+            original_title: None,
             vote_average: 0.0,
             popularity: 0.0,
             release_date: Some("2020-05-15".into()),
@@ -1908,6 +1936,7 @@ mod tests {
         let mut m = TmdbMovie {
             id: 1,
             title: "X".into(),
+            original_title: None,
             vote_average: 0.0,
             popularity: 0.0,
             release_date: None,

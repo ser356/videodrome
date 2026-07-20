@@ -252,6 +252,7 @@ mod tests {
         TmdbMovie {
             id,
             title: format!("Movie {id}"),
+            original_title: None,
             vote_average,
             popularity: 0.0,
             release_date: None,

@@ -61,7 +61,15 @@ use self::cache::{
     torrent_cache_put,
 };
 
-const SEARCH_CACHE_FILE: &str = "search_cache.json";
+// v2 sufijo (v1.7.2): el `torrent_count` de cada `MovieHit` cambió
+// de significado entre v1.7.0/v1.7.1 (usaba título localizado como
+// query → 0 hits para pelis no-inglesas) y v1.7.2 (usa
+// `original_title`). Con el mismo filename los usuarios que
+// arrancaron las versiones previas verían counts erróneos durante
+// 24 h. Renombramos el fichero para forzar re-fetch inmediato al
+// actualizar. `search_cache.json` queda huérfano y lo recoge el
+// prune periódico.
+const SEARCH_CACHE_FILE: &str = "search_cache_v2.json";
 const SEARCH_CACHE_TTL_SECS: u64 = 24 * 3600;
 
 /// Fase 4a — caché de resultados de búsqueda de torrents.
@@ -663,17 +671,27 @@ async fn search_movies_tmdb(
     // saturar Knaben/YTS). Pedimos solo 5 resultados por película, lo
     // justo para saber si hay algo.
     //
-    // **min_seeders=3 y title_variants=[title]**: mismo filtro que
-    // aplica la vista detallada de Torrents (`get_movie_torrents_by_tmdb`)
-    // en su forma mínima. Antes usábamos `min_seeders=0` y
-    // `title_variants=Vec::new()` para "no perder pelis oscuras",
-    // pero eso hacía que `torrent_count` mintiera: la card decía
-    // "15 torrents" y al abrir salía 0 tras el filtro real. Al
-    // hacer coincidir el filtro con el del detalle, `torrent_count`
-    // es un predictor fiable (subestimando en pelis cuyo detalle
-    // añade alt_titles que ensanchan recall). El toggle
-    // `hide_empty_results` de Ajustes ahora sí oculta lo que
-    // efectivamente no daría torrents al abrir.
+    // **Query = `original_title` cuando existe** (v1.7.2): scene/P2P
+    // siempre nombra las pelis en el idioma original. TMDB con
+    // `locale=es-ES` devuelve "La pasión de China Blue" en `title`
+    // — buscar ese string en apibay/knaben devuelve 0 hits. Scene
+    // indexa "Crimes of Passion" (original_title). Sin este cambio,
+    // toda peli no-inglesa se quedaba con `torrent_count = 0`
+    // aunque tuviera decenas de releases con el título original.
+    //
+    // **title_variants = [orig, localized] dedup**: acepta releases
+    // parseados con cualquiera de las dos formas. Si `original_title`
+    // es None (peli inglesa donde ya coincide con `title`) queda como
+    // `[title]`.
+    //
+    // **min_seeders=1**: la vista detallada usa 3, pero para el
+    // conteo del catálogo aceptamos 1+ para no ocultar pelis
+    // indies/oscuras cuyo swarm apenas respira. Sigue matando
+    // el ruido de swarms muertos (=0 seeders). Trade-off consciente:
+    // `torrent_count > 0` no garantiza al 100 % que la vista
+    // detallada mostrará algo (por el bump a 3 seeders), pero
+    // subestimar aquí ha probado ser peor UX (feed vacío para
+    // catálogos indies).
     let checks = movies.into_iter().enumerate().map(|(idx, m)| {
         let providers = providers.clone();
         let http = http.clone();
@@ -685,19 +703,31 @@ async fn search_movies_tmdb(
             if matches!(m.kind, crate::tmdb::MediaKind::Series) {
                 return (idx, m, 0u32);
             }
-            let title = m.title.clone();
+            let localized = m.title.clone();
+            let original = m
+                .original_title
+                .clone()
+                .filter(|s| !s.is_empty() && s != &localized);
+            let query_title = original.clone().unwrap_or_else(|| localized.clone());
+            let mut variants: Vec<String> = Vec::with_capacity(2);
+            if let Some(o) = original {
+                variants.push(o);
+            }
+            if !variants.iter().any(|v| v == &localized) {
+                variants.push(localized);
+            }
             let q = MovieQuery {
-                title: title.clone(),
+                title: query_title,
                 year: m.year(),
                 imdb_id: m.imdb_id.clone(),
                 tmdb_id: if m.id > 0 { Some(m.id) } else { None },
                 original_language: None,
-                title_variants: vec![title],
+                title_variants: variants,
                 kind: crate::tmdb::MediaKind::Movie,
                 season: None,
                 episode: None,
             };
-            let list = torrents::search_all(&http, &providers, &q, 3, 5).await;
+            let list = torrents::search_all(&http, &providers, &q, 1, 5).await;
             (idx, m, list.results.len() as u32)
         }
     });
