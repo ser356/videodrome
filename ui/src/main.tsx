@@ -9,7 +9,7 @@ import {
   setClientCapabilities,
 } from './lib/api'
 import { initLocale } from './lib/i18n'
-import { applyGlassOpacity } from './lib/theme'
+import { applyGlassOpacity, applySkin } from './lib/theme'
 import { Home } from './views/Home'
 import { Login } from './views/Login'
 import { Player } from './views/Player'
@@ -26,7 +26,10 @@ import { Torrents } from './views/Torrents'
 // del CSS (`--glass-opaque: 0`).
 if (isTauri()) {
   getPreferences()
-    .then((p) => applyGlassOpacity(p.glass_opacity))
+    .then((p) => {
+      applyGlassOpacity(p.glass_opacity)
+      applySkin(p.skin)
+    })
     .catch(() => {})
 
   // Audit §4: registra las capacidades del WebView (`canPlayType`

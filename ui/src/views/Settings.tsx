@@ -30,7 +30,7 @@ import {
 } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
 import { getLocale, LOCALE_LABELS, setLocale, SUPPORTED_LOCALES, useT } from '../lib/i18n'
-import { applyGlassOpacity } from '../lib/theme'
+import { applyGlassOpacity, applySkin, SKINS } from '../lib/theme'
 
 /**
  * Vista de Ajustes. Tres bloques:
@@ -451,6 +451,8 @@ function PreferencesEditor({
   const [ttl, setTtl] = useState(prefs.stream_cache_ttl_days)
   const [glass, setGlass] = useState(prefs.glass_opacity)
   const [player, setPlayer] = useState<'html' | 'vlc'>(prefs.default_player)
+  const [hideEmpty, setHideEmpty] = useState(prefs.hide_empty_results ?? false)
+  const [skin, setSkin] = useState(prefs.skin ?? 'videodrome')
   // Idioma UI: se aplica en VIVO al cambiarlo (sin esperar a "Guardar")
   // para que el user vea el efecto inmediato. La persistencia va con
   // el submit — pero `setLocale` ya persiste por su cuenta (best-effort),
@@ -464,7 +466,9 @@ function PreferencesEditor({
     langs.trim() !== prefs.subtitle_languages.trim() ||
     ttl !== prefs.stream_cache_ttl_days ||
     glass !== prefs.glass_opacity ||
-    player !== prefs.default_player
+    player !== prefs.default_player ||
+    hideEmpty !== (prefs.hide_empty_results ?? false) ||
+    skin !== (prefs.skin ?? 'videodrome')
 
   // Preview en vivo del slider de liquid glass: aplicamos la variable
   // CSS al arrastrar aunque el usuario aún no haya pulsado "Guardar".
@@ -473,6 +477,13 @@ function PreferencesEditor({
   useEffect(() => {
     applyGlassOpacity(glass)
   }, [glass])
+
+  // Preview en vivo de la skin: al pinchar un swatch la app entera
+  // se re-tinta al instante. Si el user sale sin guardar, `main.tsx`
+  // re-aplicará la persistida al próximo arranque.
+  useEffect(() => {
+    applySkin(skin)
+  }, [skin])
 
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -590,6 +601,73 @@ function PreferencesEditor({
         </div>
       </Field>
 
+      <Field
+        label={t('settings.search.hideEmpty')}
+        hint={t('settings.search.hideEmptyHint')}
+      >
+        <button
+          type="button"
+          role="switch"
+          aria-checked={hideEmpty}
+          onClick={() => setHideEmpty((v) => !v)}
+          className={`focus-ring relative h-7 w-12 rounded-full border transition-colors ${
+            hideEmpty
+              ? 'border-accent bg-accent/40'
+              : 'border-hairline bg-surface'
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 h-5 w-5 rounded-full bg-ink transition-transform ${
+              hideEmpty ? 'translate-x-6' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
+      </Field>
+
+      <Field
+        label={t('settings.skin.label')}
+        hint={t('settings.skin.hint')}
+        span="full"
+      >
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+          {SKINS.map((s) => {
+            const active = skin === s.id
+            const canvas = s.vars['--color-canvas']
+            const accent = s.vars['--color-accent']
+            return (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => setSkin(s.id)}
+                aria-pressed={active}
+                title={s.label}
+                className={`focus-ring group relative overflow-hidden rounded-md border transition-transform ${
+                  active
+                    ? 'border-accent scale-[1.02] shadow-[0_0_0_2px_var(--color-accent)]'
+                    : 'border-hairline hover:scale-[1.02]'
+                }`}
+              >
+                {/* Swatch 2×1: mitad canvas, mitad accent. Da una
+                    lectura inmediata del contraste de la skin. */}
+                <div className="flex h-12 w-full">
+                  <div
+                    className="h-full w-1/2"
+                    style={{ background: canvas }}
+                  />
+                  <div
+                    className="h-full w-1/2"
+                    style={{ background: accent }}
+                  />
+                </div>
+                <div className="px-2 py-1 text-center text-[10px] uppercase tracking-wide text-body">
+                  {s.label}
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      </Field>
+
       <div className="flex items-end justify-end sm:col-span-2">
         <button
           disabled={!dirty || saving}
@@ -600,6 +678,8 @@ function PreferencesEditor({
               stream_cache_ttl_days: ttl,
               glass_opacity: glass,
               default_player: player,
+              hide_empty_results: hideEmpty,
+              skin,
               // Preservamos el idioma actual — no se toca desde el
               // botón "Guardar" (se persiste inline con setLocale).
               ui_language: ui,
@@ -618,13 +698,20 @@ function Field({
   label,
   hint,
   children,
+  span,
 }: {
   label: string
   hint?: string
   children: React.ReactNode
+  /** `'full'` fuerza que el field ocupe las 2 columnas del grid
+   * padre en breakpoints `sm+`. Útil para pickers visuales
+   * (skins, grids de swatches). */
+  span?: 'full'
 }) {
   return (
-    <label className="flex flex-col gap-1.5">
+    <label
+      className={`flex flex-col gap-1.5 ${span === 'full' ? 'sm:col-span-2' : ''}`}
+    >
       <span className="text-[12px] uppercase tracking-wide text-dim">
         {label}
       </span>

@@ -314,4 +314,26 @@ export const en: Record<string, string> = {
   'player.ffmpegHintLinux':
     'Install it via your distro package manager (`sudo apt install ffmpeg`, `sudo dnf install ffmpeg`, `sudo pacman -S ffmpeg`).',
   'player.ffmpegHintGeneric': 'Install ffmpeg and make sure it is in the PATH.',
+
+  // ── Player: subtitle drag&drop ────────────────────────
+  'player.subDropTitle': 'Drop to add subtitles',
+  'player.subDropHint': '.srt · .vtt · .ass · .ssa',
+  'player.subDropInvalid': 'Unsupported format. Try a .srt or .vtt file.',
+
+  // ── Home: continue watching ───────────────────────────
+  'home.continueWatching': 'Continue watching',
+  'home.minutesLeft': '{{n}} min left',
+  'home.inProgress': 'In progress',
+  'home.removeFromContinue': 'Remove from continue watching',
+
+  // ── Search filter (Settings + SearchResults) ─────────
+  'searchResults.matchesFiltered': '{{n}} matches · {{hidden}} without torrents hidden',
+  'searchResults.emptyHintFiltered':
+    'None of the matches has torrents available. Disable "hide results without torrents" in Settings to see them.',
+  'settings.search.hideEmpty': 'Hide results without torrents',
+  'settings.search.hideEmptyHint':
+    'Filters search matches that have no torrents available. Movies only (series do not report availability until you pick an episode).',
+  'settings.skin.label': 'Skin',
+  'settings.skin.hint':
+    'App color preset. Applied live; persisted on save.',
 }

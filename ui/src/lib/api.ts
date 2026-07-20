@@ -578,7 +578,15 @@ export const stopStream = (id: number) => invoke<void>('stop_stream', { id })
  *     se cierra (path VLC y compat con caché legacy). El caller lo
  *     multiplica por `runtime_minutes × 60` para sacar segundos.
  *
- * Ambos campos pueden coexistir; el frontend prefiere `seconds`. */
+/** Snapshot de la pista de subs persistida entre sesiones —
+ * hidrata el `activeSub` del Player al re-entrar a la misma peli.
+ * Discriminated union por `source`; forma idéntica a la del backend
+ * (`LastSub` en `stream::movie_progress`). */
+export type LastSubDto =
+  | { source: 'openSubs'; path: string; release: string; language: string }
+  | { source: 'embedded'; idx: number; release: string; language: string }
+
+/** Ambos campos pueden coexistir; el frontend prefiere `seconds`. */
 export interface Resume {
   fraction: number
   seconds: number | null
@@ -588,13 +596,17 @@ export interface Resume {
    * pelis o entradas legacy. */
   season?: number | null
   episode?: number | null
+  /** Sub activo la última vez que se cerró la peli. `null` para
+   * entradas legacy (per-infohash resume) o sin subs. */
+  last_sub?: LastSubDto | null
 }
 
 export const getResume = (
   magnet: string,
   season: number | null = null,
   episode: number | null = null,
-) => invoke<Resume | null>('get_resume', { magnet, season, episode })
+  tmdbId: number | null = null,
+) => invoke<Resume | null>('get_resume', { magnet, season, episode, tmdbId })
 
 /** Reporta la posición absoluta del `<video>` al backend para que la
  * persista en `resume.json`. Se invoca cada ~15s durante la
@@ -603,7 +615,13 @@ export const getResume = (
  *
  * `season`/`episode`/`tmdbId` (opcionales): metadata que se guarda
  * con la entrada para habilitar "continuar viendo" y "siguiente
- * episodio" (§6 audit). */
+ * episodio" (§6 audit).
+ *
+ * `title`/`imdbId`/`posterPath`/`backdropPath`/`year`/`magnet` (opcionales):
+ * snapshot para el store movie-level (`movie_progress.json`) —
+ * habilita la sección "Seguir viendo" en Home sin depender de que
+ * TMDB responda offline. Solo se persiste cuando `tmdbId` está
+ * presente. */
 export const reportPosition = (
   streamId: number,
   seconds: number,
@@ -611,6 +629,16 @@ export const reportPosition = (
   season: number | null = null,
   episode: number | null = null,
   tmdbId: number | null = null,
+  title: string | null = null,
+  imdbId: string | null = null,
+  posterPath: string | null = null,
+  backdropPath: string | null = null,
+  year: number | null = null,
+  magnet: string | null = null,
+  /** Snapshot de la pista de subs. `undefined` = no toques el
+   * campo (útil para pings periódicos). `{source:'none'}` = clear
+   * explícito. Cualquier otra variante actualiza. */
+  lastSub: LastSubDto | { source: 'none' } | undefined = undefined,
 ) =>
   invoke<void>('report_position', {
     streamId,
@@ -619,7 +647,45 @@ export const reportPosition = (
     season,
     episode,
     tmdbId,
+    title,
+    imdbId,
+    posterPath,
+    backdropPath,
+    year,
+    magnet,
+    lastSub: lastSub ?? null,
   })
+
+/** Entrada del catálogo "seguir viendo" (Home). Un mirror TS del
+ * `WatchProgressDto` del backend, con `snake_case` porque Tauri
+ * serializa los tipos de retorno tal cual salen de serde. */
+export interface WatchProgress {
+  tmdb_id: number
+  kind: 'movie' | 'series'
+  season: number | null
+  episode: number | null
+  title: string
+  poster_path: string | null
+  backdrop_path: string | null
+  imdb_id: string | null
+  year: number | null
+  /** Último magnet reproducido. `null` en entradas viejas escritas
+   * antes de que el frontend empezara a mandarlo. */
+  last_magnet: string | null
+  seconds: number
+  duration_seconds: number
+  updated_at: number
+}
+
+export const listWatchProgress = () =>
+  invoke<WatchProgress[]>('list_watch_progress')
+
+export const removeWatchProgress = (
+  tmdbId: number,
+  season: number | null = null,
+  episode: number | null = null,
+) =>
+  invoke<void>('remove_watch_progress', { tmdbId, season, episode })
 
 // -------- Subtitles --------
 
@@ -690,6 +756,16 @@ export interface Preferences {
    * persiste aquí. Se usa además como primer idioma al buscar
    * subtítulos (el UI lang sale arriba en OpenSubtitles). */
   ui_language: string | null
+  /** Si `true`, la vista de resultados de búsqueda filtra los TMDB
+   * hits que no tienen ningún torrent conocido. Trade-off: primera
+   * carga N × search real (~3s por peli sin cache), veces siguientes
+   * lee del `torrent_cache` (instantáneo). */
+  hide_empty_results: boolean
+  /** Skin de apariencia. Identificador estable (`"videodrome"`,
+   * `"noir"`, `"tokyo"`, `"vapor"`, `"sepia"`, `"forest"`). El
+   * catálogo vive en `lib/theme.ts::SKINS`; un id desconocido cae
+   * al default. */
+  skin: string
 }
 
 export const cacheInfo = () => invoke<CacheEntry[]>('cache_info')

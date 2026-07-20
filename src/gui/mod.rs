@@ -1467,6 +1467,12 @@ struct ResumeDto {
     updated_at: u64,
     season: Option<u16>,
     episode: Option<u16>,
+    /// Sub que estaba activo la última vez que el user salió. `None`
+    /// para entradas viejas (per-infohash resume) o cuando el user
+    /// nunca activó subs. El frontend hidrata su `activeSub` con
+    /// esto al montar el Player — feature "los subs se mantienen
+    /// entre sesiones".
+    last_sub: Option<stream::LastSub>,
 }
 
 #[tauri::command]
@@ -1474,14 +1480,39 @@ async fn get_resume(
     magnet: String,
     season: Option<u16>,
     episode: Option<u16>,
+    tmdb_id: Option<u64>,
 ) -> Result<Option<ResumeDto>, String> {
+    // Prioridad 1: store de PROGRESO POR PELÍCULA (`movie_progress.json`).
+    // Es lo que el user espera cuando ha visto la peli con OTRO
+    // torrent y ahora abre uno nuevo — mismo tmdb_id, misma posición.
+    // Solo aplicable cuando el caller conoce el tmdb_id (flujo Recs,
+    // Search TMDB, Series). En modo directo (búsqueda libre por
+    // magnet sin TMDB match) caemos al per-infohash sin este atajo.
+    if let Some(id) = tmdb_id {
+        if let Some(mp) = stream::load_movie_progress(id, season, episode) {
+            return Ok(Some(ResumeDto {
+                fraction: 0.0,
+                seconds: Some(mp.seconds),
+                duration_seconds: if mp.duration_seconds > 0.0 {
+                    Some(mp.duration_seconds)
+                } else {
+                    None
+                },
+                updated_at: mp.updated_at,
+                season: mp.season,
+                episode: mp.episode,
+                last_sub: mp.last_sub,
+            }));
+        }
+    }
     let Some(hash) = stream::parse_infohash(&magnet) else {
         return Ok(None);
     };
-    // Antes de start_stream no conocemos el file_id → usamos
-    // `load_resume_any`. Cuando el user viene del flujo de serie
-    // pasa (season, episode) → filtra a la entrada exacta y no
-    // devuelve el resume de otro episodio del mismo pack.
+    // Fallback: resume per-infohash. Antes de start_stream no
+    // conocemos el file_id → `load_resume_any`. Cuando el user
+    // viene del flujo de serie pasa (season, episode) → filtra a la
+    // entrada exacta y no devuelve el resume de otro episodio del
+    // mismo pack.
     let target = season.zip(episode);
     Ok(stream::load_resume_any(&hash, target).map(|r| ResumeDto {
         fraction: r.fraction,
@@ -1490,6 +1521,7 @@ async fn get_resume(
         updated_at: r.updated_at,
         season: r.episode.as_ref().map(|e| e.season),
         episode: r.episode.as_ref().map(|e| e.episode),
+        last_sub: None,
     }))
 }
 
@@ -1503,11 +1535,68 @@ async fn get_resume(
 /// metadata de episodio en la entrada del store — habilita
 /// "continuar viendo" y "siguiente episodio" (§6 audit).
 ///
+/// Además, cuando `tmdb_id` está presente, escribe TAMBIÉN al store
+/// global `movie_progress.json` — la fuente de verdad para "seguir
+/// viendo" y para que la posición se comparta entre distintos
+/// torrents de la misma peli/episodio (el user reportaba que cada
+/// release arrancaba el marker de cero).
+///
 /// Errores no bloquean al player: si el `stream_id` ya no está vivo
 /// (stopStream previo, race con navigate away), devolvemos Ok sin más.
 /// Si el magnet no tiene infohash reconocible (caché en tempdir, sin
 /// persistencia), tampoco es error — simplemente no hay dónde escribir.
+/// Payload aceptado por `report_position` para actualizar el sub
+/// activo. Discriminated union por `source`: `openSubs`/`embedded`
+/// son los estados normales, `none` significa "el user desactivó
+/// los subs explícitamente" → borra el campo. `null` en el JSON
+/// (Option outer ausente) significa "no toques el campo".
+#[derive(Deserialize)]
+#[serde(tag = "source", rename_all = "camelCase")]
+enum LastSubPayload {
+    #[serde(rename_all = "camelCase")]
+    OpenSubs {
+        path: String,
+        release: String,
+        language: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Embedded {
+        idx: usize,
+        release: String,
+        language: String,
+    },
+    /// `{"source":"none"}` explícito → clear del campo.
+    None,
+}
+
+impl LastSubPayload {
+    fn into_update(self) -> stream::LastSubUpdate {
+        match self {
+            Self::OpenSubs {
+                path,
+                release,
+                language,
+            } => stream::LastSubUpdate::Set(stream::LastSub::OpenSubs {
+                path,
+                release,
+                language,
+            }),
+            Self::Embedded {
+                idx,
+                release,
+                language,
+            } => stream::LastSubUpdate::Set(stream::LastSub::Embedded {
+                idx,
+                release,
+                language,
+            }),
+            Self::None => stream::LastSubUpdate::Clear,
+        }
+    }
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn report_position(
     stream_id: u64,
     seconds: f64,
@@ -1515,6 +1604,18 @@ async fn report_position(
     season: Option<u16>,
     episode: Option<u16>,
     tmdb_id: Option<u64>,
+    title: Option<String>,
+    imdb_id: Option<String>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    year: Option<u16>,
+    magnet: Option<String>,
+    // Snapshot de la pista de subs activa. `Some(...)` para
+    // actualizar; `None` significa "no toques el campo" (permite
+    // que el timer periódico no tenga que re-enviar el sub en cada
+    // ping). El frontend manda `Some({source:'none'})` como señal
+    // explícita de "clear" — deserializamos como `Some(Clear)`.
+    last_sub: Option<LastSubPayload>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // Sanea entradas no finitas: HLS puede reportar `duration = Infinity`
@@ -1531,14 +1632,102 @@ async fn report_position(
             .get(&stream_id)
             .map(|s| (s.handle.infohash.clone(), s.handle.file_id))
     };
-    if let Some((Some(hash), file_id)) = handle_info {
+    if let Some((Some(hash), file_id)) = handle_info.as_ref() {
         let ep = season.zip(episode).map(|(s, e)| stream::ResumeEpisode {
             season: s,
             episode: e,
             tmdb_id,
         });
-        stream::save_position(&hash, file_id, seconds, duration_seconds, ep);
+        stream::save_position(hash, *file_id, seconds, duration_seconds, ep);
     }
+    // Store movie-level: solo escribe cuando tenemos tmdb_id (sin
+    // él la key sería ambigua, no habría forma de matchear un futuro
+    // getResume/list_watch_progress con esta entrada).
+    if let Some(id) = tmdb_id {
+        let meta = stream::MovieProgressMeta {
+            kind: if season.is_some() {
+                "series".into()
+            } else {
+                "movie".into()
+            },
+            title: title.unwrap_or_default(),
+            poster_path,
+            backdrop_path,
+            imdb_id,
+            year,
+            last_magnet: magnet,
+            last_sub: last_sub.map(LastSubPayload::into_update),
+        };
+        stream::save_movie_progress(id, season, episode, seconds, duration_seconds, meta);
+    }
+    Ok(())
+}
+
+/// DTO expuesto al frontend con progreso de una peli/episodio en
+/// curso. Se pinta en la sección "Seguir viendo" de Home. Los
+/// campos son un mirror de `stream::MovieProgress` pero con serde
+/// camelCase amigable al TS (Tauri ya hace snake→camel por defecto
+/// en los args del comando; los tipos de retorno se sirven tal cual
+/// están serializados por serde).
+#[derive(Serialize)]
+struct WatchProgressDto {
+    tmdb_id: u64,
+    kind: String,
+    season: Option<u16>,
+    episode: Option<u16>,
+    title: String,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    imdb_id: Option<String>,
+    year: Option<u16>,
+    last_magnet: Option<String>,
+    seconds: f64,
+    duration_seconds: f64,
+    updated_at: u64,
+}
+
+impl From<stream::MovieProgress> for WatchProgressDto {
+    fn from(m: stream::MovieProgress) -> Self {
+        Self {
+            tmdb_id: m.tmdb_id,
+            kind: m.kind,
+            season: m.season,
+            episode: m.episode,
+            title: m.title,
+            poster_path: m.poster_path,
+            backdrop_path: m.backdrop_path,
+            imdb_id: m.imdb_id,
+            year: m.year,
+            last_magnet: m.last_magnet,
+            seconds: m.seconds,
+            duration_seconds: m.duration_seconds,
+            updated_at: m.updated_at,
+        }
+    }
+}
+
+/// Lista el catálogo "seguir viendo" — pelis y episodios que el
+/// user dejó a mitad. Ordenado por `updated_at` DESC. Sirve para la
+/// sección homónima de Home. Filtrado (`> 2%` y `< 95%`) hecho ya en
+/// el módulo `stream::movie_progress`.
+#[tauri::command]
+async fn list_watch_progress() -> Result<Vec<WatchProgressDto>, String> {
+    Ok(stream::list_movie_progress()
+        .into_iter()
+        .map(WatchProgressDto::from)
+        .collect())
+}
+
+/// Borra una entrada del catálogo "seguir viendo". Ligado al icono
+/// "quitar" que aparece al hover de cada card en Home. No devuelve
+/// error si no existe (idempotente).
+#[tauri::command]
+async fn remove_watch_progress(
+    tmdb_id: u64,
+    season: Option<u16>,
+    episode: Option<u16>,
+) -> Result<(), String> {
+    stream::remove_movie_progress(tmdb_id, season, episode);
     Ok(())
 }
 
@@ -1724,15 +1913,40 @@ async fn download_subtitle(sub: Subtitle, state: State<'_, AppState>) -> Result<
     Ok(path.display().to_string())
 }
 
-/// Lee un `.srt` local (path devuelto por `download_subtitle`) y lo
-/// convierte a WebVTT en memoria. El player HTML lo consume vía
+/// Lee un fichero de subtítulos local (path arbitrario: descargado
+/// por `download_subtitle`, extraído por ffmpeg a temp, o **soltado
+/// por el user via drag&drop** desde su file manager) y lo devuelve
+/// como WebVTT en memoria. El player HTML lo consume vía
 /// `URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }))` para
 /// alimentar un `<track>` sin escribir un fichero temporal más.
+///
+/// Formato detectado por contenido, no por extensión (los `.srt` que
+/// vienen de compresores raros a veces vienen sin extensión, y los
+/// `.vtt` con extensión inventada existen):
+///
+///   * Si el fichero empieza por `WEBVTT` (opcionalmente con BOM
+///     UTF-8), se devuelve tal cual — ya es un VTT válido.
+///   * Cualquier otra cosa se asume SRT y se pasa por `srt_to_vtt`
+///     (que ya sabe manejar mojibake, encodings raros, BOM…).
+///
+/// Casos NO soportados hoy: ASS/SSA (styling complejo, requiere
+/// converter dedicado) y bitmap subs (PGS/DVBSUB, ya se filtran
+/// arriba en la UI). Un `.ass` soltado se detectará como "no
+/// WEBVTT" y se pasará a `srt_to_vtt`, que devolverá basura — el
+/// user verá los cues raros pero no crashea.
 #[tauri::command]
 async fn subtitle_to_vtt(path: String) -> Result<String, String> {
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| format!("No se pudo leer {path}: {e}"))?;
+    // Detección WEBVTT: skip BOM UTF-8 (`EF BB BF`) si existe, y
+    // comprueba el header. Case-sensitive: la spec obliga a
+    // mayúsculas.
+    let head = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    if head.starts_with(b"WEBVTT") {
+        let text = String::from_utf8_lossy(head).into_owned();
+        return Ok(text);
+    }
     Ok(subtitles::srt_to_vtt(&bytes))
 }
 
@@ -2100,6 +2314,8 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             stop_stream,
             get_resume,
             report_position,
+            list_watch_progress,
+            remove_watch_progress,
             subtitles_available,
             search_subtitles,
             download_subtitle,

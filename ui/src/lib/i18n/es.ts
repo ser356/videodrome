@@ -312,4 +312,26 @@ export const es: Record<string, string> = {
   'player.ffmpegHintLinux':
     'Instálalo con el gestor de paquetes de tu distro (`sudo apt install ffmpeg`, `sudo dnf install ffmpeg`, `sudo pacman -S ffmpeg`).',
   'player.ffmpegHintGeneric': 'Instala ffmpeg y asegúrate de que esté en el PATH.',
+
+  // ── Player: drag&drop de subs ─────────────────────────
+  'player.subDropTitle': 'Suelta para añadir subtítulos',
+  'player.subDropHint': '.srt · .vtt · .ass · .ssa',
+  'player.subDropInvalid': 'Formato no soportado. Prueba con .srt o .vtt.',
+
+  // ── Home: seguir viendo ───────────────────────────────
+  'home.continueWatching': 'Seguir viendo',
+  'home.minutesLeft': '{{n}} min restantes',
+  'home.inProgress': 'En curso',
+  'home.removeFromContinue': 'Quitar de "seguir viendo"',
+
+  // ── Search filter (Settings + SearchResults) ─────────
+  'searchResults.matchesFiltered': '{{n}} coincidencias · {{hidden}} sin torrents ocultas',
+  'searchResults.emptyHintFiltered':
+    'Ninguna de las coincidencias tiene torrents disponibles. Desactiva "ocultar resultados sin torrents" en Ajustes para verlas.',
+  'settings.search.hideEmpty': 'Ocultar resultados sin torrents',
+  'settings.search.hideEmptyHint':
+    'Filtra las coincidencias de búsqueda sin torrents disponibles. Solo pelis (las series no reportan disponibilidad hasta que eliges episodio).',
+  'settings.skin.label': 'Skin',
+  'settings.skin.hint':
+    'Preset de color de la app. El cambio se aplica en vivo; se persiste al guardar.',
 }

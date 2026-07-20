@@ -92,6 +92,24 @@ pub struct Preferences {
     /// se trata como 8 (default).
     #[serde(default = "default_hls_disk_budget_gb")]
     pub hls_disk_budget_gb: u32,
+    /// Si `true`, la vista de resultados de búsqueda (SearchResults)
+    /// filtra los TMDB hits para los que ningún provider tiene
+    /// torrents publicados. Coste: N consultas a
+    /// `has_torrents_for_tmdb` en paralelo — la primera vez para
+    /// cada peli hace search real (aprox. 3s por candidato con
+    /// concurrencia 4); veces siguientes leen del `torrent_cache`
+    /// (instantáneo). Default false para no penalizar arranque en
+    /// frío.
+    #[serde(default)]
+    pub hide_empty_results: bool,
+    /// Skin de apariencia. Identificador estable (`"videodrome"`,
+    /// `"noir"`, `"tokyo"`, `"vapor"`, `"sepia"`). El frontend lo
+    /// aplica al arrancar cambiando variables CSS (`--color-canvas`,
+    /// `--color-accent`, etc.); no requiere reload. Nombres validados
+    /// en el frontend — si aquí viene uno desconocido cae al default
+    /// del CSS.
+    #[serde(default = "default_skin")]
+    pub skin: String,
 }
 
 /// Estrategia de calidad para el pipeline HLS. Ver
@@ -139,6 +157,10 @@ fn default_hls_disk_budget_gb() -> u32 {
     8
 }
 
+fn default_skin() -> String {
+    "videodrome".to_string()
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -150,6 +172,8 @@ impl Default for Preferences {
             ui_language: None,
             quality_mode: default_quality_mode(),
             hls_disk_budget_gb: default_hls_disk_budget_gb(),
+            hide_empty_results: false,
+            skin: default_skin(),
         }
     }
 }

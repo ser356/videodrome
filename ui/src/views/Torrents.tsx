@@ -328,10 +328,19 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
       // Series: pasamos S/E → backend filtra a la entrada de ese
       // episodio dentro del store multi-file. Si no hay match
       // (nunca reproducido), devuelve null y saltamos el prompt.
+      //
+      // Movies + Series: pasamos tmdbId (cuando lo conocemos) para
+      // que el backend priorice el store `movie_progress.json` — así
+      // el user que cambia de torrent conserva la posición, en vez
+      // de arrancar cada release de cero. En mode='direct' el
+      // tmdbId no existe y caemos al fallback per-infohash.
+      const tmdbIdNum =
+        (mode === 'tmdb' || mode === 'series') && tmdbId ? Number(tmdbId) : null
       resume = await getResume(
         target.magnet,
         mode === 'series' ? season : null,
         mode === 'series' ? episode : null,
+        Number.isFinite(tmdbIdNum) ? tmdbIdNum : null,
       )
     } catch {
       // Backend falla leyendo el resume → empezar limpio.

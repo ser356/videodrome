@@ -4,6 +4,7 @@ import { HotkeyBar } from '../components/HotkeyBar'
 import { SearchBox } from '../components/SearchBox'
 import { TopNav } from '../components/TopNav'
 import {
+  getPreferences,
   isTauri,
   searchMoviesTmdb,
   tmdbPoster,
@@ -32,6 +33,19 @@ export function SearchResults() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [sel, setSel] = useState(0)
+  /** Preferencia "Ocultar resultados sin torrents". Cargada async
+   * al montar; hasta entonces asumimos `false` (mostrar todo — es
+   * el comportamiento pre-feature). Un cambio en Ajustes NO se
+   * refleja en vivo hasta re-abrir la vista; es aceptable porque el
+   * user típicamente cambia una pref y vuelve al flow. */
+  const [hideEmpty, setHideEmpty] = useState(false)
+
+  useEffect(() => {
+    if (!isTauri()) return
+    void getPreferences()
+      .then((p) => setHideEmpty(p.hide_empty_results ?? false))
+      .catch(() => {})
+  }, [])
 
   const runSearch = useCallback(() => {
     if (!isTauri()) {
@@ -85,7 +99,23 @@ export function SearchResults() {
     )
   }
 
-  const n = items?.length ?? 0
+  // Filtro de disponibilidad. El backend ya pobla `torrent_count`
+  // en `search_movies_tmdb` — no hace falta un round-trip extra.
+  // Series NO tienen `torrent_count` significativo (siempre 0 sin
+  // S/E), así que las dejamos pasar; el filtro solo oculta pelis
+  // con cero torrents cuando la pref está ON.
+  //
+  // Definido ANTES de los hotkeys para que `move()` y el `Enter`
+  // handler indexen sobre la lista visible — sin esto, el usuario
+  // podría "seleccionar" filas invisibles (sel > visible.length) o
+  // acabar en una peli sin torrents que acabamos de filtrar.
+  const visibleItems: MovieHit[] | null = items && hideEmpty
+    ? items.filter((m) => m.kind === 'series' || m.torrent_count > 0)
+    : items
+  const hiddenCount =
+    items && hideEmpty ? items.length - (visibleItems?.length ?? 0) : 0
+
+  const n = visibleItems?.length ?? 0
   const move = (delta: number) => {
     if (n === 0) return
     setSel((i) => (i + delta + n) % n)
@@ -101,11 +131,12 @@ export function SearchResults() {
     {
       key: 'Enter',
       hint: t('hotkey.torrents'),
-      run: () => items && items[sel] && openTorrents(items[sel]),
+      run: () =>
+        visibleItems && visibleItems[sel] && openTorrents(visibleItems[sel]),
     },
     { key: 'Escape', hint: t('common.back'), run: () => nav('/search') },
   ]
-  useHotkeys(hotkeys, [items, sel])
+  useHotkeys(hotkeys, [visibleItems, sel])
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-canvas">
@@ -128,8 +159,13 @@ export function SearchResults() {
           <p className="text-[12px] tabular-nums text-dim">
             {loading
               ? t('searchResults.searching')
-              : items
-                ? t('searchResults.matches', { n: items.length })
+              : visibleItems
+                ? hiddenCount > 0
+                  ? t('searchResults.matchesFiltered', {
+                      n: visibleItems.length,
+                      hidden: hiddenCount,
+                    })
+                  : t('searchResults.matches', { n: visibleItems.length })
                 : ''}
           </p>
         </div>
@@ -140,20 +176,22 @@ export function SearchResults() {
           </div>
         )}
 
-        {!error && !items && loading && <PosterSkeletonGrid />}
+        {!error && !visibleItems && loading && <PosterSkeletonGrid />}
 
-        {items && items.length === 0 && !loading && (
+        {visibleItems && visibleItems.length === 0 && !loading && (
           <div className="rounded-lg border border-hairline bg-surface p-10 text-center">
             <p className="text-[16px] text-ink">{t('searchResults.emptyTitle')}</p>
             <p className="mt-1 text-[13px] text-muted">
-              {t('searchResults.emptyHint')}
+              {hideEmpty && (items?.length ?? 0) > 0
+                ? t('searchResults.emptyHintFiltered')
+                : t('searchResults.emptyHint')}
             </p>
           </div>
         )}
 
-        {items && items.length > 0 && (
+        {visibleItems && visibleItems.length > 0 && (
           <ul className="grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-            {items.map((m, i) => (
+            {visibleItems.map((m, i) => (
               <MovieCard
                 key={m.id}
                 movie={m}

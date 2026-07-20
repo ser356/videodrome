@@ -50,6 +50,8 @@ mod cache;
 mod handle;
 #[cfg(feature = "gui")]
 mod hls;
+#[cfg(feature = "gui")]
+mod movie_progress;
 mod resume;
 mod server;
 mod state;
@@ -61,6 +63,11 @@ pub use cache::{cache_dir, clear_all, parse_infohash, prune, prune_orphan_tempdi
 pub use handle::{
     compute_moviehash, list_files, select_file, start, start_with_target, StreamHandle,
     StreamStats, TorrentFileInfo,
+};
+#[cfg(feature = "gui")]
+pub use movie_progress::{
+    list_all as list_movie_progress, load as load_movie_progress, remove as remove_movie_progress,
+    save as save_movie_progress, LastSub, LastSubUpdate, MovieProgress, MovieProgressMeta,
 };
 #[allow(unused_imports)]
 pub use resume::{load_resume, load_resume_any, save_position, Resume, ResumeEpisode};

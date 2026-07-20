@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import Hls from 'hls.js'
 import {
   ArrowsIn,
   ArrowsOut,
   CaretLeft,
   ClosedCaptioning,
+  DownloadSimple,
   Gauge,
   MusicNotes,
   Pause,
@@ -17,6 +19,7 @@ import {
   fetchEmbeddedSubtitle,
   getMovieView,
   getPreferences,
+  getResume,
   hlsUrl,
   probeStream,
   ProbeStalledError,
@@ -185,11 +188,52 @@ export function Player() {
   // buffer se rellene en el offset nuevo.
   const [seeking, setSeeking] = useState(false)
 
+  // Escalado de loader: seek / re-buffer de MENOS de 2s se ven con
+  // un spinner ligero (menos ruidoso, respeta la sensación de
+  // "esto va rápido"); a partir de 2s montamos el StremioLoader
+  // completo con backdrop + logo + stats — la carga se ha vuelto
+  // "hay que explicar por qué el user está esperando".
+  //
+  // Timer arranca cuando aparece `seeking` o `buffering` y se
+  // cancela en cuanto ambos vuelven a false. Independiente del
+  // arranque inicial (donde el StremioLoader se pinta de golpe
+  // sin delay: allí el user espera esa pantalla, es información).
+  const [stalledLong, setStalledLong] = useState(false)
+  const stalledTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    const stalling = seeking || buffering
+    if (!stalling) {
+      if (stalledTimerRef.current) {
+        window.clearTimeout(stalledTimerRef.current)
+        stalledTimerRef.current = null
+      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset síncrono al salir de estado stalling.
+      setStalledLong(false)
+      return
+    }
+    // Ya está en curso un timer o ya estamos en modo long — no
+    // reinicies (el user quiere ver el StremioLoader lo antes
+    // posible en cuanto pasamos el umbral, no que se resetee el
+    // contador con cada `waiting` intermedio).
+    if (stalledTimerRef.current || stalledLong) return
+    stalledTimerRef.current = window.setTimeout(() => {
+      setStalledLong(true)
+      stalledTimerRef.current = null
+    }, 2000)
+  }, [seeking, buffering, stalledLong])
+
   // Backdrop de TMDB (URL absoluta al CDN). Se pinta como fondo del
   // StremioLoader durante arranque y seek. `null` mientras no
   // tengamos tmdbId o la petición esté en vuelo — el loader cae a
   // fondo negro plano.
   const [backdropUrl, setBackdropUrl] = useState<string | null>(null)
+  // Poster + backdrop paths "raw" (relativos de TMDB, sin CDN prefix)
+  // que viajan con cada `reportPosition` al store movie-level. Los
+  // declaramos AQUÍ (antes de `useResumePosition`) porque el hook los
+  // consume como props — moverlos abajo daría Temporal Dead Zone.
+  const [posterPathRaw, setPosterPathRaw] = useState<string | null>(null)
+  const [backdropPathRaw, setBackdropPathRaw] = useState<string | null>(null)
+  const [yearFromView, setYearFromView] = useState<number | null>(null)
 
   // Logo art (PNG con transparencia del rótulo oficial de la peli).
   // Servido por Metahub — el mismo mirror que usa Stremio para su
@@ -213,6 +257,23 @@ export function Player() {
   // desde el cleanup del useEffect de mount — ambos no reactivos.
   const durationRef = useRef<number | null>(null)
   const streamIdRef = useRef<number | null>(null)
+  // Ref al `activeSub` último para que el reporter periódico lo
+  // persista sin re-crear el callback cada vez que el user cambia
+  // de pista. Se declara aquí (antes de `useResumePosition`) para
+  // esquivar la Temporal Dead Zone; el `useState<ActiveSub>` real
+  // vive más abajo, y un effect debajo sincroniza este ref.
+  //
+  // El tipo `ActiveSub` no está declarado todavía en este punto
+  // (vive dentro del cuerpo de la función, más abajo). Usamos aquí
+  // el shape estructural (union anónima) — TS lo unifica con el
+  // `type ActiveSub` local por compatibilidad estructural, y el
+  // `LastSubDto` del api.ts tiene EXACTAMENTE el mismo shape, así
+  // que el ref se pasa como `activeSubRef` al hook sin conversión.
+  const activeSubRef = useRef<
+    | { source: 'openSubs'; path: string; release: string; language: string }
+    | { source: 'embedded'; idx: number; release: string; language: string }
+    | null
+  >(null)
   useEffect(() => {
     currentTimeRef.current = currentTime
   }, [currentTime])
@@ -240,6 +301,13 @@ export function Player() {
     season: state?.season,
     episode: state?.episode,
     tmdbId: state?.tmdbId,
+    title: state?.title,
+    imdbId: state?.imdbId,
+    posterPath: posterPathRaw,
+    backdropPath: backdropPathRaw,
+    year: yearFromView,
+    magnet: state?.magnet,
+    activeSubRef,
   })
 
   // Poll de `stream_stats` cada 1s mientras el stream esté vivo.
@@ -374,6 +442,12 @@ export function Player() {
   // Backdrop de TMDB para el StremioLoader. Se pide UNA vez al
   // montar (el tmdbId no cambia durante la vida del componente).
   // Fallo silencioso — el loader funciona sin backdrop.
+  //
+  // Además guardamos `posterPath`/`backdropPath` "raw" (path relativo
+  // de TMDB, sin CDN) para el snapshot de metadata que viaja con
+  // cada `reportPosition` al store movie-level. La sección "Seguir
+  // viendo" en Home pinta la card con esos paths tal cual sin
+  // necesitar re-consultar TMDB.
   useEffect(() => {
     const id = state?.tmdbId
     if (!id) return
@@ -389,6 +463,12 @@ export function Player() {
           tmdbBackdrop(view?.backdrop_path ?? null, 'w1280') ??
           tmdbBackdrop(view?.poster_path ?? null, 'w780')
         setBackdropUrl(url)
+        setPosterPathRaw(view?.poster_path ?? null)
+        setBackdropPathRaw(view?.backdrop_path ?? null)
+        // TMDB devuelve fecha como "YYYY-MM-DD" — nos quedamos con
+        // el año numérico si parsea.
+        const y = view?.release_date?.slice(0, 4)
+        setYearFromView(y ? Number(y) || null : null)
       } catch {
         /* silencioso: sin backdrop el loader cae a fondo negro */
       }
@@ -468,6 +548,48 @@ export function Player() {
         }
       : null,
   )
+  // Mantiene sincronizado el ref (declarado arriba, antes del
+  // `useResumePosition`) con el `activeSub` actual. El reporter
+  // periódico lo lee para persistir la pista de subs en el store
+  // movie-level sin re-crear el callback en cada cambio.
+  useEffect(() => {
+    activeSubRef.current = activeSub
+  }, [activeSub])
+
+  // Hidratación de la pista de subs al montar: si el store
+  // movie-level (`movie_progress.json`) guarda un `last_sub` para
+  // esta peli/episodio, lo activamos automáticamente. Respeta la
+  // elección explícita del user cuando viene por el flujo viejo
+  // (Torrents pasa `subPath` en `state`) → no lo pisamos.
+  //
+  // La consulta usa el mismo `getResume` que ya se llamaba en
+  // `Torrents.tsx` para pintar el ResumeDialog; nos apoyamos en el
+  // cache del backend. Falla silenciosa — sin subs es la UX
+  // original.
+  useEffect(() => {
+    if (state?.subPath) return
+    if (!state?.magnet) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const r = await getResume(
+          state.magnet,
+          state.isSeries ? (state.season ?? null) : null,
+          state.isSeries ? (state.episode ?? null) : null,
+          state.tmdbId ?? null,
+        )
+        if (cancelled || !r?.last_sub) return
+        setActiveSub(r.last_sub)
+      } catch {
+        /* silencioso: sin sub previo es el estado normal */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // Solo al mount — dependemos de valores que no cambian mid-vida.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Auto-fetch del catálogo de subs en cuanto tenemos stream (para
   // que al abrir el panel ya estén listos). No bloquea la
@@ -701,6 +823,106 @@ export function Player() {
   const clearSub = () => {
     setActiveSub(null)
   }
+
+  // ---- Drag & drop de subtítulos locales ----
+  //
+  // El user arrastra un `.srt` / `.vtt` del file manager al player
+  // → activa esa pista de subs sin pasar por el panel de
+  // OpenSubtitles. Útil para releases muy raros o para subs de
+  // fansubs que OpenSubtitles no indexa.
+  //
+  // Tauri 2 gate: los eventos "drag/drop de fichero externo" NO
+  // llegan como HTML5 dnd (el WebView los intercepta). Hay que
+  // suscribirse a `getCurrentWebview().onDragDropEvent`, que
+  // devuelve los paths absolutos del SO. Los HTML5 handlers
+  // (`onDragOver`, `onDrop`) solo se disparan para drag INTERNO
+  // (elementos con `draggable=true` dentro de la propia app) y no
+  // dan acceso al filesystem — inútiles aquí.
+  //
+  // Estados:
+  //   * `dragActive` — `true` mientras hay un fichero flotando
+  //     sobre la ventana; pinta el overlay grande "Suelta para
+  //     añadir subtítulos".
+  //   * `dragFlash` — `true` durante ~800ms tras un drop exitoso;
+  //     pinta un pulso verde alrededor del `<video>` para
+  //     confirmar visualmente que se cargó.
+  //   * `dragError` — mensaje de error transitorio si el fichero
+  //     no es un sub válido.
+  const [dragActive, setDragActive] = useState(false)
+  const [dragFlash, setDragFlash] = useState(false)
+  const [dragError, setDragError] = useState<string | null>(null)
+  const dragErrorTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    let unlisten: (() => void) | null = null
+    let cancelled = false
+    ;(async () => {
+      try {
+        const webview = getCurrentWebview()
+        const off = await webview.onDragDropEvent((event) => {
+          const payload = event.payload
+          if (payload.type === 'enter' || payload.type === 'over') {
+            setDragActive(true)
+          } else if (payload.type === 'leave') {
+            setDragActive(false)
+          } else if (payload.type === 'drop') {
+            setDragActive(false)
+            // Aceptamos el PRIMER path que tenga extensión de sub.
+            // Si el user sueltó varios ficheros, ignoramos el resto:
+            // el player solo muestra UNA pista simultánea, y elegir
+            // en silencio "el que match" es menos frustrante que
+            // pintar otro selector.
+            const paths = (payload.paths ?? []) as string[]
+            const sub = paths.find((p) =>
+              /\.(srt|vtt|ass|ssa)$/i.test(p),
+            )
+            if (!sub) {
+              setDragError(t('player.subDropInvalid'))
+              if (dragErrorTimerRef.current)
+                window.clearTimeout(dragErrorTimerRef.current)
+              dragErrorTimerRef.current = window.setTimeout(
+                () => setDragError(null),
+                2500,
+              )
+              return
+            }
+            // Deriva release + idioma "adivinado" del nombre de
+            // fichero para pintar labels útiles. Heurística barata:
+            // basename sin extensión = release; token de 2-3 chars
+            // rodeado de puntos/guiones = idioma. Fallback a la
+            // pista del user actual o "es".
+            const base = sub.split(/[\\/]/).pop() ?? sub
+            const release = base.replace(/\.[^.]+$/, '')
+            const langMatch = base.match(/[._-]([a-z]{2,3})[._-]/i)
+            const language =
+              (langMatch?.[1] ?? activeSub?.language ?? 'es').toLowerCase()
+            setActiveSub({
+              source: 'openSubs',
+              path: sub,
+              release,
+              language,
+            })
+            setDragFlash(true)
+            window.setTimeout(() => setDragFlash(false), 800)
+          }
+        })
+        if (cancelled) off()
+        else unlisten = off
+      } catch (e) {
+        console.warn('onDragDropEvent listener setup failed:', e)
+      }
+    })()
+    return () => {
+      cancelled = true
+      unlisten?.()
+      if (dragErrorTimerRef.current)
+        window.clearTimeout(dragErrorTimerRef.current)
+    }
+    // Deps: t (i18n) puede cambiar con el locale — re-suscribir
+    // para que el mensaje de error salga en el idioma actual.
+    // `activeSub.language` se lee dentro del handler; usamos ref
+    // implícita del closure sin re-suscribir en cada cambio.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t])
 
   // Ajustes de <video> según state React.
   useEffect(() => {
@@ -1259,31 +1481,48 @@ export function Player() {
         </video>
       )}
 
-      {/* Loader minimalista estilo Stremio: pantalla de arranque
-          limpia con el backdrop de la peli de fondo (si TMDB nos lo
-          dio), título y un spinner. Se pinta en CUATRO casos:
-            1. Arranque: aún no hemos tenido ni un `playing` (falta
-               `stream` o `hasStartedPlayback = false`).
-            2. Seek: user movió la seekbar y estamos esperando que
-               el buffer se rellene en el offset nuevo.
-            3. Cambio de pista de audio: backend está purgando
-               segmentos y respawneando ffmpeg → tapa la transición.
-            4. Re-buffering a mitad de peli: la red se cae, el
-               enjambre se queda sin seeders, o ffmpeg va lento —
-               el `<video>` dispara `waiting` → `buffering = true`.
-               Antes solo mostrábamos un mini-spinner mudo en la
-               esquina y el user creía que la app se había colgado.
+      {/* Loader del player. Dos modos:
+            * Ligero (spinner solo): re-buffers cortos y seeks de
+              <2s. Suficiente para que el user note que "algo está
+              cargando" sin tapar el frame con backdrop+logo+stats
+              y sin dar sensación de "cuelgue".
+            * Full StremioLoader (backdrop + logo + spinner +
+              stats): arranque inicial, cambio de audio, y cuando
+              el stall supera 2s (`stalledLong`) — a partir de ese
+              umbral la espera se ha vuelto lo bastante larga como
+              para justificar información completa.
           Los stats (speed / peers / %) SIEMPRE se pintan cuando NO
           es seek ni audio switch — es la única señal honesta de si
           el enjambre está vivo o muerto. Audit §3.b. */}
-      {(!stream || !hasStartedPlayback || seeking || audioSwitching || buffering) && !error && (
-        <StremioLoader
-          title={state.title}
-          backdropUrl={backdropUrl}
-          logoUrl={logoUrl}
-          stats={!seeking && !audioSwitching ? stats : null}
-        />
-      )}
+      {(() => {
+        if (error) return null
+        const showAny =
+          !stream || !hasStartedPlayback || seeking || audioSwitching || buffering
+        if (!showAny) return null
+        // Full loader: arranque, audio switch, o stall largo.
+        const showFull =
+          !stream || !hasStartedPlayback || audioSwitching || stalledLong
+        if (showFull) {
+          return (
+            <StremioLoader
+              title={state.title}
+              backdropUrl={backdropUrl}
+              logoUrl={logoUrl}
+              stats={!seeking && !audioSwitching ? stats : null}
+            />
+          )
+        }
+        // Modo ligero: solo spinner sobre el frame del video, sin
+        // fondo opaco — el user sigue viendo la peli detrás. Se usa
+        // en seek/rebuffer cortos (<2s).
+        return (
+          <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
+            <div className="rounded-full bg-black/50 p-3 backdrop-blur-sm">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+            </div>
+          </div>
+        )
+      })()}
 
       {/* HUD de ajuste de sync del sub. Aparece 1.5s cuando el user
           usa `[` `]` `,` `.` para dar feedback inmediato. */}
@@ -1305,6 +1544,43 @@ export function Player() {
               {t('common.back')}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Overlay de drag&drop de subs. Se anima con fade+scale al
+          entrar (via clases utilitarias animate-*) y sale suave.
+          `pointer-events-none` explícito para que el webview siga
+          recibiendo los eventos onDragDropEvent (si capturáramos
+          eventos aquí Tauri no los vería). */}
+      {dragActive && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-drop-in">
+          <div className="mx-6 flex max-w-md flex-col items-center gap-4 rounded-2xl border-2 border-dashed border-accent/70 bg-accent/10 px-10 py-8 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.7)]">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-accent/20 text-accent animate-bounce-slow">
+              <DownloadSimple size={28} weight="bold" />
+            </div>
+            <p className="text-[16px] font-semibold text-ink text-center">
+              {t('player.subDropTitle')}
+            </p>
+            <p className="text-[12px] text-muted text-center">
+              {t('player.subDropHint')}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Flash verde tras drop exitoso — 800ms de pulso alrededor
+          del video para confirmar. `dragFlash` se autoresetea con
+          setTimeout desde el handler. */}
+      {dragFlash && (
+        <div className="pointer-events-none absolute inset-0 z-40 animate-drop-flash rounded-lg ring-4 ring-good/70" />
+      )}
+
+      {/* Toast transitorio (2.5s) si el fichero soltado no era un
+          sub reconocible. No usamos el componente <Toast> global
+          porque queremos que viva DENTRO del player (fullscreen). */}
+      {dragError && (
+        <div className="pointer-events-none absolute left-1/2 bottom-28 z-40 -translate-x-1/2 rounded-full bg-black/85 px-5 py-2.5 text-[13px] text-ink shadow-lg">
+          {dragError}
         </div>
       )}
 

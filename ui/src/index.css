@@ -212,5 +212,52 @@
   }
   .dot-loader:nth-child(2) { animation-delay: 0.14s; }
   .dot-loader:nth-child(3) { animation-delay: 0.28s; }
+
+  /* Drop overlay del player: aparece cuando el user arrastra un
+   * fichero sobre la ventana. Combinación de fade + scale con un
+   * pequeño rebote elástico, para que el "aquí está el drop zone"
+   * sea inequívoco pero no ruidoso. */
+  @keyframes drop-in {
+    from { opacity: 0; transform: scale(0.94); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+  .animate-drop-in {
+    animation: drop-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  /* Icono grande dentro del drop overlay: micro-bounce continuo
+   * para que se sienta "receptivo" mientras el user aún no ha
+   * soltado. */
+  @keyframes bounce-slow {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-6px); }
+  }
+  .animate-bounce-slow {
+    animation: bounce-slow 1.4s ease-in-out infinite;
+  }
+
+  /* Flash verde que confirma el drop. Ring exterior que pulsa una
+   * vez desde borde brillante hasta desvanecerse. Sincronizado con
+   * el `setTimeout(setDragFlash(false), 800)` del Player. */
+  @keyframes drop-flash {
+    0%   { opacity: 0.85; }
+    60%  { opacity: 0.55; }
+    100% { opacity: 0; }
+  }
+  .animate-drop-flash {
+    animation: drop-flash 800ms ease-out both;
+  }
+
+  /* Fila con scroll horizontal sin barra visible. Se usa en Home
+   * (Seguir viendo). El user desplaza con trackpad / rueda /
+   * arrastre del touch; la barra estorbaría visualmente por su
+   * ancho residual en macOS "cuando la conectas un ratón". */
+  .scroll-hide {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .scroll-hide::-webkit-scrollbar {
+    display: none;
+  }
 }
 
