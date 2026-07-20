@@ -562,4 +562,209 @@ mod tests {
         assert_eq!(p.year, None);
         assert!(!p.is_tv());
     }
+
+    // ── Edge cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn empty_input_does_not_panic() {
+        let p = parse("");
+        assert_eq!(p.title, "");
+        assert_eq!(p.year, None);
+        assert!(!p.is_tv());
+    }
+
+    #[test]
+    fn parse_year_boundaries() {
+        assert_eq!(parse_year("1900"), Some(1900));
+        assert_eq!(parse_year("2099"), Some(2099));
+        assert_eq!(parse_year("1899"), None);
+        assert_eq!(parse_year("2100"), None);
+        assert_eq!(parse_year("999"), None); // <4 dígitos
+        assert_eq!(parse_year("20250"), None); // >4 dígitos
+        assert_eq!(parse_year("abcd"), None);
+        assert_eq!(parse_year("201a"), None);
+    }
+
+    #[test]
+    fn parse_sxxeyy_variants() {
+        assert_eq!(parse_sxxeyy("s01e02"), Some((1, 2)));
+        assert_eq!(parse_sxxeyy("s1e2"), Some((1, 2)));
+        // Multi-episodio: `s01e02e03` — el parser lee dígitos hasta
+        // el primer no-dígito, así que devuelve `Some((1, 2))` y
+        // descarta el resto. Aceptable — el episodio "primario" es
+        // el que interesa para matching.
+        assert_eq!(parse_sxxeyy("s01e02e03"), Some((1, 2)));
+        // Malformados.
+        assert_eq!(parse_sxxeyy("se01"), None);
+        assert_eq!(parse_sxxeyy("s01"), None);
+        assert_eq!(parse_sxxeyy("s01e"), None);
+        assert_eq!(parse_sxxeyy("e01"), None);
+        assert_eq!(parse_sxxeyy(""), None);
+    }
+
+    #[test]
+    fn parse_sxx_variants() {
+        assert_eq!(parse_sxx("s01"), Some(1));
+        assert_eq!(parse_sxx("s1"), Some(1));
+        assert_eq!(parse_sxx("s99"), Some(99));
+        assert_eq!(parse_sxx("s"), None);
+        assert_eq!(parse_sxx("sx"), None);
+        assert_eq!(parse_sxx("s01a"), None);
+    }
+
+    #[test]
+    fn parse_episode_only_variants() {
+        assert_eq!(parse_episode_only("e01"), Some(1));
+        assert_eq!(parse_episode_only("ep01"), Some(1));
+        assert_eq!(parse_episode_only("ep1"), Some(1));
+        assert_eq!(parse_episode_only("ep200"), Some(200));
+        assert_eq!(parse_episode_only("e"), None);
+        assert_eq!(parse_episode_only("ep"), None);
+        assert_eq!(parse_episode_only("epx"), None);
+        assert_eq!(parse_episode_only("e01a"), None);
+    }
+
+    #[test]
+    fn match_tag_hits_group_prefix() {
+        // `x264-GROUP` debe extraer `x264` como codec via prefijo.
+        assert_eq!(match_tag("x264-cytsun", CODECS), Some("x264"));
+        assert_eq!(match_tag("x265-yify", CODECS), Some("x265"));
+        assert_eq!(match_tag("h264-lol", CODECS), Some("H.264"));
+        // Sin `-` no cuenta si el token difiere.
+        assert_eq!(match_tag("xvid2", CODECS), None);
+    }
+
+    #[test]
+    fn resolution_aliases_normalize() {
+        let p1 = parse("Movie.2019.4K.BluRay.x265");
+        assert_eq!(p1.resolution, Some("2160p".to_string()));
+        let p2 = parse("Movie.2019.UHD.WEB-DL");
+        assert_eq!(p2.resolution, Some("2160p".to_string()));
+        let p3 = parse("Movie.2020.FullHD.BluRay");
+        assert_eq!(p3.resolution, Some("1080p".to_string()));
+        let p4 = parse("Movie.2020.FHD.BluRay");
+        assert_eq!(p4.resolution, Some("1080p".to_string()));
+    }
+
+    #[test]
+    fn source_variants_normalize() {
+        for (raw, expected) in [
+            ("Movie.2020.BDRip.x264", "BDRip"),
+            ("Movie.2020.BRRip.x264", "BRRip"),
+            ("Movie.2020.WEBRip.x264", "WEBRip"),
+            ("Movie.2020.WEB-DL.x264", "WEB-DL"),
+            ("Movie.2020.WEBDL.x264", "WEB-DL"),
+            ("Movie.2020.UHDRip.x265", "UHDRip"),
+            ("Movie.2020.REMUX.x265", "REMUX"),
+            ("Movie.2020.Blu-Ray.x264", "BluRay"),
+        ] {
+            let p = parse(raw);
+            assert_eq!(p.source.as_deref(), Some(expected), "raw: {raw}");
+        }
+    }
+
+    #[test]
+    fn codec_variants_normalize() {
+        for (raw, expected) in [
+            ("Movie.2020.1080p.HEVC", "HEVC"),
+            ("Movie.2020.1080p.AV1", "AV1"),
+            ("Movie.2020.1080p.VP9", "VP9"),
+            ("Movie.2020.1080p.DivX", "DivX"),
+            ("Movie.2000.1080p.H265", "H.265"),
+        ] {
+            let p = parse(raw);
+            assert_eq!(p.codec.as_deref(), Some(expected), "raw: {raw}");
+        }
+    }
+
+    #[test]
+    fn movie_starting_with_year_1917() {
+        // "1917" (2019) — año dentro del título Y año de release.
+        let p = parse("1917.2019.1080p.BluRay.x264");
+        assert_eq!(p.year, Some(2019));
+        assert_eq!(p.title, "1917");
+    }
+
+    #[test]
+    fn is_tv_true_when_only_season() {
+        let p = ParsedRelease {
+            title: "X".into(),
+            year: None,
+            season: Some(1),
+            episode: None,
+            resolution: None,
+            source: None,
+            codec: None,
+        };
+        assert!(p.is_tv());
+    }
+
+    #[test]
+    fn is_tv_true_when_only_episode() {
+        let p = ParsedRelease {
+            title: "X".into(),
+            year: None,
+            season: None,
+            episode: Some(5),
+            resolution: None,
+            source: None,
+            codec: None,
+        };
+        assert!(p.is_tv());
+    }
+
+    #[test]
+    fn normalize_title_trims_and_collapses() {
+        assert_eq!(normalize_title("  Foo   Bar  "), "foo bar");
+        assert_eq!(normalize_title("!!!  foo  !!!"), "foo");
+        assert_eq!(normalize_title(""), "");
+        assert_eq!(normalize_title("---"), "");
+    }
+
+    #[test]
+    fn normalize_title_preserves_cjk() {
+        // Chino simplificado + japonés + coreano — todos alfanuméricos.
+        assert_eq!(normalize_title("流浪地球 2019"), "流浪地球 2019");
+        assert_eq!(normalize_title("千と千尋の神隠し"), "千と千尋の神隠し");
+        assert_eq!(normalize_title("기생충 2019"), "기생충 2019");
+    }
+
+    #[test]
+    fn tokenize_splits_scene_separators() {
+        assert_eq!(
+            tokenize("Some.Movie_Name-Group [1080p]"),
+            vec!["Some", "Movie", "Name-Group", "1080p"]
+        );
+    }
+
+    #[test]
+    fn tokenize_ignores_empty() {
+        // Múltiples puntos consecutivos no generan tokens vacíos.
+        assert_eq!(tokenize("Foo...Bar"), vec!["Foo", "Bar"]);
+    }
+
+    #[test]
+    fn ambiguous_year_in_title_only() {
+        // "Blade Runner 2049" sin año extra — el "2049" debe ir al
+        // título (>2099 out of range de todos modos, pero la lógica
+        // no lo sabe todavía). Para 2049 exact que sí está en rango,
+        // como es el ÚNICO año antes de tags, se toma como año de
+        // release. Es el trade-off documentado en `parse`.
+        let p = parse("Blade.Runner.2049.1080p.WEB-DL");
+        // Con la lógica actual: 2049 es el único año antes del tag
+        // 1080p → year = 2049, title = "Blade Runner".
+        assert_eq!(p.year, Some(2049));
+        assert_eq!(p.title, "Blade Runner");
+    }
+
+    #[test]
+    fn scene_group_after_codec_ignored() {
+        // El sufijo `-CyTSuNee` del grupo scene NO debe ensuciar
+        // ningún campo — se queda como prefijo del último token
+        // técnico.
+        let p = parse("Movie.2020.1080p.BluRay.x264-YIFY");
+        assert_eq!(p.codec, Some("x264".to_string()));
+        // El título se corta antes de "2020".
+        assert_eq!(p.title, "Movie");
+    }
 }

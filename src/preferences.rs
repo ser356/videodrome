@@ -209,3 +209,105 @@ pub fn save(prefs: &Preferences) -> Result<()> {
     std::fs::write(path, json).context("Error al escribir preferences.json")?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_has_sensible_values() {
+        let p = Preferences::default();
+        assert!((p.default_min_rating - 4.0).abs() < 1e-6);
+        assert_eq!(p.stream_cache_ttl_days, 7);
+        assert_eq!(p.glass_opacity, 0);
+        assert_eq!(p.default_player, PlayerKind::Html);
+        assert_eq!(p.quality_mode, QualityMode::Auto);
+        assert_eq!(p.hls_disk_budget_gb, 8);
+        assert!(p.hide_empty_results);
+        assert_eq!(p.skin, "videodrome");
+        assert!(p.ui_language.is_none());
+    }
+
+    #[test]
+    fn empty_object_deserializes_to_default() {
+        // Contrato clave: añadir un campo nuevo NO invalida
+        // preferences.json existentes — todos los campos ausentes
+        // toman el default individual.
+        let p: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.default_min_rating, 4.0);
+        assert_eq!(p.default_player, PlayerKind::Html);
+        assert_eq!(p.skin, "videodrome");
+    }
+
+    #[test]
+    fn player_kind_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&PlayerKind::Html).unwrap(),
+            "\"html\""
+        );
+        assert_eq!(serde_json::to_string(&PlayerKind::Vlc).unwrap(), "\"vlc\"");
+        // Roundtrip.
+        let back: PlayerKind = serde_json::from_str("\"vlc\"").unwrap();
+        assert_eq!(back, PlayerKind::Vlc);
+    }
+
+    #[test]
+    fn quality_mode_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&QualityMode::Auto).unwrap(),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&QualityMode::Copy).unwrap(),
+            "\"copy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&QualityMode::Transcode).unwrap(),
+            "\"transcode\""
+        );
+    }
+
+    #[test]
+    fn partial_json_preserves_defaults_for_missing_fields() {
+        let p: Preferences =
+            serde_json::from_str(r#"{"default_player":"vlc","glass_opacity":50}"#).unwrap();
+        assert_eq!(p.default_player, PlayerKind::Vlc);
+        assert_eq!(p.glass_opacity, 50);
+        assert_eq!(p.default_min_rating, 4.0); // default
+        assert_eq!(p.skin, "videodrome"); // default
+    }
+
+    #[test]
+    fn corrupt_json_falls_back_to_default_via_unwrap_or_default() {
+        let p: Preferences = serde_json::from_str("garbage").unwrap_or_default();
+        assert_eq!(p.default_min_rating, 4.0);
+    }
+
+    #[test]
+    fn roundtrip_preserves_all_fields() {
+        let p = Preferences {
+            default_min_rating: 3.5,
+            subtitle_languages: "es,pt".into(),
+            stream_cache_ttl_days: 30,
+            glass_opacity: 75,
+            default_player: PlayerKind::Vlc,
+            ui_language: Some("de".into()),
+            quality_mode: QualityMode::Transcode,
+            hls_disk_budget_gb: 32,
+            hide_empty_results: false,
+            skin: "noir".into(),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Preferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.default_min_rating, 3.5);
+        assert_eq!(back.subtitle_languages, "es,pt");
+        assert_eq!(back.stream_cache_ttl_days, 30);
+        assert_eq!(back.glass_opacity, 75);
+        assert_eq!(back.default_player, PlayerKind::Vlc);
+        assert_eq!(back.ui_language.as_deref(), Some("de"));
+        assert_eq!(back.quality_mode, QualityMode::Transcode);
+        assert_eq!(back.hls_disk_budget_gb, 32);
+        assert!(!back.hide_empty_results);
+        assert_eq!(back.skin, "noir");
+    }
+}

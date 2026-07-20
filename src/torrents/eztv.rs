@@ -254,3 +254,35 @@ async fn fetch_from_any_host(http: &reqwest::Client, path: &str) -> Result<EztvR
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Sin hosts EZTV disponibles")))
         .context("Todos los mirrors de EZTV fallaron")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_num_reads_u64_directly() {
+        let v = Some(json!(42_u64));
+        assert_eq!(parse_num(&v), Some(42));
+    }
+
+    #[test]
+    fn parse_num_reads_string_digits() {
+        let v = Some(json!("42"));
+        assert_eq!(parse_num(&v), Some(42));
+    }
+
+    #[test]
+    fn parse_num_returns_none_for_missing_or_bad() {
+        assert_eq!(parse_num(&None), None);
+        assert_eq!(parse_num(&Some(json!("abc"))), None);
+        assert_eq!(parse_num(&Some(json!(null))), None);
+        // fuera de rango u16
+        assert_eq!(parse_num(&Some(json!(70_000_u64))), None);
+    }
+
+    #[test]
+    fn parse_num_handles_negative_string_as_none() {
+        assert_eq!(parse_num(&Some(json!("-1"))), None);
+    }
+}

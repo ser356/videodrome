@@ -83,3 +83,94 @@ pub fn save(d: &Dismissed) -> Result<()> {
 pub fn clear() -> Result<()> {
     save(&Dismissed::default())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: u64) -> DismissedEntry {
+        DismissedEntry {
+            id,
+            title: format!("Movie {id}"),
+            poster_path: Some(format!("/p{id}.jpg")),
+            dismissed_at: 1000 + id,
+        }
+    }
+
+    #[test]
+    fn insert_adds_new_entry() {
+        let mut d = Dismissed::default();
+        d.insert(entry(1));
+        assert_eq!(d.entries.len(), 1);
+        assert!(d.contains(1));
+    }
+
+    #[test]
+    fn insert_is_idempotent() {
+        let mut d = Dismissed::default();
+        d.insert(entry(1));
+        d.insert(entry(1));
+        assert_eq!(d.entries.len(), 1);
+    }
+
+    #[test]
+    fn insert_preserves_first_entry_metadata() {
+        // Re-insertar con el mismo id NO sobrescribe (por diseño —
+        // el user descartó UNA vez; si vuelve a hacerlo, no importa).
+        let mut d = Dismissed::default();
+        d.insert(entry(1));
+        let mut other = entry(1);
+        other.title = "Different".into();
+        d.insert(other);
+        assert_eq!(d.entries[0].title, "Movie 1");
+    }
+
+    #[test]
+    fn remove_returns_true_when_present() {
+        let mut d = Dismissed::default();
+        d.insert(entry(1));
+        d.insert(entry(2));
+        assert!(d.remove(1));
+        assert_eq!(d.entries.len(), 1);
+        assert!(!d.contains(1));
+        assert!(d.contains(2));
+    }
+
+    #[test]
+    fn remove_returns_false_when_absent() {
+        let mut d = Dismissed::default();
+        d.insert(entry(1));
+        assert!(!d.remove(99));
+        assert_eq!(d.entries.len(), 1);
+    }
+
+    #[test]
+    fn ids_returns_set() {
+        let mut d = Dismissed::default();
+        d.insert(entry(1));
+        d.insert(entry(2));
+        d.insert(entry(3));
+        let ids = d.ids();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+        assert!(ids.contains(&3));
+    }
+
+    #[test]
+    fn json_roundtrip_preserves_entries() {
+        let mut d = Dismissed::default();
+        d.insert(entry(42));
+        let json = serde_json::to_string(&d).unwrap();
+        let back: Dismissed = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries[0].id, 42);
+        assert_eq!(back.entries[0].title, "Movie 42");
+    }
+
+    #[test]
+    fn json_deserializes_empty_object_as_default() {
+        let d: Dismissed = serde_json::from_str("{}").unwrap();
+        assert!(d.entries.is_empty());
+    }
+}

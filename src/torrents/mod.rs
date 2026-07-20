@@ -1607,4 +1607,287 @@ mod tests {
             None
         );
     }
+
+    // ── titles_match ──────────────────────────────────────────────────
+
+    #[test]
+    fn titles_match_exact() {
+        assert!(titles_match("blade runner", "blade runner"));
+    }
+
+    #[test]
+    fn titles_match_candidate_longer_with_suffix() {
+        // "blade runner" es la variante; el release trae
+        // "blade runner 2049" → aceptar (el suffix va con espacio).
+        assert!(titles_match("blade runner", "blade runner 2049"));
+    }
+
+    #[test]
+    fn titles_match_variant_longer_with_suffix() {
+        // Al revés: la variante de TMDB es más larga, el release
+        // recortado. Aceptar simétricamente.
+        assert!(titles_match("spider man brand new day", "spider man"));
+    }
+
+    #[test]
+    fn titles_match_prefix_without_boundary_rejected() {
+        // "blade" NO debe matchear "blades" — el prefix chequeo pide
+        // separador después.
+        assert!(!titles_match("blade", "blades"));
+        assert!(!titles_match("blades", "blade"));
+    }
+
+    #[test]
+    fn titles_match_totally_different() {
+        assert!(!titles_match("blade runner", "the matrix"));
+    }
+
+    // ── merge_provider_statuses ─────────────────────────────────────
+
+    fn ps(name: &str, ok: bool, hits: usize, kept: u32) -> ProviderStatus {
+        ProviderStatus {
+            name: name.into(),
+            ok,
+            hits,
+            kept,
+            elapsed_ms: 100,
+            error: (!ok).then(|| "timeout".to_string()),
+            retried: false,
+            from_cache: false,
+        }
+    }
+
+    #[test]
+    fn merge_provider_statuses_sums_hits_when_both_ok() {
+        let base = vec![ps("knaben", true, 10, 3)];
+        let extra = vec![ps("knaben", true, 5, 2)];
+        let merged = merge_provider_statuses(base, extra);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].hits, 15);
+        assert_eq!(merged[0].kept, 5);
+        assert!(merged[0].ok);
+    }
+
+    #[test]
+    fn merge_provider_statuses_ok_rescues_fail() {
+        let base = vec![ps("apibay", false, 0, 0)];
+        let extra = vec![ps("apibay", true, 8, 4)];
+        let merged = merge_provider_statuses(base, extra);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].ok);
+        assert_eq!(merged[0].hits, 8);
+        assert_eq!(merged[0].kept, 4);
+        assert!(merged[0].error.is_none());
+    }
+
+    #[test]
+    fn merge_provider_statuses_keeps_ok_when_new_fails() {
+        let base = vec![ps("yts", true, 12, 6)];
+        let extra = vec![ps("yts", false, 0, 0)];
+        let merged = merge_provider_statuses(base, extra);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].ok);
+        assert_eq!(merged[0].hits, 12);
+    }
+
+    #[test]
+    fn merge_provider_statuses_both_fail_keeps_latest_error() {
+        let mut base = vec![ps("apibay", false, 0, 0)];
+        base[0].error = Some("HTTP 500".into());
+        let mut extra = vec![ps("apibay", false, 0, 0)];
+        extra[0].error = Some("timeout".into());
+        let merged = merge_provider_statuses(base, extra);
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].ok);
+        assert_eq!(merged[0].error.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn merge_provider_statuses_unique_providers_propagate() {
+        let base = vec![ps("yts", true, 10, 5)];
+        let extra = vec![ps("apibay", true, 3, 1)];
+        let merged = merge_provider_statuses(base, extra);
+        assert_eq!(merged.len(), 2);
+        // Ordenados alfabéticamente por nombre.
+        assert_eq!(merged[0].name, "apibay");
+        assert_eq!(merged[1].name, "yts");
+    }
+
+    // ── score / match_kind_multiplier / language_multiplier ─────────
+
+    #[test]
+    fn match_kind_multiplier_ordering() {
+        // Episode == Movie == 1.0 (los dos son 1er class).
+        assert_eq!(match_kind_multiplier(MatchKind::Episode), 1.00);
+        assert_eq!(match_kind_multiplier(MatchKind::Movie), 1.00);
+        assert!(match_kind_multiplier(MatchKind::SeasonPack) < 1.00);
+        assert!(
+            match_kind_multiplier(MatchKind::SeriesPack)
+                < match_kind_multiplier(MatchKind::SeasonPack)
+        );
+    }
+
+    #[test]
+    fn language_multiplier_ordering() {
+        assert!(language_multiplier(AudioHint::Original) > language_multiplier(AudioHint::Multi));
+        assert!(language_multiplier(AudioHint::Multi) > language_multiplier(AudioHint::Unknown));
+        assert!(
+            language_multiplier(AudioHint::Unknown) > language_multiplier(AudioHint::Dubbed("es"))
+        );
+    }
+
+    fn torrent(title: &str, seeders: u32, quality: Option<&str>, mk: MatchKind) -> Torrent {
+        Torrent {
+            title: title.into(),
+            magnet: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into(),
+            size_bytes: 5 * 1024 * 1024 * 1024,
+            seeders,
+            leechers: 0,
+            quality: quality.map(|s| s.into()),
+            source: "test".into(),
+            match_kind: mk,
+            file_hint: None,
+            infohash: "0123456789ABCDEF0123456789ABCDEF01234567".into(),
+        }
+    }
+
+    #[test]
+    fn score_seeders_dominate_with_equal_quality() {
+        let a = torrent(
+            "Movie 2020 1080p BluRay x264",
+            100,
+            Some("1080p"),
+            MatchKind::Movie,
+        );
+        let b = torrent(
+            "Movie 2020 1080p BluRay x264",
+            10,
+            Some("1080p"),
+            MatchKind::Movie,
+        );
+        assert!(score(&a, None) > score(&b, None));
+    }
+
+    #[test]
+    fn score_2160p_beats_720p_at_equal_seeders() {
+        let hi = torrent(
+            "Movie 2020 2160p BluRay x265",
+            50,
+            Some("2160p"),
+            MatchKind::Movie,
+        );
+        let lo = torrent(
+            "Movie 2020 720p WEB-DL x264",
+            50,
+            Some("720p"),
+            MatchKind::Movie,
+        );
+        assert!(score(&hi, None) > score(&lo, None));
+    }
+
+    #[test]
+    fn score_episode_beats_season_pack_at_equal_seeders() {
+        let ep = torrent(
+            "Show S01E01 1080p WEB-DL",
+            50,
+            Some("1080p"),
+            MatchKind::Episode,
+        );
+        let pack = torrent(
+            "Show S01 1080p WEB-DL",
+            50,
+            Some("1080p"),
+            MatchKind::SeasonPack,
+        );
+        assert!(score(&ep, None) > score(&pack, None));
+    }
+
+    #[test]
+    fn score_dubbed_penalized_vs_original_at_equal_seeders() {
+        // Peli inglesa, dos releases con mismos seeders + calidad; el
+        // "castellano" cae por ser doblaje del audio original.
+        let orig = torrent(
+            "Movie 2020 1080p BluRay x264",
+            50,
+            Some("1080p"),
+            MatchKind::Movie,
+        );
+        let dub = torrent(
+            "Movie 2020 Castellano 1080p BluRay x264",
+            50,
+            Some("1080p"),
+            MatchKind::Movie,
+        );
+        assert!(score(&orig, Some("en")) > score(&dub, Some("en")));
+    }
+
+    // ── quality_from_title ──────────────────────────────────────────
+
+    #[test]
+    fn quality_from_title_detects_common_resolutions() {
+        assert_eq!(
+            quality_from_title("Movie 2020 2160p BluRay"),
+            Some("2160p".into())
+        );
+        assert_eq!(
+            quality_from_title("Movie 2020 1080p WEB-DL"),
+            Some("1080p".into())
+        );
+        assert_eq!(
+            quality_from_title("Movie 2020 720p HDTV"),
+            Some("720p".into())
+        );
+        assert_eq!(
+            quality_from_title("Movie 2020 480p DVDRip"),
+            Some("480p".into())
+        );
+    }
+
+    #[test]
+    fn quality_from_title_4k_normalizes_to_2160p() {
+        assert_eq!(
+            quality_from_title("Movie 2020 4K UHD BluRay"),
+            Some("2160p".into())
+        );
+    }
+
+    #[test]
+    fn quality_from_title_none_when_absent() {
+        assert_eq!(quality_from_title("Movie 2020 BluRay x264"), None);
+    }
+
+    // ── build_magnet ────────────────────────────────────────────────
+
+    #[test]
+    fn build_magnet_has_infohash_and_trackers() {
+        let m = build_magnet("0123456789abcdef0123456789abcdef01234567", "My Movie");
+        assert!(m.starts_with("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"));
+        assert!(m.contains("&dn="));
+        // Al menos un tracker udp presente.
+        assert!(m.contains("&tr=udp"));
+    }
+
+    // ── shorten helpers ─────────────────────────────────────────────
+
+    #[test]
+    fn shorten_err_first_line_only() {
+        let e = shorten_err("primero\nsegundo\ntercero");
+        assert_eq!(e, "primero");
+    }
+
+    #[test]
+    fn shorten_err_truncates_with_ellipsis() {
+        let long = "a".repeat(200);
+        let out = shorten_err(&long);
+        assert_eq!(out.chars().count(), 61); // 60 + '…'
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn shorten_title_multibyte_safe() {
+        // Cirílico + emoji — no debe panicar por byte slicing.
+        let raw = "🎬 Тайны 2019 1080p".to_string() + &"а".repeat(80);
+        let out = shorten_title(&raw);
+        assert_eq!(out.chars().count(), 61); // truncado + …
+    }
 }

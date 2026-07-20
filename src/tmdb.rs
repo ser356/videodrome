@@ -1883,3 +1883,92 @@ async fn fetch_cinemeta_view(
         genres: meta.genres.into_iter().filter(|s| !s.is_empty()).collect(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tmdb_movie_year_parses_from_release_date() {
+        let m = TmdbMovie {
+            id: 1,
+            title: "X".into(),
+            vote_average: 0.0,
+            popularity: 0.0,
+            release_date: Some("2020-05-15".into()),
+            poster_path: None,
+            imdb_id: None,
+            kind: MediaKind::Movie,
+        };
+        assert_eq!(m.year(), Some(2020));
+    }
+
+    #[test]
+    fn tmdb_movie_year_none_when_missing_or_bad() {
+        let mut m = TmdbMovie {
+            id: 1,
+            title: "X".into(),
+            vote_average: 0.0,
+            popularity: 0.0,
+            release_date: None,
+            poster_path: None,
+            imdb_id: None,
+            kind: MediaKind::Movie,
+        };
+        assert_eq!(m.year(), None);
+        m.release_date = Some("bad".into());
+        assert_eq!(m.year(), None);
+        m.release_date = Some("".into());
+        assert_eq!(m.year(), None);
+    }
+
+    #[test]
+    fn bcp47_locale_maps_iso_639() {
+        assert_eq!(bcp47_locale(Some("es")), "es-ES");
+        assert_eq!(bcp47_locale(Some("en")), "en-US");
+        assert_eq!(bcp47_locale(Some("fr")), "fr-FR");
+        assert_eq!(bcp47_locale(Some("de")), "de-DE");
+        assert_eq!(bcp47_locale(Some("it")), "it-IT");
+        assert_eq!(bcp47_locale(Some("pt")), "pt-PT");
+    }
+
+    #[test]
+    fn bcp47_locale_defaults_to_en_us() {
+        assert_eq!(bcp47_locale(None), "en-US");
+        assert_eq!(bcp47_locale(Some("")), "en-US");
+        assert_eq!(bcp47_locale(Some("ja")), "en-US");
+        assert_eq!(bcp47_locale(Some("zh")), "en-US");
+    }
+
+    #[test]
+    fn bcp47_locale_passes_through_bcp47() {
+        assert_eq!(bcp47_locale(Some("pt-BR")), "pt-br");
+        assert_eq!(bcp47_locale(Some("en-GB")), "en-gb");
+        // 4-char raro no lo consideramos bcp47 completo → fallback.
+        assert_eq!(bcp47_locale(Some("es-x")), "en-US");
+    }
+
+    #[test]
+    fn bcp47_locale_trims_and_lowercases() {
+        assert_eq!(bcp47_locale(Some("  ES  ")), "es-ES");
+    }
+
+    #[test]
+    fn media_kind_default_is_movie() {
+        assert_eq!(MediaKind::default(), MediaKind::Movie);
+    }
+
+    #[test]
+    fn media_kind_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&MediaKind::Movie).unwrap(),
+            "\"movie\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MediaKind::Series).unwrap(),
+            "\"series\""
+        );
+        let back: MediaKind = serde_json::from_str("\"series\"").unwrap();
+        assert_eq!(back, MediaKind::Series);
+    }
+}

@@ -89,3 +89,68 @@ pub fn save(w: &Watched) -> Result<()> {
 pub fn clear() -> Result<()> {
     save(&Watched::default())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: u64) -> WatchedEntry {
+        WatchedEntry {
+            id,
+            title: format!("Movie {id}"),
+            poster_path: Some(format!("/p{id}.jpg")),
+            watched_at: 1000 + id,
+        }
+    }
+
+    #[test]
+    fn insert_and_contains() {
+        let mut w = Watched::default();
+        w.insert(entry(1));
+        assert!(w.contains(1));
+        assert!(!w.contains(2));
+    }
+
+    #[test]
+    fn insert_idempotent() {
+        let mut w = Watched::default();
+        w.insert(entry(1));
+        w.insert(entry(1));
+        assert_eq!(w.entries.len(), 1);
+    }
+
+    #[test]
+    fn remove_and_return_value() {
+        let mut w = Watched::default();
+        w.insert(entry(1));
+        assert!(w.remove(1));
+        assert!(!w.remove(1));
+    }
+
+    #[test]
+    fn ids_matches_entries() {
+        let mut w = Watched::default();
+        w.insert(entry(10));
+        w.insert(entry(20));
+        let ids = w.ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&10));
+        assert!(ids.contains(&20));
+    }
+
+    #[test]
+    fn json_roundtrip() {
+        let mut w = Watched::default();
+        w.insert(entry(7));
+        let json = serde_json::to_string(&w).unwrap();
+        let back: Watched = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries[0].id, 7);
+    }
+
+    #[test]
+    fn json_defaults_from_empty_object() {
+        let w: Watched = serde_json::from_str("{}").unwrap();
+        assert!(w.entries.is_empty());
+    }
+}

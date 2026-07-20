@@ -132,3 +132,47 @@ async fn apibay_query(http: &reqwest::Client, query: &str) -> Result<Vec<ApibayH
         .await
         .context("Error al parsear respuesta de apibay")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn series_variants_for_episode() {
+        let v = apibay_series_variants("Fargo", Some(2), Some(3));
+        assert_eq!(v, vec!["Fargo S02E03", "Fargo S02"]);
+    }
+
+    #[test]
+    fn series_variants_for_season_pack() {
+        let v = apibay_series_variants("Fargo", Some(2), None);
+        assert_eq!(v, vec!["Fargo S02", "Fargo Season 2"]);
+    }
+
+    #[test]
+    fn series_variants_for_whole_series() {
+        let v = apibay_series_variants("Fargo", None, None);
+        assert_eq!(v, vec!["Fargo"]);
+    }
+
+    #[test]
+    fn series_variants_trims_title() {
+        let v = apibay_series_variants("  Fargo  ", None, None);
+        assert_eq!(v, vec!["Fargo"]);
+    }
+
+    #[test]
+    fn series_variants_pads_season_and_episode_with_zero() {
+        let v = apibay_series_variants("Show", Some(1), Some(9));
+        assert_eq!(v[0], "Show S01E09");
+    }
+
+    #[test]
+    fn series_variants_never_empty() {
+        // Contrato: incluso sin season se emite el título tal cual.
+        for (s, e) in [(None, None), (Some(1), Some(1)), (Some(1), None)] {
+            let v = apibay_series_variants("X", s, e);
+            assert!(!v.is_empty());
+        }
+    }
+}

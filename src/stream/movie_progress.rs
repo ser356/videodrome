@@ -303,3 +303,126 @@ pub fn remove(tmdb_id: u64, season: Option<u16>, episode: Option<u16>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn make_key_for_movie_uses_tmdb_only() {
+        assert_eq!(make_key(1234, None, None), "1234");
+    }
+
+    #[test]
+    fn make_key_for_episode_uses_series_suffix() {
+        assert_eq!(make_key(1234, Some(2), Some(5)), "1234:S2E5");
+    }
+
+    #[test]
+    fn make_key_for_season_only_falls_back_to_tmdb_only() {
+        // Sin episode explícito NO usamos sufijo — solo episodios
+        // concretos merecen key propia, los packs se hidratan aparte.
+        assert_eq!(make_key(1234, Some(2), None), "1234");
+        assert_eq!(make_key(1234, None, Some(5)), "1234");
+    }
+
+    fn sample_entry(tmdb_id: u64, seconds: f64) -> MovieProgress {
+        MovieProgress {
+            tmdb_id,
+            kind: "movie".into(),
+            season: None,
+            episode: None,
+            title: format!("Movie {tmdb_id}"),
+            poster_path: Some("/p.jpg".into()),
+            backdrop_path: Some("/b.jpg".into()),
+            imdb_id: Some(format!("tt{tmdb_id}")),
+            year: Some(2020),
+            last_magnet: Some("magnet:?xt=urn:btih:abc".into()),
+            last_sub: Some(LastSub::Embedded {
+                idx: 0,
+                release: "Track 1".into(),
+                language: "en".into(),
+            }),
+            seconds,
+            duration_seconds: 7200.0,
+            updated_at: 1000 + tmdb_id,
+        }
+    }
+
+    #[test]
+    fn store_json_roundtrip_preserves_fields() {
+        let mut store = MovieProgressStore::default();
+        store.entries.insert("1".into(), sample_entry(1, 1800.0));
+        let json = serde_json::to_string(&store).unwrap();
+        let back: MovieProgressStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries.len(), 1);
+        let e = &back.entries["1"];
+        assert_eq!(e.title, "Movie 1");
+        assert_eq!(e.year, Some(2020));
+        assert!(matches!(e.last_sub, Some(LastSub::Embedded { idx: 0, .. })));
+    }
+
+    #[test]
+    fn last_sub_open_subs_serializes_with_tag_and_camel_case() {
+        let sub = LastSub::OpenSubs {
+            path: "/tmp/x.srt".into(),
+            release: "Release".into(),
+            language: "es".into(),
+        };
+        let json = serde_json::to_string(&sub).unwrap();
+        assert!(json.contains("\"source\":\"openSubs\""));
+        assert!(json.contains("\"path\":\"/tmp/x.srt\""));
+        // Roundtrip.
+        let back: LastSub = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, LastSub::OpenSubs { .. }));
+    }
+
+    #[test]
+    fn last_sub_embedded_serializes_with_tag() {
+        let sub = LastSub::Embedded {
+            idx: 3,
+            release: "Track 3".into(),
+            language: "en".into(),
+        };
+        let json = serde_json::to_string(&sub).unwrap();
+        assert!(json.contains("\"source\":\"embedded\""));
+        assert!(json.contains("\"idx\":3"));
+    }
+
+    #[test]
+    fn write_store_atomic_and_load_store_roundtrip() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("movie_progress.json");
+        let mut store = MovieProgressStore::default();
+        store.entries.insert("42".into(), sample_entry(42, 900.0));
+        write_store_atomic(&path, &store).unwrap();
+        let back = load_store(&path);
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries["42"].seconds, 900.0);
+    }
+
+    #[test]
+    fn load_store_returns_default_on_missing_file() {
+        let td = tempfile::tempdir().unwrap();
+        let store = load_store(&td.path().join("nope.json"));
+        assert!(store.entries.is_empty());
+    }
+
+    #[test]
+    fn load_store_returns_default_on_corrupt_json() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("bad.json");
+        std::fs::write(&path, "not json").unwrap();
+        let store = load_store(&path);
+        assert!(store.entries.is_empty());
+    }
+
+    #[test]
+    fn write_store_atomic_creates_parent_dirs() {
+        let td = tempfile::tempdir().unwrap();
+        let nested = td.path().join("a/b/c/progress.json");
+        let store = MovieProgressStore::default();
+        write_store_atomic(&nested, &store).unwrap();
+        assert!(nested.exists());
+    }
+}

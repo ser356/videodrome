@@ -218,3 +218,41 @@ async fn fetch_from_any_host(http: &reqwest::Client, path: &str) -> Result<YtsRe
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("YTS: sin hosts alcanzables")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn norm_title_lowercases_and_collapses() {
+        assert_eq!(norm_title("Blade Runner"), "blade runner");
+        assert_eq!(norm_title("BLADE.RUNNER"), "blade runner");
+        assert_eq!(norm_title("blade__runner"), "blade runner");
+    }
+
+    #[test]
+    fn norm_title_strips_year_tokens() {
+        // Un token de 4 dígitos se filtra (típico año pegado al
+        // título) SEA cual sea el rango — la heurística es
+        // "4 dígitos exactos". Otros números sí se conservan.
+        assert_eq!(norm_title("Alien (1979)"), "alien");
+        assert_eq!(norm_title("Blade Runner 2049"), "blade runner");
+        assert_eq!(norm_title("1917"), "");
+        // 5+ dígitos se conservan.
+        assert_eq!(norm_title("Room 12345"), "room 12345");
+        // 3 dígitos se conservan.
+        assert_eq!(norm_title("Movie 300"), "movie 300");
+    }
+
+    #[test]
+    fn norm_title_removes_punctuation() {
+        assert_eq!(norm_title("Amélie (2001)"), "amélie");
+        assert_eq!(norm_title("Wall-E"), "wall e");
+    }
+
+    #[test]
+    fn norm_title_empty_input() {
+        assert_eq!(norm_title(""), "");
+        assert_eq!(norm_title("!!!"), "");
+    }
+}

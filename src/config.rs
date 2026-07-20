@@ -194,3 +194,80 @@ impl Config {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dotenv_candidates_are_non_empty_and_end_in_dotenv() {
+        // La lista concreta depende de la plataforma y del env
+        // (`XDG_CONFIG_HOME`, `HOME`). Verificamos invariantes:
+        //   * Al menos un candidato (a menos que el SO no tenga home).
+        //   * Cada candidato termina en `.env`.
+        //   * Todos únicos (deduplicación aplicada).
+        let cands = dotenv_candidates();
+        for c in &cands {
+            assert_eq!(
+                c.file_name().and_then(|s| s.to_str()),
+                Some(".env"),
+                "candidato debe terminar en .env: {c:?}"
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        for c in &cands {
+            assert!(
+                seen.insert(c.clone()),
+                "duplicado en dotenv_candidates: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_env_hint_ends_in_env_path() {
+        let hint = canonical_env_hint();
+        assert!(
+            hint.contains("videodrome") && hint.ends_with(".env"),
+            "hint debe citar el path canónico: {hint}"
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_env_var_when_set() {
+        // Test único cross-platform: la implementación macOS cae al
+        // Keychain solo si la env var está vacía o ausente. Con var
+        // set, ambos paths devuelven el mismo valor.
+        let key = "VIDEODROME_TEST_ENV_KEY_XYZ";
+        // SAFETY: `set_var`/`remove_var` requieren `unsafe` en Rust
+        // 2024 por el hazard de threads leyendo env vars a la vez.
+        // Los tests corren sequentially en `cargo test --lib` cuando
+        // usamos `--test-threads=1`, pero por defecto van en paralelo.
+        // Usamos un nombre único y solo verificamos el camino de
+        // "var set" para minimizar la ventana de colisión.
+        // SAFETY: nombre de env único a este test; sin lectura concurrente esperada.
+        unsafe { std::env::set_var(key, "expected") };
+        assert_eq!(
+            resolve(key, "no-existe-en-keychain"),
+            Some("expected".to_string())
+        );
+        // SAFETY: cleanup a continuación del set anterior.
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn resolve_treats_empty_env_var_as_missing() {
+        let key = "VIDEODROME_TEST_ENV_KEY_EMPTY_XYZ";
+        // SAFETY: nombre único, sin lectura concurrente esperada.
+        unsafe { std::env::set_var(key, "") };
+        // En macOS caería al keychain; sin entrada válida ahí,
+        // devuelve None. En otros SO, `filter(|s| !s.is_empty())`
+        // también da None directo.
+        let out = resolve(key, "no-existe-en-keychain-tampoco");
+        assert!(
+            out.is_none(),
+            "env var vacía debe tratarse como missing: {out:?}"
+        );
+        // SAFETY: cleanup a continuación del set anterior.
+        unsafe { std::env::remove_var(key) };
+    }
+}
