@@ -451,7 +451,7 @@ function PreferencesEditor({
   const [ttl, setTtl] = useState(prefs.stream_cache_ttl_days)
   const [glass, setGlass] = useState(prefs.glass_opacity)
   const [player, setPlayer] = useState<'html' | 'vlc'>(prefs.default_player)
-  const [hideEmpty, setHideEmpty] = useState(prefs.hide_empty_results ?? false)
+  const [hideEmpty, setHideEmpty] = useState(prefs.hide_empty_results ?? true)
   const [skin, setSkin] = useState(prefs.skin ?? 'videodrome')
   // Idioma UI: se aplica en VIVO al cambiarlo (sin esperar a "Guardar")
   // para que el user vea el efecto inmediato. La persistencia va con
@@ -467,7 +467,7 @@ function PreferencesEditor({
     ttl !== prefs.stream_cache_ttl_days ||
     glass !== prefs.glass_opacity ||
     player !== prefs.default_player ||
-    hideEmpty !== (prefs.hide_empty_results ?? false) ||
+    hideEmpty !== (prefs.hide_empty_results ?? true) ||
     skin !== (prefs.skin ?? 'videodrome')
 
   // Preview en vivo del slider de liquid glass: aplicamos la variable
@@ -610,15 +610,15 @@ function PreferencesEditor({
           role="switch"
           aria-checked={hideEmpty}
           onClick={() => setHideEmpty((v) => !v)}
-          className={`focus-ring relative h-7 w-12 rounded-full border transition-colors ${
+          className={`focus-ring relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
             hideEmpty
-              ? 'border-accent bg-accent/40'
-              : 'border-hairline bg-surface'
+              ? 'bg-accent'
+              : 'bg-surface-hi ring-1 ring-inset ring-hairline'
           }`}
         >
           <span
-            className={`absolute top-0.5 h-5 w-5 rounded-full bg-ink transition-transform ${
-              hideEmpty ? 'translate-x-6' : 'translate-x-0.5'
+            className={`inline-block h-5 w-5 rounded-full bg-ink shadow-sm transition-transform ${
+              hideEmpty ? 'translate-x-[22px]' : 'translate-x-0.5'
             }`}
           />
         </button>

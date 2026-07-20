@@ -93,14 +93,17 @@ pub struct Preferences {
     #[serde(default = "default_hls_disk_budget_gb")]
     pub hls_disk_budget_gb: u32,
     /// Si `true`, la vista de resultados de búsqueda (SearchResults)
-    /// filtra los TMDB hits para los que ningún provider tiene
-    /// torrents publicados. Coste: N consultas a
-    /// `has_torrents_for_tmdb` en paralelo — la primera vez para
-    /// cada peli hace search real (aprox. 3s por candidato con
-    /// concurrencia 4); veces siguientes leen del `torrent_cache`
-    /// (instantáneo). Default false para no penalizar arranque en
-    /// frío.
-    #[serde(default)]
+    /// filtra los TMDB hits cuyo `torrent_count` es 0. Ese campo lo
+    /// puebla `search_movies_tmdb` sondeando providers en paralelo
+    /// al mismo tiempo que TMDB (concurrencia 6, coste incluido en
+    /// el search original — no hay RPC extra al activar el filtro).
+    /// El filtro es client-side sobre `MovieHit`.
+    ///
+    /// Default `true`: los hits sin torrents solo llevan al empty
+    /// state de Torrents, que no aporta más que "prueba otro". Los
+    /// users que quieran ver TODOS los resultados de TMDB (incluidos
+    /// sin release digital) pueden desactivarlo desde Ajustes.
+    #[serde(default = "default_hide_empty_results")]
     pub hide_empty_results: bool,
     /// Skin de apariencia. Identificador estable (`"videodrome"`,
     /// `"noir"`, `"tokyo"`, `"vapor"`, `"sepia"`). El frontend lo
@@ -161,6 +164,10 @@ fn default_skin() -> String {
     "videodrome".to_string()
 }
 
+fn default_hide_empty_results() -> bool {
+    true
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -172,7 +179,7 @@ impl Default for Preferences {
             ui_language: None,
             quality_mode: default_quality_mode(),
             hls_disk_budget_gb: default_hls_disk_budget_gb(),
-            hide_empty_results: false,
+            hide_empty_results: default_hide_empty_results(),
             skin: default_skin(),
         }
     }

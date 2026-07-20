@@ -302,6 +302,10 @@ export const es: Record<string, string> = {
     'El torrent está descargando a {{speed}} con {{peers}} peers ({{pct}}% completo). El enjambre no da suficiente ancho de banda para reproducir. Prueba otro release con más seeders, o abre el enlace en VLC desde Ajustes.',
   'player.probeStalled':
     'Este torrent no está descargando (0 B en {{elapsed}} s), probablemente no tiene seeders activos. Prueba otro release de la lista.',
+  'player.probeStalledNoProgress':
+    'El torrent ha dejado de descargar ({{downloaded}} en memoria, sin bytes nuevos en {{stalled}} s, {{peers}} peers). Prueba otro release con más seeders.',
+  'player.probeStalledHardDeadline':
+    'El enjambre está descargando ({{downloaded}} en memoria, {{peers}} peers) pero la cabecera del vídeo (moov) está al final del fichero y no se está priorizando. Prueba otro release — los MP4 con índice al inicio arrancan antes.',
   'player.videoFailed': 'No se pudo reproducir esta película en el player. Prueba a cambiar el reproductor a VLC desde Ajustes.',
   'player.ffmpegMissing':
     'ffmpeg no está disponible. {{hint}} Alternativa: cambia el reproductor a VLC en Ajustes.',
@@ -334,4 +338,18 @@ export const es: Record<string, string> = {
   'settings.skin.label': 'Skin',
   'settings.skin.hint':
     'Preset de color de la app. El cambio se aplica en vivo; se persiste al guardar.',
+
+  // ── Torrent drop (arrastrar .torrent / magnet a la ventana) ─
+  'drop.title': 'Suelta para reproducir',
+  'drop.subtitle':
+    'Al soltar el fichero (o el enlace magnet) se descargará la metadata y podrás elegir qué reproducir.',
+  'drop.resolving': 'Resolviendo torrent…',
+  'drop.resolvingHint':
+    'Descargando metadata del swarm. Puede tardar unos segundos.',
+  'drop.failed': 'No se pudo abrir el torrent',
+  'dropped.title': 'Torrent',
+  'dropped.filesCount': '{{videos}} vídeo · {{total}} archivos',
+  'dropped.emptyTitle': 'Sin ficheros de vídeo',
+  'dropped.emptyHint':
+    'Este torrent no contiene ningún fichero de vídeo mayor de 50 MB. Solo se listan los ficheros reproducibles.',
 }

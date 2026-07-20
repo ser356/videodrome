@@ -135,6 +135,12 @@ pub fn parse(raw: &str) -> ParsedRelease {
         first_source: Option<(usize, String)>,
         first_codec: Option<(usize, String)>,
         first_season_ep: Option<(usize, u16, Option<u16>)>,
+        /// Episode-only token (`E01`, `EP01`, `Ep 01`) que aparece
+        /// SIN season prefix. Común en releases asiáticos con
+        /// separación tipo `Series.Name.S01.EP01.1080p` — el parser
+        /// original solo capturaba `SxxEyy` en un token único y
+        /// dejaba estos como pack de temporada por error.
+        first_episode_only: Option<(usize, u16)>,
     }
     let mut scan = Scan::default();
 
@@ -150,6 +156,12 @@ pub fn parse(raw: &str) -> ParsedRelease {
         if let Some(s) = parse_sxx(&lower) {
             if scan.first_season_ep.is_none() {
                 scan.first_season_ep = Some((i, s, None));
+            }
+            continue;
+        }
+        if let Some(e) = parse_episode_only(&lower) {
+            if scan.first_episode_only.is_none() {
+                scan.first_episode_only = Some((i, e));
             }
             continue;
         }
@@ -191,6 +203,7 @@ pub fn parse(raw: &str) -> ParsedRelease {
         scan.first_source.as_ref().map(|(i, _)| *i),
         scan.first_codec.as_ref().map(|(i, _)| *i),
         scan.first_season_ep.as_ref().map(|(i, _, _)| *i),
+        scan.first_episode_only.as_ref().map(|(i, _)| *i),
     ]
     .into_iter()
     .flatten()
@@ -226,6 +239,14 @@ pub fn parse(raw: &str) -> ParsedRelease {
     let (season, episode) = match scan.first_season_ep {
         Some((_, s, e)) => (Some(s), e),
         None => (None, None),
+    };
+    // Reconciliar `Sxx` + `EP01` (o `E01` suelto) en (Some(s), Some(e))
+    // — cubre releases asiáticos comunes (`Series.Name.S01.EP01.1080p`).
+    // Solo cuando ya teníamos season pero no episode, y hay un
+    // episode-only en la parte técnica del release.
+    let episode = match (episode, scan.first_episode_only) {
+        (None, Some((_, e))) if season.is_some() => Some(e),
+        (other, _) => other,
     };
 
     ParsedRelease {
@@ -355,6 +376,35 @@ fn parse_sxx(tok: &str) -> Option<u16> {
     tok[1..].parse().ok()
 }
 
+/// `e01` / `ep01` / `ep1` — marcador de episodio suelto que aparece
+/// SIN el prefijo de temporada en el mismo token. Común en releases
+/// asiáticos con separación por puntos: `Series.Name.S01.EP01.WEB`.
+/// Rechazamos tokens ambiguos: `en` (idioma English) empieza por `e`
+/// pero no tiene dígitos, `episode` sin número → None. Aceptamos
+/// hasta 4 dígitos (packs de anime raros con 200+ episodios).
+fn parse_episode_only(tok: &str) -> Option<u16> {
+    let bytes = tok.as_bytes();
+    if bytes.first() != Some(&b'e') {
+        return None;
+    }
+    // Salta `e` o `ep`.
+    let mut i = 1;
+    if bytes.get(i) == Some(&b'p') {
+        i += 1;
+    }
+    if i == bytes.len() {
+        return None;
+    }
+    let digits_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == digits_start || i != bytes.len() {
+        return None;
+    }
+    tok[digits_start..].parse().ok()
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -464,6 +514,43 @@ mod tests {
         assert_eq!(p.season, Some(1));
         assert_eq!(p.episode, None);
         assert!(p.is_tv());
+    }
+
+    #[test]
+    fn separated_season_and_episode_tokens() {
+        // Release asiático típico: `S01 EP01` en tokens separados.
+        // Antes del audit alt-titles-series esto salía como
+        // season pack (E01 se caía como token técnico ignorado).
+        let p = parse("Series.Name.S01.EP01.1080p.WEB-DL");
+        assert_eq!(p.season, Some(1));
+        assert_eq!(p.episode, Some(1));
+        assert!(p.is_tv());
+        assert_eq!(p.title, "Series Name");
+    }
+
+    #[test]
+    fn separated_e_only_marker() {
+        // `E01` sin `p` prefix también cuenta cuando hay Sxx antes.
+        let p = parse("Show.Name.S02.E05.720p.HDTV.x264");
+        assert_eq!(p.season, Some(2));
+        assert_eq!(p.episode, Some(5));
+    }
+
+    #[test]
+    fn ep_marker_without_season_ignored() {
+        // Sin `Sxx` en el release, un `EP01` solo no promueve a
+        // episode-of-unknown-season — nos quedamos con episode=None
+        // para no falsear un match contra query.season.
+        let p = parse("Some.Show.EP01.1080p.WEB");
+        assert_eq!(p.episode, None);
+    }
+
+    #[test]
+    fn en_language_tag_not_confused_with_episode() {
+        // `en` sin dígitos no debe capturarse como episode.
+        assert_eq!(parse_episode_only("en"), None);
+        assert_eq!(parse_episode_only("english"), None);
+        assert_eq!(parse_episode_only("ep"), None);
     }
 
     #[test]

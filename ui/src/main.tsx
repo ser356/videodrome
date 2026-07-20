@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import './index.css'
+import { TorrentDropOverlay } from './components/TorrentDropOverlay'
 import {
   detectClientCapabilities,
   getPreferences,
@@ -10,6 +11,7 @@ import {
 } from './lib/api'
 import { initLocale } from './lib/i18n'
 import { applyGlassOpacity, applySkin } from './lib/theme'
+import { DroppedTorrent } from './views/DroppedTorrent'
 import { Home } from './views/Home'
 import { Login } from './views/Login'
 import { Player } from './views/Player'
@@ -50,6 +52,7 @@ async function bootstrap() {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <BrowserRouter>
+        <TorrentDropOverlay />
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/login" element={<Login />} />
@@ -61,6 +64,7 @@ async function bootstrap() {
           <Route path="/torrents/tmdb/:tmdbId" element={<Torrents mode="tmdb" />} />
           <Route path="/torrents/search" element={<Torrents mode="direct" />} />
           <Route path="/torrents/series/:tmdbId" element={<Torrents mode="series" />} />
+          <Route path="/torrents/dropped" element={<DroppedTorrent />} />
           <Route path="/player" element={<Player />} />
         </Routes>
       </BrowserRouter>

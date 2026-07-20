@@ -1304,6 +1304,8 @@ impl<'a> TmdbClient<'a> {
             seasons: Vec<SeasonRaw>,
             #[serde(default)]
             external_ids: Option<ExternalIds>,
+            #[serde(default)]
+            alternative_titles: Option<AltTitlesTv>,
         }
         #[derive(Deserialize)]
         struct SeasonRaw {
@@ -1323,9 +1325,26 @@ impl<'a> TmdbClient<'a> {
             #[serde(default)]
             imdb_id: Option<String>,
         }
+        // `/tv/{id}/alternative_titles` devuelve `results[]` (a
+        // diferencia de `/movie/{id}/alternative_titles` que usa
+        // `titles[]`). Cada entrada trae `iso_3166_1 + title` (y
+        // opcional `type` — ej. "original title"); filtramos por
+        // países útiles como en la rama de películas.
+        #[derive(Deserialize)]
+        struct AltTitlesTv {
+            #[serde(default)]
+            results: Vec<AltTitleTv>,
+        }
+        #[derive(Deserialize)]
+        struct AltTitleTv {
+            #[serde(default)]
+            iso_3166_1: String,
+            #[serde(default)]
+            title: String,
+        }
 
         let url = format!(
-            "{BASE_URL}/tv/{tmdb_id}?append_to_response=external_ids&language={loc}",
+            "{BASE_URL}/tv/{tmdb_id}?append_to_response=external_ids,alternative_titles&language={loc}",
             loc = self.locale,
         );
         let resp = self
@@ -1367,6 +1386,48 @@ impl<'a> TmdbClient<'a> {
             .collect();
         seasons.sort_by_key(|s| s.season_number);
 
+        // Alt titles: mismo criterio de países que la rama de pelis
+        // — US/GB (inglés scene) + ES (mercado hispano) + país
+        // mapeado desde `original_language` (JP/CN/KR/FR/IT/DE/BR).
+        // Cap a 6, dedup por lowercase trim.
+        let mut wanted_countries: Vec<&str> = vec!["US", "GB", "ES"];
+        if let Some(orig) = body.original_language.as_deref() {
+            let mapped = match orig {
+                "fr" => Some("FR"),
+                "it" => Some("IT"),
+                "de" => Some("DE"),
+                "ja" => Some("JP"),
+                "ko" => Some("KR"),
+                "zh" => Some("CN"),
+                "pt" => Some("BR"),
+                _ => None,
+            };
+            if let Some(c) = mapped {
+                if !wanted_countries.contains(&c) {
+                    wanted_countries.push(c);
+                }
+            }
+        }
+        let mut alt_titles: Vec<String> = Vec::new();
+        let mut seen_alt: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(alt) = body.alternative_titles {
+            for t in alt.results {
+                if t.title.is_empty() {
+                    continue;
+                }
+                if !wanted_countries.contains(&t.iso_3166_1.as_str()) {
+                    continue;
+                }
+                let key = t.title.trim().to_lowercase();
+                if seen_alt.insert(key) {
+                    alt_titles.push(t.title);
+                }
+                if alt_titles.len() >= 6 {
+                    break;
+                }
+            }
+        }
+
         Ok(Some(SeriesDetails {
             id: body.id,
             name,
@@ -1380,6 +1441,7 @@ impl<'a> TmdbClient<'a> {
             seasons,
             number_of_seasons: body.number_of_seasons,
             status: body.status.filter(|s| !s.is_empty()),
+            alt_titles,
         }))
     }
 
@@ -1592,6 +1654,15 @@ pub struct SeriesDetails {
     /// Estado de emisión (`Returning Series`, `Ended`, `Canceled`,
     /// `In Production`…). Se muestra en la UI como badge.
     pub status: Option<String>,
+    /// Títulos alternativos filtrados por país
+    /// (`/tv/{id}/alternative_titles`). Alimenta `title_variants`
+    /// de `MovieQuery` en la búsqueda de torrents — clave para
+    /// series no anglosajonas (CJK, cirílico) donde `original_name`
+    /// por sí solo no matchea releases scene con transliteración.
+    /// `#[serde(default)]` para cache disk compat con versiones
+    /// pre-alt_titles-series.
+    #[serde(default)]
+    pub alt_titles: Vec<String>,
 }
 
 /// Resumen de una temporada tal cual lo lista `/tv/{id}` en

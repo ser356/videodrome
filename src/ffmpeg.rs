@@ -475,37 +475,84 @@ pub enum StreamKind {
     Other,
 }
 
-/// Timeout defensivo para `ffprobe` contra `/video`. Si librqbit
-/// está descargando un swarm muerto (o el moov está al final del
-/// fichero sin priorizar) `ffprobe` se queda leyendo para siempre.
-/// 20 s es holgado para cabeceras MP4/MKV con Range OK y corto para
-/// no hacer esperar al user cuando de verdad no va a llegar. La
-/// constante es pública para que el frontend/tests puedan citar el
-/// valor sin hardcodearlo por otro lado.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Safety net absoluto para `probe()`. La lógica de "swarm sin
+/// progreso" vive fuera (`stream::server::ensure_probe` corre un
+/// watcher contra `handle.stats()` en paralelo — dispara a los 25 s
+/// sin bytes nuevos o 90 s de hard deadline, muchísimo antes que
+/// esto). Este timeout solo sirve por si `ensure_probe` se llama
+/// desde un path sin handle o el watcher se queda colgado — 180 s
+/// es holgado para cualquier moov razonable, y si aún así ffprobe
+/// no ha respondido es que hay algo mal en el binario.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Error marker que emite `probe()` cuando el timeout de 20 s salta
-/// sin que ffprobe llegue a producir output. `serve_probe` en
-/// `stream.rs` hace `downcast_ref::<ProbeStalled>()` sobre el error
-/// devuelto por `ensure_probe` para responder con 504 + JSON
-/// estructurado (`{ "reason": "probe_stalled", ... }`) en vez de
-/// un 500 genérico — el frontend distingue así "swarm sin seeders"
-/// (mensaje "prueba otro release") de "ffprobe reventó" (mensaje
+/// Error marker que emite `probe()` (o el watcher externo en
+/// `ensure_probe`) cuando la descarga necesaria para la cabecera
+/// no avanza. `serve_probe` en `stream/server.rs` hace
+/// `downcast_ref::<ProbeStalled>()` sobre el error devuelto por
+/// `ensure_probe` para responder con 504 + JSON estructurado
+/// (`{ "reason": "probe_stalled", ... }`) en vez de un 500 genérico
+/// — el frontend distingue así "swarm sin seeders" (mensaje
+/// "prueba otro release") de "ffprobe reventó" (mensaje
 /// "comprueba ffmpeg").
 #[derive(Debug)]
 pub struct ProbeStalled {
-    /// Segundos de deadline que se agotaron sin que ffprobe
-    /// devolviera nada. Hoy siempre es `PROBE_TIMEOUT.as_secs()`
-    /// pero se propaga explícito para que el frontend lo pinte.
+    /// Segundos totales que el probe estuvo activo antes de rendirse.
     pub elapsed_s: u64,
+    /// Bytes que librqbit reporta como descargados en el momento
+    /// del abort. **Puede ser >0 aunque haya stall** — el swarm
+    /// bajaba piezas pero NO las del rango que `ffprobe` necesita
+    /// (típico: moov al final de un MP4 grande sin priorización).
+    /// El frontend lo pinta para desdramatizar el "0 B" del
+    /// mensaje viejo.
+    pub downloaded_bytes: u64,
+    /// Velocidad instantánea de descarga en el momento del abort
+    /// (bytes/s). 0 = swarm muerto de verdad.
+    pub speed_bps: u64,
+    /// Peers vivos en el swarm en el momento del abort.
+    pub peers: u32,
+    /// Motivo del abort — el watcher externo distingue entre
+    /// "sin progreso en N s" (típico swarm muerto) y "hard deadline
+    /// aunque haya progreso" (raro, indica que la parte necesaria
+    /// del fichero no está siendo priorizada).
+    pub reason: StallReason,
+}
+
+/// Motivo por el que un probe se aborta. Se serializa como string
+/// (`"no_progress"` / `"hard_deadline"`) en el JSON del 504.
+#[derive(Debug, Clone, Copy)]
+pub enum StallReason {
+    /// El watcher detectó `stalled_s` segundos sin que
+    /// `handle.stats().progress_bytes` avanzara.
+    NoProgress { stalled_s: u64 },
+    /// El watcher alcanzó el hard deadline sin bytes suficientes
+    /// para la cabecera pese a haber descarga activa. Suele indicar
+    /// que ffprobe está esperando un rango (moov al final) que la
+    /// política de piece-picking de librqbit no está priorizando.
+    HardDeadline,
+}
+
+impl StallReason {
+    /// Nombre serializable (`"no_progress"` / `"hard_deadline"`).
+    /// Se propaga al JSON del 504 para que el frontend distinga
+    /// mensaje.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StallReason::NoProgress { .. } => "no_progress",
+            StallReason::HardDeadline => "hard_deadline",
+        }
+    }
 }
 
 impl std::fmt::Display for ProbeStalled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "probe_stalled: ffprobe no recibió cabecera en {} s (swarm sin seeders o moov inaccesible)",
-            self.elapsed_s
+            "probe_stalled ({}): {} bytes en {} s ({} peers, {} B/s)",
+            self.reason.as_str(),
+            self.downloaded_bytes,
+            self.elapsed_s,
+            self.peers,
+            self.speed_bps,
         )
     }
 }
@@ -537,10 +584,11 @@ pub async fn probe(url: &str) -> Result<MediaInfo> {
     .kill_on_drop(true);
     cmd.hide_console();
 
-    // Timeout defensivo: ver `PROBE_TIMEOUT` (20 s) — si librqbit
-    // está bajando un swarm muerto o el moov está al final del
-    // fichero sin priorizar, ffprobe se queda leyendo `/video`
-    // para siempre.
+    // Safety net absoluto (ver `PROBE_TIMEOUT` = 180 s). La lógica
+    // fina de "swarm sin progreso" vive en `stream::server::ensure_probe`
+    // (watcher paralelo contra `handle.stats()`); esta rama solo
+    // salta si el watcher no está o el ffprobe se queda colgado
+    // sin causa clara.
     //
     // El `spawn` + `wait_with_output` (en vez de `.output()` a secas)
     // permite que, al hacer timeout, el `Child` se drope dentro del
@@ -556,16 +604,14 @@ pub async fn probe(url: &str) -> Result<MediaInfo> {
                 target: "probe",
                 url = %url,
                 elapsed_s,
-                "timeout — descarga del inicio del fichero no avanza"
+                "safety-net timeout — probe sin watcher externo o ffprobe colgado"
             );
-            // Marker error explícito: `serve_probe` hace downcast a
-            // este tipo para devolver 504 + JSON estructurado en vez
-            // de un 500 genérico. El frontend usa ese JSON para
-            // distinguir "swarm sin seeders" de "ffprobe/ffmpeg
-            // roto" y pintar mensajes distintos + botón "Volver a
-            // torrents del título".
             return Err(anyhow::Error::from(ProbeStalled {
                 elapsed_s: PROBE_TIMEOUT.as_secs(),
+                downloaded_bytes: 0,
+                speed_bps: 0,
+                peers: 0,
+                reason: StallReason::HardDeadline,
             }));
         }
     };

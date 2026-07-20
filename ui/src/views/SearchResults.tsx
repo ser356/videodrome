@@ -43,7 +43,7 @@ export function SearchResults() {
   useEffect(() => {
     if (!isTauri()) return
     void getPreferences()
-      .then((p) => setHideEmpty(p.hide_empty_results ?? false))
+      .then((p) => setHideEmpty(p.hide_empty_results ?? true))
       .catch(() => {})
   }, [])
 

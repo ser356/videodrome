@@ -103,6 +103,12 @@ export interface ProviderStatus {
   name: string
   ok: boolean
   hits: number
+  /** Hits que sobrevivieron a los filtros centrales de `search_all`
+   * (title-variants, year ±1, kind, trash, absurd size, seeders
+   * mínimos). Cuando `kept < hits` la UI puede pintar `apibay ✓ 15 → 0`
+   * — el provider aportó releases pero el filtro los descartó todos
+   * (típico de títulos genéricos donde el year filter no cuadra). */
+  kept?: number
   elapsed_ms: number
   error?: string | null
   retried: boolean
@@ -335,6 +341,31 @@ export interface TorrentFileInfo {
 export const listTorrentFiles = (magnet: string) =>
   invoke<TorrentFileInfo[]>('list_torrent_files', { magnet })
 
+/** Fuente de un torrent dropeado sobre la ventana — discriminated
+ * union que el backend deserializa con `#[serde(tag = "kind")]`.
+ * `magnet` viene del drop de texto (arrastrar un enlace magnet desde
+ * el navegador); `file` viene del drop de un `.torrent` desde el
+ * file manager (Tauri `onDragDropEvent` da `path` absoluto). */
+export type DroppedTorrentSource =
+  | { kind: 'magnet'; uri: string }
+  | { kind: 'file'; path: string }
+
+/** Resultado de resolver un torrent dropeado. `magnet` es la URI
+ * canónica (para `.torrent` files se construye a partir del
+ * `info_hash` + trackers del bencode) — reutilizable tal cual por
+ * `startStreamHtml`. `files` reutiliza `TorrentFileInfo` para que
+ * la vista de selección pueda parecerse a la de torrent-picker
+ * multi-file existente. */
+export interface ResolvedDroppedTorrent {
+  magnet: string
+  name: string
+  info_hash: string | null
+  files: TorrentFileInfo[]
+}
+
+export const resolveDroppedTorrent = (source: DroppedTorrentSource) =>
+  invoke<ResolvedDroppedTorrent>('resolve_dropped_torrent', { source })
+
 export const openMagnet = (magnet: string) =>
   invoke<void>('open_magnet', { magnet })
 
@@ -472,22 +503,44 @@ export interface MediaStream {
  *
  * Errores posibles:
  *   - `ProbeStalledError`: backend devolvió 504 + JSON
- *     `{reason:"probe_stalled", bytes, elapsed_s}` — ffprobe se
- *     rindió tras 20 s sin cabecera. Firma clara de "swarm sin
- *     seeders": el player pinta mensaje y botón "Volver a torrents
- *     del título" en vez del genérico "comprueba ffmpeg".
+ *     `{reason:"probe_stalled", stall_reason, elapsed_s, stalled_s,
+ *     downloaded_bytes, speed_bps, peers}` — el watcher detectó que
+ *     la descarga necesaria no llega (por sin progreso o por hard
+ *     deadline). Firma clara de "swarm sin seeders" (o moov
+ *     inaccesible): el player pinta mensaje con los stats reales +
+ *     botón "Volver a torrents del título".
  *   - `Error` genérico: 500 (ffprobe/ffmpeg roto), 4xx, red caída.
  *     El player lo mapea al mensaje "ffmpeg missing" heurístico
  *     que existía antes. */
 export class ProbeStalledError extends Error {
   readonly reason = 'probe_stalled'
-  readonly bytes: number
+  /** Motivo del abort: `no_progress` (bytes no aumentan) o
+   * `hard_deadline` (llegó al tope aunque haya descarga activa —
+   * suele indicar moov al final del MP4). */
+  readonly stallReason: 'no_progress' | 'hard_deadline'
   readonly elapsedS: number
-  constructor(bytes: number, elapsedS: number) {
-    super(`probe_stalled: 0 B in ${elapsedS}s`)
+  readonly stalledS: number
+  readonly downloadedBytes: number
+  readonly speedBps: number
+  readonly peers: number
+  constructor(init: {
+    stallReason: 'no_progress' | 'hard_deadline'
+    elapsedS: number
+    stalledS: number
+    downloadedBytes: number
+    speedBps: number
+    peers: number
+  }) {
+    super(
+      `probe_stalled (${init.stallReason}): ${init.downloadedBytes} B in ${init.elapsedS}s, ${init.peers} peers, ${init.speedBps} B/s`,
+    )
     this.name = 'ProbeStalledError'
-    this.bytes = bytes
-    this.elapsedS = elapsedS
+    this.stallReason = init.stallReason
+    this.elapsedS = init.elapsedS
+    this.stalledS = init.stalledS
+    this.downloadedBytes = init.downloadedBytes
+    this.speedBps = init.speedBps
+    this.peers = init.peers
   }
 }
 
@@ -496,17 +549,33 @@ export async function probeStream(streamUrl: string): Promise<MediaInfo> {
   const r = await fetch(`${base}/probe.json`)
   if (r.status === 504) {
     // Rama estructurada `probe_stalled` del backend. El body es JSON
-    // con `bytes` (siempre 0 hoy) + `elapsed_s`. Si falla el parse
+    // con motivo (`stall_reason`) + stats reales de librqbit
+    // (downloaded_bytes / speed_bps / peers). Si falla el parse
     // (raro — el backend controla el body), caemos al Error genérico
-    // para no ocultar información al log de la consola.
+    // para no ocultar información al log de la consola. `bytes` se
+    // mantiene por compat con clientes viejos.
     try {
       const body = (await r.json()) as {
         reason?: string
-        bytes?: number
+        stall_reason?: string
         elapsed_s?: number
+        stalled_s?: number
+        downloaded_bytes?: number
+        speed_bps?: number
+        peers?: number
+        bytes?: number
       }
       if (body.reason === 'probe_stalled') {
-        throw new ProbeStalledError(body.bytes ?? 0, body.elapsed_s ?? 0)
+        const stallReason: 'no_progress' | 'hard_deadline' =
+          body.stall_reason === 'hard_deadline' ? 'hard_deadline' : 'no_progress'
+        throw new ProbeStalledError({
+          stallReason,
+          elapsedS: body.elapsed_s ?? 0,
+          stalledS: body.stalled_s ?? 0,
+          downloadedBytes: body.downloaded_bytes ?? body.bytes ?? 0,
+          speedBps: body.speed_bps ?? 0,
+          peers: body.peers ?? 0,
+        })
       }
     } catch (e) {
       if (e instanceof ProbeStalledError) throw e

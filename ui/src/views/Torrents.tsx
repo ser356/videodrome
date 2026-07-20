@@ -845,8 +845,18 @@ function ProviderStatusLine({ providers }: { providers: ProviderStatus[] }) {
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] tabular-nums text-dim">
       {providers.map((p) => {
         const cached = p.from_cache === true
+        // `kept` viene del filtro central de search_all: cuántos hits
+        // del provider sobrevivieron a title/year/kind/trash/size.
+        // Cuando `kept < hits` pintamos `15 → 0` para que sea obvio
+        // que el provider aportó releases pero el filtro los mató —
+        // señal habitual de query con año desalineado o título muy
+        // genérico. Omitimos el `→ K` cuando `kept === hits` (todo
+        // pasó) para no saturar la línea.
+        const kept = p.kept ?? p.hits
+        const filteredOut = p.hits - kept
+        const showKept = p.ok && filteredOut > 0
         const tooltip = p.ok
-          ? `${p.hits} hits en ${p.elapsed_ms} ms${p.retried ? ' (con retry)' : ''}${cached ? ' · caché' : ''}`
+          ? `${p.hits} hits en ${p.elapsed_ms} ms${p.retried ? ' (con retry)' : ''}${cached ? ' · caché' : ''}${filteredOut > 0 ? ` · ${filteredOut} filtrados` : ''}`
           : `${p.error ?? 'error'} · ${p.elapsed_ms} ms`
         return (
           <span key={p.name} title={tooltip} className="flex items-center gap-1">
@@ -854,6 +864,9 @@ function ProviderStatusLine({ providers }: { providers: ProviderStatus[] }) {
             {p.ok ? (
               <span className={cached ? 'text-info' : 'text-good'}>
                 {cached ? '↺' : '✓'} {p.hits}
+                {showKept && (
+                  <span className="text-dim"> → {kept}</span>
+                )}
               </span>
             ) : (
               <span className="text-danger">✗ {p.error ?? 'error'}</span>

@@ -61,8 +61,8 @@ mod vlc;
 pub use cache::{cache_dir, clear_all, parse_infohash, prune, prune_orphan_tempdirs, total_size};
 #[allow(unused_imports)]
 pub use handle::{
-    compute_moviehash, list_files, select_file, start, start_with_target, StreamHandle,
-    StreamStats, TorrentFileInfo,
+    compute_moviehash, list_files, select_file, start, start_with_target, torrent_bytes_to_magnet,
+    StreamHandle, StreamStats, TorrentFileInfo,
 };
 #[cfg(feature = "gui")]
 pub use movie_progress::{

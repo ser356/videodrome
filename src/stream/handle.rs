@@ -452,6 +452,59 @@ pub async fn list_files(magnet: String) -> Result<Vec<TorrentFileInfo>> {
     Ok(out)
 }
 
+/// Convierte los bytes de un fichero `.torrent` en un magnet URI
+/// reutilizable por el pipeline existente (`list_files`, `start`,
+/// `start_stream_html`). Se usa para el drop de ficheros `.torrent`
+/// sobre la ventana (Fase drop-to-play).
+///
+/// `librqbit::torrent_from_bytes` ya deserializa el bencode Y
+/// calcula el `info_hash` (sha1 del sub-diccionario `info`) — no
+/// hace falta hashear a mano ni añadir el crate `sha1`. Los
+/// trackers vienen de `announce` (single-tracker) + `announce-list`
+/// (multi-tier, BEP12), deduplicados.
+///
+/// Devuelve `(magnet_uri, display_name)`. `display_name` sale de
+/// `info.name` (nombre del torrent scene, ej.
+/// `Movie.2024.1080p.BluRay.x264-GROUP`), con fallback al infohash
+/// hex si el fichero no lleva name.
+///
+/// **No** valida piezas ni descarga nada — solo produce el string.
+/// La resolución real (list_files → start_stream_html) se hace fuera.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub fn torrent_bytes_to_magnet(bytes: &[u8]) -> Result<(String, String)> {
+    let meta = librqbit::torrent_from_bytes::<librqbit::ByteBufOwned>(bytes)
+        .context("Fichero .torrent inválido")?;
+
+    let mut trackers: Vec<String> = Vec::new();
+    let push_tracker = |raw: &[u8], trackers: &mut Vec<String>| {
+        if let Ok(s) = std::str::from_utf8(raw) {
+            let s = s.trim();
+            if !s.is_empty() && !trackers.iter().any(|t| t == s) {
+                trackers.push(s.to_string());
+            }
+        }
+    };
+    if let Some(a) = &meta.announce {
+        push_tracker(a.as_ref(), &mut trackers);
+    }
+    for tier in &meta.announce_list {
+        for t in tier {
+            push_tracker(t.as_ref(), &mut trackers);
+        }
+    }
+
+    let magnet = librqbit::Magnet::from_id20(meta.info_hash, trackers, None).to_string();
+    let display_name = meta
+        .info
+        .name
+        .as_ref()
+        .and_then(|b| std::str::from_utf8(b.as_ref()).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| meta.info_hash.as_string());
+    Ok((magnet, display_name))
+}
+
 /// Arranca una sesión BitTorrent para el magnet dado, sirve el fichero
 /// principal (el más grande) por HTTP en `127.0.0.1:PORT` y devuelve la
 /// URL para el reproductor.

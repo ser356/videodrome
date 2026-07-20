@@ -17,6 +17,7 @@ import {
 import {
   downloadSubtitle,
   fetchEmbeddedSubtitle,
+  formatSize,
   getMovieView,
   getPreferences,
   getResume,
@@ -409,12 +410,38 @@ export function Player() {
         // infinito. Hay que decidirle al user.
         if (cancelled) return
         if (e instanceof ProbeStalledError) {
-          // Firma clara de "este torrent no tiene seeders vivos":
-          // mensaje específico + botón Volver → lista de torrents
-          // del título. Antes esto se ocultaba bajo el mensaje
+          // Firma clara de "este torrent no arranca": mensaje
+          // específico + botón Volver → lista de torrents del
+          // título. Antes esto se ocultaba bajo el mensaje
           // genérico "comprueba ffmpeg", que era engañoso — el
           // binario está OK, el problema es el swarm.
-          setError(t('player.probeStalled', { elapsed: String(e.elapsedS) }))
+          //
+          // Distinguimos dos motivos:
+          //   * `no_progress` — bytes de librqbit no aumentan.
+          //     Swarm muerto de verdad (no peers o todos ausentes).
+          //   * `hard_deadline` — bajaba bytes pero NO los que
+          //     ffprobe necesita. Típico MP4 con moov al final
+          //     que la política de piece-picking no prioriza.
+          // Los stats reales (downloadedBytes, speed, peers) se
+          // pintan para que el user no vea "0 B" cuando de hecho
+          // llevaba MB descargados.
+          if (e.stallReason === 'hard_deadline') {
+            setError(
+              t('player.probeStalledHardDeadline', {
+                elapsed: String(e.elapsedS),
+                downloaded: formatSize(e.downloadedBytes),
+                peers: String(e.peers),
+              }),
+            )
+          } else {
+            setError(
+              t('player.probeStalledNoProgress', {
+                stalled: String(e.stalledS || e.elapsedS),
+                downloaded: formatSize(e.downloadedBytes),
+                peers: String(e.peers),
+              }),
+            )
+          }
           setErrorBackTo(torrentsRoute)
           return
         }

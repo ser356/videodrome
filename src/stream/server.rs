@@ -487,23 +487,39 @@ pub(super) async fn serve_probe(
     let mut info = match ensure_probe(&state).await {
         Ok(info) => info,
         Err(e) => {
-            // Rama estructurada: timeout de ffprobe → 504 +
-            // `{reason:"probe_stalled", bytes:0, elapsed_s:N}`.
-            // El frontend distingue así "swarm sin seeders" (mensaje
+            // Rama estructurada: watcher detectó stall → 504 +
+            // JSON con motivo + stats reales de librqbit. El
+            // frontend distingue "swarm sin seeders" (mensaje
             // "prueba otro release", botón Volver → lista de
             // torrents) de "ffmpeg roto" (mensaje "comprueba
-            // ffmpeg"). Antes el timeout se hundía en un 500 con
-            // mensaje libre y el frontend no podía diferenciar.
+            // ffmpeg"). El motivo (`no_progress` / `hard_deadline`)
+            // permite al frontend refinar el mensaje ("swarm
+            // sin bytes en Xs" vs "cabecera inaccesible pese a
+            // descarga activa").
             if let Some(stalled) = e.downcast_ref::<crate::ffmpeg::ProbeStalled>() {
                 tracing::warn!(
                     target: "probe",
                     reason = "probe_stalled",
+                    stall_reason = stalled.reason.as_str(),
                     elapsed_s = stalled.elapsed_s,
+                    downloaded_bytes = stalled.downloaded_bytes,
+                    speed_bps = stalled.speed_bps,
+                    peers = stalled.peers,
                     "returning 504"
                 );
+                let stalled_s = match stalled.reason {
+                    crate::ffmpeg::StallReason::NoProgress { stalled_s } => stalled_s,
+                    crate::ffmpeg::StallReason::HardDeadline => 0,
+                };
                 let body = format!(
-                    r#"{{"reason":"probe_stalled","bytes":0,"elapsed_s":{}}}"#,
-                    stalled.elapsed_s
+                    r#"{{"reason":"probe_stalled","stall_reason":"{}","elapsed_s":{},"stalled_s":{},"downloaded_bytes":{},"speed_bps":{},"peers":{},"bytes":{}}}"#,
+                    stalled.reason.as_str(),
+                    stalled.elapsed_s,
+                    stalled_s,
+                    stalled.downloaded_bytes,
+                    stalled.speed_bps,
+                    stalled.peers,
+                    stalled.downloaded_bytes,
                 );
                 let resp = Response::builder()
                     .status(StatusCode::GATEWAY_TIMEOUT)
@@ -546,6 +562,15 @@ pub(super) async fn serve_probe(
 /// `ffprobe` sobre el endpoint `/video` local. Idempotente y
 /// thread-safe: si dos requests concurrentes piden probe la primera
 /// coge el lock y las siguientes reusan el resultado.
+///
+/// **Detección de swarm parado**: en paralelo al `probe()` corre
+/// `probe_stall_watcher` sobre `state.handle.stats()`. Si en
+/// `PROBE_STALL_SECS` (25 s) no aumenta `progress_bytes`, o si se
+/// alcanza `PROBE_HARD_SECS` (90 s), aborta el probe (drop del
+/// future → `kill_on_drop` mata ffprobe) y devuelve `ProbeStalled`
+/// enriquecido con downloaded_bytes/speed/peers. Antes había un
+/// hard timeout de 20 s dentro de `probe()` que reventaba en MP4
+/// con moov al final o swarms lentos legítimos.
 #[cfg(feature = "gui")]
 pub(in crate::stream) async fn ensure_probe(state: &AppState) -> Result<crate::ffmpeg::MediaInfo> {
     let mut guard = state.cached_probe.lock().await;
@@ -553,9 +578,108 @@ pub(in crate::stream) async fn ensure_probe(state: &AppState) -> Result<crate::f
         return Ok(info.clone());
     }
     let url = format!("http://{}/video", state.local_addr);
-    let info = crate::ffmpeg::probe(&url).await?;
+    let handle = state.handle.clone();
+    let info = tokio::select! {
+        biased;
+        result = crate::ffmpeg::probe(&url) => result?,
+        stalled = probe_stall_watcher(handle) => {
+            return Err(anyhow::Error::from(stalled));
+        }
+    };
     *guard = Some(info.clone());
     Ok(info)
+}
+
+/// Segundos SIN progreso de bytes descargados antes de rendirse. En
+/// paralelo con `PROBE_HARD_SECS`. Un swarm con seeders bajos pero
+/// vivos suele avanzar cada 5-10 s → 25 s de margen es holgado sin
+/// castigar al user con esperas absurdas cuando el swarm está muerto.
+#[cfg(feature = "gui")]
+const PROBE_STALL_SECS: u64 = 25;
+
+/// Segundos totales antes de rendirse aunque haya progreso. Cubre el
+/// caso patológico de MP4 con moov al final donde librqbit baja bytes
+/// (contando como "progreso") pero NO los que ffprobe necesita para
+/// la cabecera. 90 s es suficiente para descargar los últimos 5-10 MB
+/// de un fichero grande en un swarm decente.
+#[cfg(feature = "gui")]
+const PROBE_HARD_SECS: u64 = 90;
+
+/// Watcher paralelo al `probe()` — retorna un `ProbeStalled` cuando
+/// determina que la descarga necesaria no va a llegar (sin progreso
+/// en `PROBE_STALL_SECS` o `PROBE_HARD_SECS` totales). El caller lo
+/// usa dentro de `tokio::select!` con `probe()`: cuando el watcher
+/// resuelve primero, el `probe()` future se cancela y su `Child`
+/// gets dropped → `kill_on_drop(true)` mata al ffprobe real.
+#[cfg(feature = "gui")]
+async fn probe_stall_watcher(
+    handle: std::sync::Arc<librqbit::ManagedTorrent>,
+) -> crate::ffmpeg::ProbeStalled {
+    use std::time::Instant;
+    let started = Instant::now();
+    let sample = || -> (u64, u64, u32) {
+        let stats = handle.stats();
+        let speed_bps = handle
+            .live()
+            .map(|l| (l.down_speed_estimator().mbps() * 1_000_000.0 / 8.0) as u64)
+            .unwrap_or(0);
+        let peers = stats
+            .live
+            .as_ref()
+            .map(|l| l.snapshot.peer_stats.live as u32)
+            .unwrap_or(0);
+        (stats.progress_bytes, speed_bps, peers)
+    };
+    let (mut last_bytes, _, _) = sample();
+    let mut last_progress_at = started;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let (bytes, speed_bps, peers) = sample();
+        let now = Instant::now();
+        if bytes > last_bytes {
+            last_bytes = bytes;
+            last_progress_at = now;
+        }
+        let elapsed = started.elapsed().as_secs();
+        let stalled_s = last_progress_at.elapsed().as_secs();
+        if elapsed >= PROBE_HARD_SECS {
+            tracing::warn!(
+                target: "probe",
+                reason = "hard_deadline",
+                elapsed_s = elapsed,
+                downloaded_bytes = bytes,
+                speed_bps,
+                peers,
+                "abort — cabecera inaccesible pese a progreso"
+            );
+            return crate::ffmpeg::ProbeStalled {
+                elapsed_s: elapsed,
+                downloaded_bytes: bytes,
+                speed_bps,
+                peers,
+                reason: crate::ffmpeg::StallReason::HardDeadline,
+            };
+        }
+        if stalled_s >= PROBE_STALL_SECS {
+            tracing::warn!(
+                target: "probe",
+                reason = "no_progress",
+                elapsed_s = elapsed,
+                stalled_s,
+                downloaded_bytes = bytes,
+                speed_bps,
+                peers,
+                "abort — swarm sin bytes nuevos"
+            );
+            return crate::ffmpeg::ProbeStalled {
+                elapsed_s: elapsed,
+                downloaded_bytes: bytes,
+                speed_bps,
+                peers,
+                reason: crate::ffmpeg::StallReason::NoProgress { stalled_s },
+            };
+        }
+    }
 }
 
 /// `POST /hls/audio?idx=<N>` — cambia la pista de audio activa del

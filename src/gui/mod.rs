@@ -617,11 +617,14 @@ async fn get_series_season(
 /// pedido una peli y me han salido resultados de otra distinta".
 ///
 /// Cada hit de TMDB se cruza en paralelo con los providers de torrents
-/// SOLO para poblar `torrent_count` (informativo). NO se filtra por
-/// `torrent_count > 0`: si el sondeo no encontró nada se muestra la
-/// peli igualmente con un aviso — así pelis oscuras (Salò, cine
-/// europeo raro, docs) no desaparecen del catálogo por un mal día
-/// de un provider.
+/// para poblar `torrent_count`. El sondeo aplica el MISMO filtro
+/// mínimo que la vista detallada de Torrents (`min_seeders=3` +
+/// `title_variants=[title]`) — así el número es un predictor fiable
+/// de si al abrir la peli habrá torrents. El frontend usa este
+/// campo para el toggle `hide_empty_results` (Ajustes): cuando está
+/// activo, los hits con `torrent_count == 0` se ocultan de la lista.
+/// Sin el toggle, se muestran igualmente y la vista de Torrents pinta
+/// un mensaje adecuado al abrir.
 #[tauri::command]
 async fn search_movies_tmdb(
     query: String,
@@ -658,11 +661,19 @@ async fn search_movies_tmdb(
 
     // Sondeo ligero por película en paralelo (concurrencia 6 para no
     // saturar Knaben/YTS). Pedimos solo 5 resultados por película, lo
-    // justo para saber si hay algo. min_seeders=0 acepta cualquier
-    // torrent (incluso muertos) — el filtro real de seeders (min 3)
-    // se aplica en la vista de Torrents al hacer click. Esto evita
-    // que pelis obscuras (Salò, cine europeo raro, docs) desaparezcan
-    // del catálogo por un mal día del provider.
+    // justo para saber si hay algo.
+    //
+    // **min_seeders=3 y title_variants=[title]**: mismo filtro que
+    // aplica la vista detallada de Torrents (`get_movie_torrents_by_tmdb`)
+    // en su forma mínima. Antes usábamos `min_seeders=0` y
+    // `title_variants=Vec::new()` para "no perder pelis oscuras",
+    // pero eso hacía que `torrent_count` mintiera: la card decía
+    // "15 torrents" y al abrir salía 0 tras el filtro real. Al
+    // hacer coincidir el filtro con el del detalle, `torrent_count`
+    // es un predictor fiable (subestimando en pelis cuyo detalle
+    // añade alt_titles que ensanchan recall). El toggle
+    // `hide_empty_results` de Ajustes ahora sí oculta lo que
+    // efectivamente no daría torrents al abrir.
     let checks = movies.into_iter().enumerate().map(|(idx, m)| {
         let providers = providers.clone();
         let http = http.clone();
@@ -674,18 +685,19 @@ async fn search_movies_tmdb(
             if matches!(m.kind, crate::tmdb::MediaKind::Series) {
                 return (idx, m, 0u32);
             }
+            let title = m.title.clone();
             let q = MovieQuery {
-                title: m.title.clone(),
+                title: title.clone(),
                 year: m.year(),
                 imdb_id: m.imdb_id.clone(),
                 tmdb_id: if m.id > 0 { Some(m.id) } else { None },
                 original_language: None,
-                title_variants: Vec::new(),
+                title_variants: vec![title],
                 kind: crate::tmdb::MediaKind::Movie,
                 season: None,
                 episode: None,
             };
-            let list = torrents::search_all(&http, &providers, &q, 0, 5).await;
+            let list = torrents::search_all(&http, &providers, &q, 3, 5).await;
             (idx, m, list.results.len() as u32)
         }
     });
@@ -1103,8 +1115,9 @@ async fn search_torrents_series(
     let imdb_id = details.imdb_id.clone();
     let release_date = details.first_air_date.clone();
 
-    // Variantes: original + inglés. (Series usan menos alt-titles
-    // relevantes que pelis; con 2 basta para 95% del catálogo.)
+    // Variantes: original + inglés + alt_titles (Fase alt-titles-series
+    // — antes solo teníamos orig+english y las series CJK/cirílicas
+    // se caían enteras en el filtro de título de search_all).
     const MAX_VARIANTS: usize = 3;
     let mut variants: Vec<String> = Vec::new();
     let mut seen_norm: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1120,6 +1133,9 @@ async fn search_torrents_series(
     push_variant(orig.clone(), &mut variants);
     if let Some(eng) = english.as_ref() {
         push_variant(eng.clone(), &mut variants);
+    }
+    for alt in &details.alt_titles {
+        push_variant(alt.clone(), &mut variants);
     }
 
     let filter_variants = variants.clone();
@@ -1332,6 +1348,88 @@ fn build_target(
 #[tauri::command]
 async fn list_torrent_files(magnet: String) -> Result<Vec<stream::TorrentFileInfo>, String> {
     stream::list_files(magnet).await.map_err(|e| e.to_string())
+}
+
+/// Fuente de un torrent dropeado sobre la ventana. Puede ser un magnet
+/// URI (drag de texto desde el navegador) o un fichero `.torrent`
+/// local (drag desde el file manager — Tauri `onDragDropEvent` da el
+/// path absoluto en `payload.paths`).
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DroppedTorrentSource {
+    Magnet { uri: String },
+    File { path: String },
+}
+
+/// Resultado de resolver un torrent dropeado. `magnet` es la URI
+/// canónica (para .torrent files se construye a partir del sha1 del
+/// info-dict + trackers de announce/announce-list), reutilizable
+/// tal cual por `start_stream_html`. `name` es el nombre display
+/// (para el header de la vista). `files` es la lista de ficheros
+/// del torrent, ya con `is_video` marcado — misma forma que
+/// `list_torrent_files` para que el frontend pueda reusar la UI.
+#[derive(serde::Serialize)]
+struct ResolvedDroppedTorrent {
+    magnet: String,
+    name: String,
+    info_hash: Option<String>,
+    files: Vec<stream::TorrentFileInfo>,
+}
+
+/// Resuelve un torrent dropeado (magnet URI o fichero `.torrent`) y
+/// devuelve el magnet canónico + lista de ficheros. El frontend usa
+/// esta respuesta para pintar una vista tipo "Torrents" con click
+/// directo a Reproducir sin pasar por TMDB / providers.
+#[tauri::command]
+async fn resolve_dropped_torrent(
+    source: DroppedTorrentSource,
+) -> Result<ResolvedDroppedTorrent, String> {
+    let (magnet, name) = match source {
+        DroppedTorrentSource::Magnet { uri } => {
+            let uri = uri.trim().to_string();
+            if !uri.starts_with("magnet:") {
+                return Err("El texto dropeado no es un magnet:? válido".to_string());
+            }
+            // display name = dn= param si existe, si no el infohash.
+            let name = extract_dn_from_magnet(&uri)
+                .or_else(|| stream::parse_infohash(&uri))
+                .unwrap_or_else(|| "magnet".to_string());
+            (uri, name)
+        }
+        DroppedTorrentSource::File { path } => {
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|e| format!("No se pudo leer {path}: {e}"))?;
+            stream::torrent_bytes_to_magnet(&bytes).map_err(|e| format!("{e:#}"))?
+        }
+    };
+    let info_hash = stream::parse_infohash(&magnet);
+    let files = stream::list_files(magnet.clone())
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(ResolvedDroppedTorrent {
+        magnet,
+        name,
+        info_hash,
+        files,
+    })
+}
+
+/// Extrae el parámetro `dn=` (display name) de un magnet URI.
+/// Devuelve `None` si no está o falla el URL-decode. Es tolerante
+/// con parámetros repetidos, orden arbitrario y magnets sin `?`.
+fn extract_dn_from_magnet(uri: &str) -> Option<String> {
+    let query = uri.split_once('?').map(|(_, q)| q)?;
+    for pair in query.split('&') {
+        if let Some(v) = pair.strip_prefix("dn=") {
+            let decoded = urlencoding::decode(v).ok()?.into_owned();
+            let trimmed = decoded.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[derive(Copy, Clone)]
@@ -2308,6 +2406,7 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             start_stream_with_sub,
             start_stream_html,
             list_torrent_files,
+            resolve_dropped_torrent,
             ffmpeg_available,
             set_client_capabilities,
             stream_stats,

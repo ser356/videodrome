@@ -160,10 +160,16 @@ export function Home() {
             arriba del fold la hace descubrible. Ocultamos la sección
             entera si el catálogo está vacío — no queremos un placeholder
             de "empieza a ver algo" que sobra en la primera pantalla
-            de la app. */}
+            de la app.
+
+            Anclada al mismo `max-w-[720px] mx-auto` que el resto de
+            bloques de Home — con 1 sola card el <ul> antes ocupaba
+            los 1120 px del `main` y quedaba visualmente descentrada
+            respecto al headline y los CTA. Con 3+ cards el scroll
+            horizontal sigue funcionando dentro de los 720 px. */}
         {progress && progress.length > 0 && (
-          <section className="mb-10">
-            <div className="mx-auto mb-4 flex w-full max-w-[720px] items-baseline justify-between">
+          <section className="mx-auto mb-10 w-full max-w-[720px]">
+            <div className="mb-4 flex items-baseline justify-between">
               <h2 className="text-[15px] font-semibold uppercase tracking-wide text-ink">
                 {t('home.continueWatching')}
               </h2>

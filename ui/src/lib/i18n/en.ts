@@ -304,6 +304,10 @@ export const en: Record<string, string> = {
     'The torrent is downloading at {{speed}} with {{peers}} peers ({{pct}}% complete). The swarm cannot sustain enough bandwidth for playback. Try another release with more seeders, or open the link in VLC from Settings.',
   'player.probeStalled':
     'This torrent is not downloading (0 B in {{elapsed}} s), it probably has no active seeders. Try another release from the list.',
+  'player.probeStalledNoProgress':
+    'The torrent stopped downloading ({{downloaded}} in memory, no new bytes in {{stalled}} s, {{peers}} peers). Try another release with more seeders.',
+  'player.probeStalledHardDeadline':
+    'The swarm is downloading ({{downloaded}} in memory, {{peers}} peers) but the video header (moov) is at the end of the file and is not being prioritized. Try another release — MP4 files with the index at the start start faster.',
   'player.videoFailed': 'Could not play this movie in the embedded player. Try switching to VLC from Settings.',
   'player.ffmpegMissing':
     'ffmpeg is not available. {{hint}} Alternative: switch the player to VLC in Settings.',
@@ -336,4 +340,18 @@ export const en: Record<string, string> = {
   'settings.skin.label': 'Skin',
   'settings.skin.hint':
     'App color preset. Applied live; persisted on save.',
+
+  // ── Torrent drop (drag .torrent / magnet onto window) ─
+  'drop.title': 'Drop to play',
+  'drop.subtitle':
+    'Release the file (or magnet link) to resolve metadata and pick a file to stream.',
+  'drop.resolving': 'Resolving torrent…',
+  'drop.resolvingHint':
+    'Downloading metadata from the swarm. This may take a few seconds.',
+  'drop.failed': 'Could not open the dropped torrent',
+  'dropped.title': 'Torrent',
+  'dropped.filesCount': '{{videos}} video · {{total}} files',
+  'dropped.emptyTitle': 'No video files inside',
+  'dropped.emptyHint':
+    'This torrent contains no video file larger than 50 MB. Only playable files are listed.',
 }

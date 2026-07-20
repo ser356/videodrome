@@ -183,6 +183,17 @@ pub struct ProviderStatus {
     /// filtros globales de `search_all`). NO es el número final que
     /// verá el user — para eso mira la longitud de `results`.
     pub hits: usize,
+    /// Número de hits que sobrevivieron TODOS los filtros centrales
+    /// (title-variants, year, kind, trash quality, absurd size,
+    /// seeders mínimos). `search_all` lo puebla desde
+    /// `FilterCounts.kept` por provider al final del loop; los
+    /// `run_provider` iniciales lo dejan a 0. Cuando `kept < hits`
+    /// la UI puede pintar `apibay ✓ 15 → 0` para que el user vea
+    /// que el provider aportó hits pero el filtro los mató todos —
+    /// típico de títulos genéricos ("Hola" matchea todo).
+    /// `#[serde(default)]` por compat con caches disk pre-Fase.
+    #[serde(default)]
+    pub kept: u32,
     /// Duración total del intento (incluye retry si lo hubo).
     pub elapsed_ms: u64,
     /// Descripción corta del fallo cuando `ok = false`. `None` en éxito.
@@ -233,6 +244,7 @@ async fn run_provider(
                     name,
                     ok: false,
                     hits: 0,
+                    kept: 0,
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     error: Some("timeout".to_string()),
                     retried: false,
@@ -252,6 +264,7 @@ async fn run_provider(
                         name,
                         ok: false,
                         hits: 0,
+                        kept: 0,
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         error: Some(shorten_err(&msg)),
                         retried: false,
@@ -281,6 +294,7 @@ async fn run_provider(
                     name,
                     ok: true,
                     hits: n,
+                    kept: 0,
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     error: None,
                     retried,
@@ -294,6 +308,7 @@ async fn run_provider(
                 name,
                 ok: false,
                 hits: 0,
+                kept: 0,
                 elapsed_ms: start.elapsed().as_millis() as u64,
                 error: Some(msg),
                 retried,
@@ -313,6 +328,35 @@ fn shorten_err(msg: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// Trunca un título de release para logs (60 chars, safe multibyte).
+/// Usado por el logging por-hit del filtro central de `search_all`
+/// — mantiene las líneas de log a un ancho manejable en `tail -f`.
+fn shorten_title(s: &str) -> String {
+    let mut out: String = s.chars().take(60).collect();
+    if s.chars().count() > 60 {
+        out.push('…');
+    }
+    out
+}
+
+/// Contadores agregados por-provider para el resumen del filtro
+/// central de `search_all`. Un provider como apibay puede devolver
+/// 200 hits y quedarse en 0 tras filtro; con esto sabemos si cayó
+/// por título (típico con CJK sin alt_titles), por year, por kind
+/// (episodio ≠ query), etc.
+#[derive(Default, Debug)]
+struct FilterCounts {
+    seen: u32,
+    kept: u32,
+    dropped_infohash: u32,
+    dropped_seeders: u32,
+    dropped_kind: u32,
+    dropped_year: u32,
+    dropped_title: u32,
+    dropped_trash: u32,
+    dropped_size: u32,
 }
 
 /// Compara dos títulos ya normalizados. Acepta:
@@ -435,10 +479,12 @@ pub fn merge_provider_statuses(
             if e.ok {
                 if existing.ok {
                     existing.hits = existing.hits.saturating_add(e.hits);
+                    existing.kept = existing.kept.saturating_add(e.kept);
                 } else {
                     // La nueva pasada rescató al provider: reemplaza.
                     existing.ok = true;
                     existing.hits = e.hits;
+                    existing.kept = e.kept;
                     existing.error = None;
                 }
                 existing.retried = existing.retried || e.retried;
@@ -517,21 +563,65 @@ pub async fn search_all(
 
     let mut best: HashMap<String, Torrent> = HashMap::new();
     let mut statuses: Vec<ProviderStatus> = Vec::with_capacity(providers.len());
+    // Contadores por-provider de motivo de descarte. Se emite un
+    // resumen `info!` al final para que el user pueda saber sin
+    // habilitar debug si un provider legítimo ha muerto por el
+    // filtro de título (típico con títulos CJK/cirílicos y sin
+    // alt_titles suficientes en TMDB) vs por year/kind/seeders.
+    // Los descartes individuales van a `debug!` — ruidoso pero
+    // útil para el hunt puntual.
+    let mut per_provider: HashMap<String, FilterCounts> = HashMap::new();
     while let Some((items, status)) = futs.next().await {
         statuses.push(status);
         for mut t in items {
-            if t.infohash.is_empty() || t.seeders < min_seeders {
+            let counts = per_provider.entry(t.source.clone()).or_default();
+            counts.seen += 1;
+            if t.infohash.is_empty() {
+                counts.dropped_infohash += 1;
+                continue;
+            }
+            if t.seeders < min_seeders {
+                counts.dropped_seeders += 1;
+                tracing::debug!(
+                    target: "torrent-filter",
+                    reason = "seeders",
+                    provider = %t.source,
+                    seeders = t.seeders,
+                    min = min_seeders,
+                    title = %shorten_title(&t.title),
+                );
                 continue;
             }
             let parsed = release_name::parse(&t.title);
             // ── Match por kind (Fase 2a — audit series)
             let Some(mk) = classify_match(query, &parsed, &t.title) else {
+                counts.dropped_kind += 1;
+                tracing::debug!(
+                    target: "torrent-filter",
+                    reason = "kind",
+                    provider = %t.source,
+                    parsed_season = ?parsed.season,
+                    parsed_episode = ?parsed.episode,
+                    query_kind = ?query.kind,
+                    query_season = ?query.season,
+                    query_episode = ?query.episode,
+                    title = %shorten_title(&t.title),
+                );
                 continue;
             };
             t.match_kind = mk;
             // ── Year filter (parsed vs query, tolerancia ±1)
             if let (Some(target), Some(got)) = (query.year, parsed.year) {
                 if (target as i32 - got as i32).unsigned_abs() > 1 {
+                    counts.dropped_year += 1;
+                    tracing::debug!(
+                        target: "torrent-filter",
+                        reason = "year",
+                        provider = %t.source,
+                        parsed = got,
+                        target,
+                        title = %shorten_title(&t.title),
+                    );
                     continue;
                 }
             }
@@ -547,15 +637,40 @@ pub async fn search_all(
                         .iter()
                         .any(|v| titles_match(v, &candidate))
                 {
+                    counts.dropped_title += 1;
+                    tracing::debug!(
+                        target: "torrent-filter",
+                        reason = "title",
+                        provider = %t.source,
+                        candidate = %candidate,
+                        variants = ?variants_normalized,
+                        title = %shorten_title(&t.title),
+                    );
                     continue;
                 }
             }
             if is_trash_quality(&t.title) {
+                counts.dropped_trash += 1;
+                tracing::debug!(
+                    target: "torrent-filter",
+                    reason = "trash",
+                    provider = %t.source,
+                    title = %shorten_title(&t.title),
+                );
                 continue;
             }
             if is_absurd_size(t.size_bytes) {
+                counts.dropped_size += 1;
+                tracing::debug!(
+                    target: "torrent-filter",
+                    reason = "size",
+                    provider = %t.source,
+                    size_bytes = t.size_bytes,
+                    title = %shorten_title(&t.title),
+                );
                 continue;
             }
+            counts.kept += 1;
             match best.get_mut(&t.infohash) {
                 Some(prev) if prev.seeders < t.seeders => *prev = t,
                 Some(_) => {}
@@ -563,6 +678,36 @@ pub async fn search_all(
                     best.insert(t.infohash.clone(), t);
                 }
             }
+        }
+    }
+
+    // Resumen agregado por provider — una línea `info!` por
+    // provider con hits ⇒ diagnóstico rápido sin debug.
+    // Propaga también `kept` al `ProviderStatus` correspondiente
+    // para que la UI pueda pintar `apibay ✓ 15 → 0` cuando el
+    // filtro central se comió todos los hits (típico de títulos
+    // genéricos donde el year filter descarta releases desalineados).
+    for (name, c) in &per_provider {
+        if c.seen == 0 {
+            continue;
+        }
+        tracing::info!(
+            target: "torrent-filter",
+            provider = %name,
+            seen = c.seen,
+            kept = c.kept,
+            drop_seeders = c.dropped_seeders,
+            drop_kind = c.dropped_kind,
+            drop_year = c.dropped_year,
+            drop_title = c.dropped_title,
+            drop_trash = c.dropped_trash,
+            drop_size = c.dropped_size,
+            drop_infohash = c.dropped_infohash,
+            query = %shorten_title(&query.title),
+            "filter summary",
+        );
+        if let Some(status) = statuses.iter_mut().find(|s| &s.name == name) {
+            status.kept = c.kept;
         }
     }
 
