@@ -85,8 +85,13 @@ export function TorrentDropOverlay() {
           // su propio listener para subs y no queremos competir
           // visualmente. Ambos listeners coexisten porque
           // `onDragDropEvent` reparte a todos los suscriptores.
-          if (payload.type === 'enter' || payload.type === 'over') {
-            const paths = (payload.paths ?? []) as string[]
+          //
+          // Tauri 2: `enter` y `drop` traen `paths`; `over` solo
+          // trae `position` (sin paths). Decidimos activación en
+          // `enter`, mantenemos en `over`, y consumimos el path
+          // real en `drop`.
+          if (payload.type === 'enter') {
+            const paths = payload.paths as string[]
             if (paths.some((p) => /\.torrent$/i.test(p))) {
               setDragActive(true)
             }
@@ -94,7 +99,7 @@ export function TorrentDropOverlay() {
             setDragActive(false)
           } else if (payload.type === 'drop') {
             setDragActive(false)
-            const paths = (payload.paths ?? []) as string[]
+            const paths = payload.paths as string[]
             const torrent = paths.find((p) => /\.torrent$/i.test(p))
             if (!torrent) {
               // No es un .torrent — dejamos que otros listeners
@@ -104,6 +109,8 @@ export function TorrentDropOverlay() {
             }
             void handleDrop({ kind: 'file', path: torrent })
           }
+          // `over` no requiere acción — el overlay ya se pintó en
+          // el `enter` correspondiente si era relevante.
         })
         if (cancelled) {
           off()
