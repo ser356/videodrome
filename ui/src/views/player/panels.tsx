@@ -182,146 +182,153 @@ export function SubsPanel({
         </button>
       </header>
 
-      {/* Sección "Del fichero" — subs embedded del contenedor
-          (SRT/ASS/SSA extraídos con ffmpeg). Aparece SIEMPRE arriba
-          si hay pistas; el user ve las pistas nativas antes que las
-          descargadas, que es lo que hace Stremio. */}
-      {embeddedSubs.length > 0 && (
-        <div className="border-b border-hairline">
-          <p className="px-5 pt-3 text-[10px] uppercase tracking-[0.14em] text-dim">
-            {tr('player.embedded')}
-          </p>
-          <ul className="divide-y divide-hairline-soft">
-            {embeddedSubs.map((sub, idx) => {
-              const isActive = idx === activeEmbeddedIdx
-              const label = sub.title || tr('player.trackN', { n: idx + 1 })
-              return (
-                <li key={`emb-${idx}`}>
-                  <button
-                    onClick={() => onPickEmbedded(sub, idx)}
-                    className={`flex w-full items-start justify-between gap-3 px-5 py-3 text-left transition-colors ${
-                      isActive ? 'bg-accent/10' : 'hover:bg-surface'
-                    }`}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-[13px] text-ink">{label}</p>
-                      <p className="mt-0.5 text-[11px] text-muted">
-                        {sub.language
-                          ? languageLabel(sub.language)
-                          : tr('player.langUnknown')}
-                        <span className="mx-1.5 text-dim">·</span>
-                        <span className="text-dim">{sub.codec}</span>
-                      </p>
-                    </div>
-                    {isActive && (
-                      <span className="mt-0.5 text-[11px] font-medium text-accent">
-                        {tr('player.active')}
-                      </span>
-                    )}
-                  </button>
-                </li>
-              )
-            })}
-          </ul>
-        </div>
-      )}
-
-      {loading && (
-        <div className="flex flex-1 items-center justify-center">
-          <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-        </div>
-      )}
-
-      {!loading &&
-        (subs === null || subs.length === 0) &&
-        embeddedSubs.length === 0 && (
-          <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
-            <p className="text-[14px] text-body">{tr('player.noSubs')}</p>
-            <p className="mt-1 text-[12px] text-muted">
-              {tr('player.noSubsHint')}
+      {/* Un ÚNICO scroll wrapper para todo el contenido del panel.
+          Antes ten\u00edamos dos regiones separadas (embedded arriba sin
+          l\u00edmite de altura, OpenSubs `flex-1 overflow-y-auto` abajo);
+          con muchos embedded (contenedores con 15+ pistas SRT) la
+          secci\u00f3n de arriba empujaba la de abajo fuera del viewport
+          y no hab\u00eda forma de llegar a las opciones de internet.
+          Unificar el scroll resuelve el bug sin romper la ergonom\u00eda:
+          las tabs de idioma van `sticky top-0` para que el switcher
+          siga siempre accesible mientras se scrollea la lista. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        {embeddedSubs.length > 0 && (
+          <div className="border-b border-hairline">
+            <p className="px-5 pt-3 text-[10px] uppercase tracking-[0.14em] text-dim">
+              {tr('player.embedded')}
             </p>
+            <ul className="divide-y divide-hairline-soft">
+              {embeddedSubs.map((sub, idx) => {
+                const isActive = idx === activeEmbeddedIdx
+                const label = sub.title || tr('player.trackN', { n: idx + 1 })
+                return (
+                  <li key={`emb-${idx}`}>
+                    <button
+                      onClick={() => onPickEmbedded(sub, idx)}
+                      className={`flex w-full items-start justify-between gap-3 px-5 py-3 text-left transition-colors ${
+                        isActive ? 'bg-accent/10' : 'hover:bg-surface'
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] text-ink">{label}</p>
+                        <p className="mt-0.5 text-[11px] text-muted">
+                          {sub.language
+                            ? languageLabel(sub.language)
+                            : tr('player.langUnknown')}
+                          <span className="mx-1.5 text-dim">·</span>
+                          <span className="text-dim">{sub.codec}</span>
+                        </p>
+                      </div>
+                      {isActive && (
+                        <span className="mt-0.5 text-[11px] font-medium text-accent">
+                          {tr('player.active')}
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
           </div>
         )}
 
-      {!loading && subs && subs.length > 0 && (
-        <>
-          <div className="flex gap-1 overflow-x-auto border-b border-hairline px-3 py-2">
-            {langs.map((l) => (
-              <button
-                key={l.code}
-                onClick={() => setSelectedLang(l.code)}
-                className={`shrink-0 rounded-full px-3 py-1.5 text-[12px] transition-colors ${
-                  selectedLang === l.code
-                    ? 'bg-accent text-on-accent'
-                    : 'bg-surface text-body hover:bg-surface-hi'
-                }`}
-              >
-                {languageLabel(l.code)}{' '}
-                <span
-                  className={
-                    selectedLang === l.code ? 'opacity-70' : 'text-muted'
-                  }
-                >
-                  {l.count}
-                </span>
-              </button>
-            ))}
+        {loading && (
+          <div className="flex flex-1 items-center justify-center py-10">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" />
           </div>
+        )}
 
-          <ul className="flex-1 divide-y divide-hairline-soft overflow-y-auto">
-            {filtered.map((sub) => {
-              const isActive = sub.file_id === activeFileId
-              const isDownloading = sub.file_id === downloadingFileId
-              return (
-                <li key={sub.file_id}>
-                  <button
-                    disabled={isDownloading || downloadingFileId !== null}
-                    onClick={() => onPick(sub)}
-                    className={`flex w-full items-start justify-between gap-3 px-5 py-3 text-left transition-colors ${
-                      isActive
-                        ? 'bg-accent/10'
-                        : 'hover:bg-surface disabled:opacity-50'
-                    }`}
+        {!loading &&
+          (subs === null || subs.length === 0) &&
+          embeddedSubs.length === 0 && (
+            <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+              <p className="text-[14px] text-body">{tr('player.noSubs')}</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {tr('player.noSubsHint')}
+              </p>
+            </div>
+          )}
+
+        {!loading && subs && subs.length > 0 && (
+          <>
+            <div className="sticky top-0 z-10 flex gap-1 overflow-x-auto border-b border-hairline bg-black/95 px-3 py-2 backdrop-blur-lg">
+              {langs.map((l) => (
+                <button
+                  key={l.code}
+                  onClick={() => setSelectedLang(l.code)}
+                  className={`shrink-0 rounded-full px-3 py-1.5 text-[12px] transition-colors ${
+                    selectedLang === l.code
+                      ? 'bg-accent text-on-accent'
+                      : 'bg-surface text-body hover:bg-surface-hi'
+                  }`}
+                >
+                  {languageLabel(l.code)}{' '}
+                  <span
+                    className={
+                      selectedLang === l.code ? 'opacity-70' : 'text-muted'
+                    }
                   >
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-[13px] text-ink">
-                        {sub.release || sub.file_name || tr('player.subtitle')}
-                      </p>
-                      <p className="mt-0.5 flex items-center gap-2 text-[11px] text-muted">
-                        <span>{tr('player.downloads', { n: sub.downloads.toLocaleString() })}</span>
-                        {sub.from_trusted && (
-                          <span
-                            className="rounded-sm border border-good/40 bg-good/10 px-1.5 py-0.5 text-[10px] font-medium text-good"
-                            title={tr('player.trustedTitle')}
-                          >
-                            Trusted
-                          </span>
-                        )}
-                        {sub.hearing_impaired && (
-                          <span
-                            className="rounded-sm border border-hairline px-1.5 py-0.5 text-[10px]"
-                            title={tr('player.sdhTitle')}
-                          >
-                            SDH
-                          </span>
-                        )}
-                      </p>
-                    </div>
-                    {isActive && (
-                      <span className="mt-0.5 text-[11px] font-medium text-accent">
-                        {tr('player.active')}
-                      </span>
-                    )}
-                    {isDownloading && (
-                      <div className="mt-0.5 h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-                    )}
-                  </button>
-                </li>
-              )
-            })}
-          </ul>
-        </>
-      )}
+                    {l.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <ul className="divide-y divide-hairline-soft">
+              {filtered.map((sub) => {
+                const isActive = sub.file_id === activeFileId
+                const isDownloading = sub.file_id === downloadingFileId
+                return (
+                  <li key={sub.file_id}>
+                    <button
+                      disabled={isDownloading || downloadingFileId !== null}
+                      onClick={() => onPick(sub)}
+                      className={`flex w-full items-start justify-between gap-3 px-5 py-3 text-left transition-colors ${
+                        isActive
+                          ? 'bg-accent/10'
+                          : 'hover:bg-surface disabled:opacity-50'
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] text-ink">
+                          {sub.release || sub.file_name || tr('player.subtitle')}
+                        </p>
+                        <p className="mt-0.5 flex items-center gap-2 text-[11px] text-muted">
+                          <span>{tr('player.downloads', { n: sub.downloads.toLocaleString() })}</span>
+                          {sub.from_trusted && (
+                            <span
+                              className="rounded-sm border border-good/40 bg-good/10 px-1.5 py-0.5 text-[10px] font-medium text-good"
+                              title={tr('player.trustedTitle')}
+                            >
+                              Trusted
+                            </span>
+                          )}
+                          {sub.hearing_impaired && (
+                            <span
+                              className="rounded-sm border border-hairline px-1.5 py-0.5 text-[10px]"
+                              title={tr('player.sdhTitle')}
+                            >
+                              SDH
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                      {isActive && (
+                        <span className="mt-0.5 text-[11px] font-medium text-accent">
+                          {tr('player.active')}
+                        </span>
+                      )}
+                      {isDownloading && (
+                        <div className="mt-0.5 h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                      )}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          </>
+        )}
+      </div>
     </div>
   )
 }

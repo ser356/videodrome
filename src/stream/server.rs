@@ -9,6 +9,8 @@
 //! cambios de comportamiento.
 
 use std::sync::atomic::Ordering;
+#[cfg(feature = "gui")]
+use std::sync::Arc;
 
 use anyhow::Result;
 use axum::body::Body;
@@ -223,6 +225,116 @@ pub(super) async fn serve_video(
     let mut resp = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "video/mp4") // best-effort; VLC autodetecta
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, content_length.to_string());
+
+    if range.is_some() {
+        resp = resp.header(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {start}-{end}/{}", state.file_len))
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        );
+    }
+
+    resp.body(body)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Handler gemelo de [`serve_video`] SIN participación en el slot
+/// `active_request` y sin cancelación por request rival. Está pensado
+/// exclusivamente para subprocesos ffmpeg propios que necesitan leer
+/// bytes sobre librqbit en paralelo al player.
+///
+/// Motivación: la extracción de subtítulos integrados (`ffmpeg -map
+/// 0:s:<idx>` sobre un MKV) obliga a ffmpeg a leer una parte
+/// considerable del contenedor. Cuando ese ffmpeg abría
+/// `http://.../video`, el `active_request` slot cancelaba la
+/// petición del `<video>` del player (o viceversa según qué llegara
+/// primero), la extracción devolvía un VTT truncado y el `<track>` no
+/// llegaba a montarse. Al pasar la extracción por `/video_internal`
+/// las dos rutas conviven sin pisarse.
+///
+/// Nota: NO expone semántica nueva al frontend. Nunca se debe
+/// enlazar desde el `<video>` del player — sin la lógica de burst /
+/// cancel + con logs distintos, un uso desde WKWebView traería
+/// buffering al primer seek.
+#[cfg(feature = "gui")]
+pub(super) async fn serve_video_internal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_range);
+
+    if state.file_len == 0 {
+        return Err((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "Fichero vac\u{ed}o".to_string(),
+        ));
+    }
+
+    let (start, end) = match range {
+        Some((Some(s), Some(e))) => {
+            if e < s {
+                return Err((
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    format!("Rango malformado: {s}-{e}"),
+                ));
+            }
+            (s, e.min(state.file_len - 1))
+        }
+        Some((Some(s), None)) => (s, state.file_len - 1),
+        Some((None, Some(suffix))) => {
+            let n = suffix.min(state.file_len);
+            (state.file_len - n, state.file_len - 1)
+        }
+        Some((None, None)) => {
+            debug_assert!(false, "parse_range should reject both-None ranges");
+            (0, state.file_len - 1)
+        }
+        None => (0, state.file_len - 1),
+    };
+
+    if start >= state.file_len {
+        return Err((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            format!("Range {start} >= {}", state.file_len),
+        ));
+    }
+
+    let content_length = end - start + 1;
+
+    let mut file_stream = state
+        .handle
+        .clone()
+        .stream(state.file_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if start > 0 {
+        file_stream
+            .seek(SeekFrom::Start(start))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    let limited = LimitedRead {
+        inner: file_stream,
+        remaining: content_length,
+    };
+    let raw = tokio_util::io::ReaderStream::with_capacity(limited, 64 * 1024);
+    let body = Body::from_stream(raw);
+
+    let status = if range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+
+    let mut resp = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "video/mp4")
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, content_length.to_string());
 
@@ -790,16 +902,54 @@ pub(super) async fn set_hls_audio(
 /// pipea a stdout, muere. Coste ≈ 200-500ms para subs de peli
 /// completa. El player cachea el VTT en un Blob del navegador, así
 /// que solo se llama una vez por selección.
+///
+/// Notas de implementación (raíz del bug "los embedded no se
+/// pintan"):
+///
+///   * El input es `http://.../video_internal`, NO `.../video`. El
+///     endpoint interno no participa en el slot `active_request`, así
+///     que las Range requests que emite este ffmpeg mientras escanea
+///     el contenedor conviven con las del `<video>` del player en vez
+///     de cancelarse mutuamente. Antes se cortaban por el
+///     `BURST_WINDOW_MS` a mitad de extracción y el VTT resultaba
+///     truncado o vacío.
+///
+///   * `-analyzeduration`/`-probesize` van ANTES de `-i` para que
+///     ffmpeg los aplique al input (son opciones de input). Estaban
+///     detrás y ffmpeg los ignoraba como opciones de output; con
+///     MKVs cuyos sub-tracks tienen packets espaciados, los defaults
+///     (5s/5MB) no bastan para identificar bien la pista.
+///
+///   * Cache en memoria por (`stream`, `idx`): la primera petición
+///     paga la extracción; las siguientes (reabrir panel, resume,
+///     drag&drop) devuelven el VTT instantáneo desde
+///     `state.cached_embedded_subs`.
 #[cfg(feature = "gui")]
 pub(super) async fn serve_embedded_subtitle(
     State(state): State<AppState>,
     axum::extract::Path(idx): axum::extract::Path<usize>,
 ) -> Result<Response, (StatusCode, String)> {
+    // Fast path: si ya lo extrajimos en esta sesión, devuelve el
+    // buffer directamente sin tocar ffmpeg ni librqbit.
+    {
+        let cache = state.cached_embedded_subs.lock().await;
+        if let Some(bytes) = cache.get(&idx) {
+            let mut resp = Response::new(Body::from((**bytes).clone()));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                "text/vtt; charset=utf-8"
+                    .parse()
+                    .expect("static mime type literal — always valid"),
+            );
+            return Ok(resp);
+        }
+    }
+
     let bin = crate::ffmpeg::ffmpeg_binary().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "ffmpeg no encontrado".to_string(),
     ))?;
-    let input_url = format!("http://{}/video", state.local_addr);
+    let input_url = format!("http://{}/video_internal", state.local_addr);
 
     let output = {
         let mut cmd = tokio::process::Command::new(bin);
@@ -807,15 +957,18 @@ pub(super) async fn serve_embedded_subtitle(
             .arg("-loglevel")
             .arg("error")
             .arg("-nostdin")
-            .arg("-i")
-            .arg(&input_url)
-            // El input `/video` puede tardar en dar los primeros bytes
-            // si el torrent está frío; `-analyzeduration` alto ayuda a
-            // que ffmpeg no se rinda antes de encontrar la pista.
+            // OPCIONES DE INPUT (deben ir ANTES de `-i` — si van
+            // después ffmpeg las trata como output y se ignoran).
+            // MKVs con sub-tracks declarados en el header pero con
+            // packets dispersos por el fichero necesitan una ventana
+            // de análisis holgada para que ffmpeg no descarte el
+            // stream.
             .arg("-analyzeduration")
             .arg("60M")
             .arg("-probesize")
             .arg("50M")
+            .arg("-i")
+            .arg(&input_url)
             .arg("-map")
             .arg(format!("0:s:{idx}"))
             .arg("-c:s")
@@ -880,7 +1033,15 @@ pub(super) async fn serve_embedded_subtitle(
         ));
     }
 
-    let mut resp = Response::new(body.into());
+    // Guarda en caché para futuras peticiones (mismo panel abierto,
+    // resume, drag&drop, cambio de idioma).
+    let cached = Arc::new(body.clone());
+    {
+        let mut cache = state.cached_embedded_subs.lock().await;
+        cache.insert(idx, cached);
+    }
+
+    let mut resp = Response::new(Body::from(body));
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         "text/vtt; charset=utf-8"

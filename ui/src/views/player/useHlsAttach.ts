@@ -219,10 +219,32 @@ export function useAudioSwitch(args: UseAudioSwitchArgs): UseAudioSwitchResult {
         return
       }
       setActiveAudioIdx(newIdx)
-      // El `useEffect` de hls.js en `useHlsAttach` observa
-      // `activeAudioIdx` en sus deps y se re-run: destroy + new Hls
-      // con la misma URL; ffmpeg respawnea con `-map 0:a:<idx>` en
-      // la primera petición de segmento del hls.js nuevo.
+      // Path nativo (Safari/WKWebView macOS): `useHlsAttach` NO
+      // reasigna `v.src` cuando `activeAudioIdx` cambia porque el
+      // `videoSrc` es el mismo string (`/hls/playlist.m3u8`), así
+      // que AVFoundation se queda con el buffer + audio antiguo y
+      // el user no oye el cambio. Aquí forzamos un reload duro:
+      // limpiar src → `load()` → volver a asignar → `load()`. La
+      // combinación con `Cache-Control: no-store` en el backend
+      // garantiza que los segmentos se refetcheen recién generados
+      // con la nueva pista. El seek + play post-reload los
+      // restaura `onLoadedMetadata` en Player.tsx leyendo
+      // `postAudioSwitchSeekRef.current`.
+      //
+      // Para hls.js (Windows/Linux) el path es distinto: el
+      // `useEffect` de arriba destruye y recrea la instancia hls.js
+      // cuando `activeAudioIdx` cambia, así que no hacemos nada
+      // aquí (`canPlayType('application/vnd.apple.mpegurl') === ''`
+      // en WebView2/WebKitGTK).
+      if (v.canPlayType('application/vnd.apple.mpegurl') !== '') {
+        const src = v.src
+        if (src) {
+          v.removeAttribute('src')
+          v.load()
+          v.src = src
+          v.load()
+        }
+      }
     },
     [stream, activeAudioIdx, videoRef, setAudioSwitching, setBuffering],
   )

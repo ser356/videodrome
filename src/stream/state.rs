@@ -114,6 +114,23 @@ pub(super) struct AppState {
     /// queremos pagarlo en cada seek.
     #[cfg(feature = "gui")]
     pub(super) cached_probe: Arc<tokio::sync::Mutex<Option<crate::ffmpeg::MediaInfo>>>,
+    /// Caché en memoria de los subs embedded ya extra\u00eddos con ffmpeg
+    /// (`/subs/embedded/<idx>`). Clave = sub-\u00edndice `s:<idx>` de
+    /// ffprobe; valor = bytes del WebVTT.
+    ///
+    /// Motivos:
+    ///   * La extracci\u00f3n de un track de subs de un MKV grande hace
+    ///     que ffmpeg lea buena parte del fichero por HTTP, lo que
+    ///     compet\u00eda con el `/video` del player. Con la ca\u00edda al
+    ///     endpoint interno `/video_internal` (que no participa en
+    ///     `active_request`) eso ya no cancela playback, pero el coste
+    ///     sigue siendo alto \u2014 no lo queremos pagar cada vez que el
+    ///     user vuelve a abrir el panel o al reanudar.
+    ///   * Los VTT resultantes rara vez superan 100 KB, as\u00ed que N
+    ///     entradas en memoria caben sin drama.
+    #[cfg(feature = "gui")]
+    pub(super) cached_embedded_subs:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<usize, Arc<Vec<u8>>>>>,
     /// Estado HLS del stream: tempdir compartido donde vive TODA la
     /// caché de segmentos transcodeados durante la vida del stream,
     /// más el `Child` del ffmpeg activo (opcional; hay ffmpeg solo

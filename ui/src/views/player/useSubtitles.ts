@@ -219,6 +219,17 @@ export function useSubtitles(args: UseSubtitlesArgs): UseSubtitlesResult {
         if (!cancelled) setRawVtt(vtt)
       } catch (e) {
         console.warn('vtt fetch failed:', e)
+        // Defense-in-depth: si un `openSubs` no se puede leer (ruta
+        // muerta \u2014 macOS purga el TMPDIR, versi\u00f3n vieja guardaba en
+        // temp\u2026), limpiamos `activeSub`. As\u00ed el pr\u00f3ximo
+        // `reportPosition` env\u00eda `{source:'none'}` y borra la
+        // entrada del store, evitando que el bug se perpet\u00fae entre
+        // sesiones. El backend `get_resume` ya sanea esto al leer,
+        // pero mantener la l\u00f3gica aqu\u00ed cubre state.subPath legacy
+        // y cualquier otro path stale que se cuele.
+        if (!cancelled && activeSub.source === 'openSubs') {
+          setActiveSub(null)
+        }
       }
     })()
     return () => {

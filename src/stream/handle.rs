@@ -41,7 +41,9 @@ use super::hls::{serve_hls_playlist, serve_hls_segment};
 use super::resume::{read_store, write_store_atomic, ResumeParse, ResumeStore, RESUME_FILE};
 use super::server::{add_cors_headers, serve_video};
 #[cfg(feature = "gui")]
-use super::server::{log_hls_requests, serve_embedded_subtitle, serve_probe, set_hls_audio};
+use super::server::{
+    log_hls_requests, serve_embedded_subtitle, serve_probe, serve_video_internal, set_hls_audio,
+};
 use super::state::AppState;
 
 /// Subdirectorio (dentro de `<cache>/streams/<infohash>/`) donde
@@ -673,12 +675,20 @@ pub async fn start_with_target(
         #[cfg(feature = "gui")]
         cached_probe: Arc::new(tokio::sync::Mutex::new(None)),
         #[cfg(feature = "gui")]
+        cached_embedded_subs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        #[cfg(feature = "gui")]
         hls: Arc::new(tokio::sync::Mutex::new(None)),
     };
     let max_seek = state.max_seek.clone();
     #[cfg(feature = "gui")]
     let app = Router::new()
         .route("/video", get(serve_video))
+        // Endpoint gemelo de `/video` que NO participa en el slot de
+        // `active_request` (ni cancela ni es cancelado). Reservado a
+        // subprocesos ffmpeg propios (extracción de subs embedded)
+        // que necesitan leer sobre librqbit en paralelo al player
+        // sin que sus Range requests se peguen contra las del `<video>`.
+        .route("/video_internal", get(serve_video_internal))
         .route("/probe.json", get(serve_probe))
         .route("/hls/playlist.m3u8", get(serve_hls_playlist))
         .route("/hls/{file}", get(serve_hls_segment))

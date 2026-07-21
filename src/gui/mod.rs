@@ -1618,6 +1618,28 @@ async fn get_resume(
     // magnet sin TMDB match) caemos al per-infohash sin este atajo.
     if let Some(id) = tmdb_id {
         if let Some(mp) = stream::load_movie_progress(id, season, episode) {
+            // Sanea `last_sub`: si es `openSubs` y la ruta ya no
+            // existe en disco (macOS purga el TMPDIR entre sesiones,
+            // o el user vien\u00eda de una versi\u00f3n que guardaba subs en
+            // `$TMPDIR/videodrome-subs/` \u2014 ese dir se borra en el
+            // startup wipe legacy), lo tratamos como \"sin sub\". Sin
+            // esto el frontend hidrata `activeSub` con un path
+            // muerto, `subtitle_to_vtt` falla, `<track>` no se
+            // monta pero el panel sigue mostrando la pista como
+            // activa \u2014 el bug real que reportaba el user.
+            let last_sub = match mp.last_sub {
+                Some(stream::LastSub::OpenSubs { ref path, .. })
+                    if !std::path::Path::new(path).exists() =>
+                {
+                    tracing::info!(
+                        target: "resume",
+                        path = %path,
+                        "descartando last_sub openSubs con ruta muerta"
+                    );
+                    None
+                }
+                other => other,
+            };
             return Ok(Some(ResumeDto {
                 fraction: 0.0,
                 seconds: Some(mp.seconds),
@@ -1629,7 +1651,7 @@ async fn get_resume(
                 updated_at: mp.updated_at,
                 season: mp.season,
                 episode: mp.episode,
-                last_sub: mp.last_sub,
+                last_sub,
             }));
         }
     }
@@ -2029,12 +2051,32 @@ async fn search_subtitles(
     Ok(merged)
 }
 
+/// Directorio persistente para los `.srt` descargados por
+/// `download_subtitle`. Antes vivía en `$TMPDIR/videodrome-subs/`,
+/// pero eso rompía el resume: al arrancar borrábamos el tempdir y
+/// el `path` guardado en `movie_progress.json → last_sub` quedaba
+/// muerto. Al re-entrar la peli el sub aparecía "seleccionado" en
+/// el panel pero `subtitle_to_vtt(path)` fallaba y el `<track>` no
+/// se pintaba.
+///
+/// Al ser cache (no config) el sistema puede limpiarlo si escasea
+/// disco, pero NO entre sesiones: macOS/Linux/Windows respetan
+/// `~/Library/Caches`, `~/.cache`, `%LOCALAPPDATA%`.
+fn subs_cache_dir() -> Result<std::path::PathBuf, String> {
+    let dir = dirs::cache_dir()
+        .ok_or_else(|| "No se puede obtener el directorio de cach\u{e9} del sistema".to_string())?
+        .join("videodrome")
+        .join("subs");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("crear {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
 /// Descarga un subtítulo y devuelve la ruta local. El frontend le pasa
 /// esta ruta a `start_stream_with_sub` para arrancar el stream con el
 /// `.srt` ya cargado en VLC.
 #[tauri::command]
 async fn download_subtitle(sub: Subtitle, state: State<'_, AppState>) -> Result<String, String> {
-    let dest = std::env::temp_dir().join("videodrome-subs");
+    let dest = subs_cache_dir()?;
     let path = subtitles::download(&state.http, &sub, &dest)
         .await
         .map_err(|e| e.to_string())?;
@@ -2371,13 +2413,15 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
     std::thread::spawn(|| {
         let prefs = preferences::load();
         let _ = stream::prune(prefs.stream_cache_ttl_days);
-        // Purga también los `.srt` descargados por download_subtitle:
-        // se acumulan en `<TMPDIR>/videodrome-subs/` y macOS no
-        // garantiza limpieza del TMPDIR de usuario. Los subs que se
-        // usan actualmente están cargados en memoria por el player
-        // (blob VTT), así que borrar el dir es seguro entre sesiones.
-        let subs_dir = std::env::temp_dir().join("videodrome-subs");
-        let _ = std::fs::remove_dir_all(&subs_dir);
+        // Barrido one-shot del antiguo `$TMPDIR/videodrome-subs/`
+        // (versiones <= 2026-07 lo usaban como destino de
+        // `download_subtitle`). El destino nuevo es persistente
+        // (`<cache>/videodrome/subs/`) — necesario para que el
+        // resume pueda re-abrir el `.srt` guardado en `last_sub`.
+        // Los subs viejos ya no se referencian, así que borrar el
+        // tempdir viejo es seguro y libera unos KB.
+        let legacy_subs = std::env::temp_dir().join("videodrome-subs");
+        let _ = std::fs::remove_dir_all(&legacy_subs);
         // Y los tempdirs huérfanos de sesiones HLS/stream previas
         // (Fase F del audit Windows: en NTFS el `TempDir::drop` no
         // puede unlinkear ficheros con handles abiertos, así que

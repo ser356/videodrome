@@ -187,9 +187,15 @@ pub(super) async fn serve_hls_playlist(
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        // Estable durante la vida del stream (mismo modo/segments ⇒
-        // mismo playlist). Dejamos que el WebView lo cachee.
-        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        // `no-store`: al hacer `POST /hls/audio` el backend purga
+        // los `.ts` y respawnea ffmpeg con la nueva pista, pero los
+        // clientes (WKWebView/AVFoundation y hls.js vía fetch)
+        // seguían sirviendo los segmentos viejos del HTTP cache si
+        // aquí poníamos `max-age=3600`. Como el playlist es una
+        // función pura barata (~ms) y hls.js/AVFoundation tienen su
+        // propio buffer en memoria para el rewind cercano, el hit
+        // de perf de saltarse la cache HTTP es despreciable.
+        .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(playlist.into_bytes()))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
@@ -513,10 +519,16 @@ pub(super) async fn serve_hls_segment(
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "video/mp2t")
-        // Cada .ts es contenido determinista para toda la vida del
-        // stream (mismo idx ⇒ mismo rango temporal). Cachear reduce
-        // re-fetches de Safari en scrubbing.
-        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        // `no-store`: al cambiar de pista de audio, el backend
+        // purga los `.ts` y respawnea ffmpeg con `-map 0:a:<idx>`
+        // nuevo, pero los clientes seguían sirviendo desde HTTP
+        // cache los segmentos viejos (mismo URL) — el cambio de
+        // audio no se oía. Sin cache HTTP, cada request va al
+        // backend, que sirve el `.ts` recién generado. El rewind
+        // corto sigue barato porque hls.js/AVFoundation tienen su
+        // propio buffer en memoria, y el rewind largo pega al
+        // backend que ya tiene el `.ts` en disco.
+        .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(bytes))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
