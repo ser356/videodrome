@@ -15,6 +15,9 @@ interface HotkeysOptions {
   activeSub: ActiveSub | null
   subSpeed: number
   showSyncHud: (text: string) => void
+  /** Flash del HUD de volumen — se llama tras cambiar volume/muted
+   *  con ArrowUp/Down/`m` para dar feedback visual estilo VLC. */
+  bumpVolumeHud: () => void
   setVolume: React.Dispatch<React.SetStateAction<number>>
   setMuted: React.Dispatch<React.SetStateAction<boolean>>
   setSubsPanelOpen: React.Dispatch<React.SetStateAction<boolean>>
@@ -55,6 +58,7 @@ export function useHotkeys({
   activeSub,
   subSpeed,
   showSyncHud,
+  bumpVolumeHud,
   setVolume,
   setMuted,
   setSubsPanelOpen,
@@ -91,14 +95,17 @@ export function useHotkeys({
           break
         case 'ArrowUp':
           e.preventDefault()
-          setVolume((x) => Math.min(1, x + 0.05))
+          setVolume((x) => Math.min(2, x + 0.05))
+          bumpVolumeHud()
           break
         case 'ArrowDown':
           e.preventDefault()
           setVolume((x) => Math.max(0, x - 0.05))
+          bumpVolumeHud()
           break
         case 'm':
           setMuted((m) => !m)
+          bumpVolumeHud()
           break
         case 'f':
           void toggleFullscreen()

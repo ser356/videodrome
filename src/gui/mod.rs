@@ -233,7 +233,18 @@ async fn logout(state: State<'_, AppState>) -> Result<(), String> {
     ] {
         let p = dir.join(file);
         if p.exists() {
-            let _ = std::fs::remove_file(&p);
+            // Antes: `let _ = fs::remove_file(&p)` silencioso — un
+            // logout con caches inaccesibles dejaba data del user
+            // anterior en disco sin señal. Loguear a `warn` da
+            // rastro sin bloquear el resto del logout.
+            if let Err(e) = std::fs::remove_file(&p) {
+                tracing::warn!(
+                    target: "logout",
+                    path = %p.display(),
+                    error = %e,
+                    "no se pudo borrar cache durante logout"
+                );
+            }
         }
     }
     state.search_cache.lock().await.clear();
@@ -1391,15 +1402,132 @@ async fn search_torrents_direct(
 
 #[tauri::command]
 fn open_magnet(magnet: String) -> Result<(), String> {
+    // M1 audit: validar la magnet URI ANTES de pasarla a nada
+    // externo. En Windows la versión anterior usaba `cmd /C start`
+    // — `cmd` reinterpretaba `"`, `&`, `|`, `<`, `>`, `^` y
+    // convertía un magnet malicioso (o simplemente uno con `&` sin
+    // escapar en `dn=`) en una inyección de comandos. Ahora
+    // validamos formato + saltamos `cmd` invocando `ShellExecuteW`
+    // directo (protocol handler nativo, sin shell de por medio).
+    validate_magnet_uri(&magnet).map_err(|e| format!("magnet rechazado: {e}"))?;
+
     #[cfg(target_os = "macos")]
     let out = std::process::Command::new("open").arg(&magnet).spawn();
     #[cfg(target_os = "linux")]
     let out = std::process::Command::new("xdg-open").arg(&magnet).spawn();
     #[cfg(target_os = "windows")]
-    let out = std::process::Command::new("cmd")
-        .args(["/C", "start", "", &magnet])
-        .spawn();
-    out.map(|_| ()).map_err(|e| e.to_string())
+    let out = open_magnet_windows(&magnet);
+
+    #[cfg(not(target_os = "windows"))]
+    return out.map(|_| ()).map_err(|e| e.to_string());
+    #[cfg(target_os = "windows")]
+    return out;
+}
+
+/// Valida que `s` es una magnet URI plausible antes de pasarla al
+/// SO. No sustituye a `ShellExecuteW` — es defensa en capas para
+/// bloquear casos raros incluso en macOS/Linux donde `open`/`xdg-open`
+/// no interpretan shell metachars pero podrían ser tocados en el
+/// futuro.
+///
+/// Reglas:
+///   * Debe empezar por `magnet:?`.
+///   * Debe contener `xt=urn:btih:<hex40|base32-32>`.
+///   * NO caracteres de control (CR/LF/TAB/etc.) — los magnets
+///     legítimos van en URL-encoded ASCII limpio.
+///   * NO comillas dobles (`"`) — `cmd.exe /C start "" <arg>` (que
+///     ya no usamos) se rompía si `arg` traía `"`. `ShellExecuteW`
+///     no debería reventar pero tampoco cuesta rechazarlas.
+fn validate_magnet_uri(s: &str) -> Result<(), &'static str> {
+    if !s.starts_with("magnet:?") {
+        return Err("no empieza por magnet:?");
+    }
+    if s.len() > 8192 {
+        return Err("demasiado largo (>8KB)");
+    }
+    for c in s.chars() {
+        if c.is_control() {
+            return Err("carácter de control en el URI");
+        }
+        if c == '"' {
+            return Err("comilla doble no permitida");
+        }
+    }
+    // Extrae el infohash del parámetro xt=urn:btih:...
+    let after = &s[8..]; // salta "magnet:?"
+    let mut has_valid_btih = false;
+    for pair in after.split('&') {
+        if let Some(v) = pair.strip_prefix("xt=urn:btih:") {
+            let raw = v.split(&['&', '?'][..]).next().unwrap_or("");
+            let hash = raw.to_ascii_lowercase();
+            let is_hex40 = hash.len() == 40 && hash.chars().all(|c| c.is_ascii_hexdigit());
+            let is_b32 = hash.len() == 32 && hash.chars().all(|c| c.is_ascii_alphanumeric());
+            if is_hex40 || is_b32 {
+                has_valid_btih = true;
+                break;
+            }
+        }
+    }
+    if !has_valid_btih {
+        return Err("sin xt=urn:btih:<hash> válido");
+    }
+    Ok(())
+}
+
+/// Abre una magnet URI en el cliente por defecto de Windows SIN
+/// pasar por `cmd`. Antes usábamos `cmd /C start "" <magnet>` — el
+/// `start` de cmd reparsea los args con reglas propias, y una
+/// magnet con `"` o `%FOO%` sin escapar (o incluso `dn=` sin
+/// url-encodear un `&`) podía escalar a inyección de comandos.
+///
+/// `ShellExecuteW(hwnd=NULL, "open", magnet, ...)` es la ruta
+/// oficial: resuelve el protocol handler del registro Windows
+/// (`HKCR\magnet\shell\open\command`) y ejecuta el binario
+/// registrado con la magnet como parámetro tal cual — sin shell
+/// intermedio. Return > 32 = éxito.
+#[cfg(target_os = "windows")]
+fn open_magnet_windows(magnet: &str) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            lpOperation: *const u16,
+            lpFile: *const u16,
+            lpParameters: *const u16,
+            lpDirectory: *const u16,
+            nShowCmd: i32,
+        ) -> isize;
+    }
+
+    let to_wide = |s: &str| -> Vec<u16> {
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let op = to_wide("open");
+    let file = to_wide(magnet);
+    const SW_SHOWNORMAL: i32 = 1;
+    let ret = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if ret > 32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "ShellExecuteW devolvió {ret} (¿handler `magnet:` no registrado?)"
+        ))
+    }
 }
 
 // ---------- Streaming ----------
@@ -1539,9 +1667,24 @@ async fn resolve_dropped_torrent(
             (uri, name)
         }
         DroppedTorrentSource::File { path } => {
-            let bytes = tokio::fs::read(&path)
+            // H4 audit: sin validación esto era un LFR primitive
+            // idéntico al de `subtitle_to_vtt`. Aunque
+            // `torrent_bytes_to_magnet` valida bencode al final, la
+            // lectura de bytes ya ocurrió y `format!("No se pudo
+            // leer {path}: {e}")` podía leakear existencia/tamaño de
+            // ficheros arbitrarios en el mensaje de error.
+            //
+            // Restricciones: solo `.torrent`, ≤10 MB (torrents muy
+            // grandes indican multi-file gigantes; 10 MB es holgado
+            // — el 99% pesa <100 KB), no symlinks, no dirs
+            // sensibles. Trusted roots vacío porque los `.torrent`
+            // siempre vienen de fuera (Finder/Explorer drag-drop).
+            const MAX_TORRENT_BYTES: u64 = 10 * 1024 * 1024;
+            const ALLOWED_EXTS: &[&str] = &["torrent"];
+            let canonical = validate_frontend_path(&path, ALLOWED_EXTS, MAX_TORRENT_BYTES, &[])?;
+            let bytes = tokio::fs::read(&canonical)
                 .await
-                .map_err(|e| format!("No se pudo leer {path}: {e}"))?;
+                .map_err(|e| format!("No se pudo leer {}: {e}", canonical.display()))?;
             stream::torrent_bytes_to_magnet(&bytes).map_err(|e| format!("{e:#}"))?
         }
     };
@@ -2183,6 +2326,168 @@ fn subs_cache_dir() -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
+/// Valida un path que viene del frontend antes de leerlo desde disco.
+/// Se aplica a `subtitle_to_vtt` (H3 del audit) y
+/// `resolve_dropped_torrent` (H4 del audit) — ambos aceptan un path
+/// arbitrario controlado por la webview, y sin esta puerta se
+/// convertirían en primitivas Local File Read (LFR) explotables desde
+/// cualquier XSS o dep npm comprometida.
+///
+/// **Excepción por dir de confianza (`trusted_root`)**: cuando el path
+/// canónico cae bajo un directorio que la app misma escribe
+/// (`subs_cache_dir()` para subs, `std::env::temp_dir()` para
+/// tempdirs propios), skippeamos las restricciones de extensión y
+/// blocklist — los ficheros ahí son nuestros, no vale la pena atarnos
+/// las manos si OpenSubtitles nos da un sub con extensión `.txt` o
+/// una traducción TTML. La validación de "no symlinks" + tamaño +
+/// canonicalize se aplica siempre.
+///
+/// Reglas fuera de trusted root (defensa en capas):
+///
+///   1. **Path absoluto**: rechaza rutas relativas — el frontend nunca
+///      las produce legítimamente y son señal de intento de traversal
+///      (`../../etc/passwd`).
+///   2. **Extensión en whitelist**: cierra el 99% del universo de
+///      ficheros sensibles del disco (`~/.ssh/id_rsa`, `credentials.json`,
+///      `wallet.dat`, `.aws/credentials`, keychains). Un attacker por
+///      IPC solo puede leer ficheros que un user pondría razonablemente
+///      con estas extensiones.
+///   3. **No symlinks**: rechaza symlinks para bloquear la evasión
+///      "crea `foo.srt` → `/etc/passwd` y drag-drop". Verificado con
+///      `symlink_metadata` (no sigue el link) antes de leer.
+///   4. **Fichero regular**: rechaza dirs, sockets, FIFOs.
+///   5. **Tamaño máximo**: cap defensivo contra DoS (`/dev/zero`,
+///      ficheros gigantes que agotan la RAM al `tokio::fs::read`).
+///   6. **Canonicalize + blocklist de dirs sensibles**: cinturón +
+///      tirantes por si el user tiene un `foo.srt` con contenido
+///      sensible en `~/.ssh/` (raro pero posible).
+///
+/// Devuelve la ruta canónica ya validada — el caller debe usar ESTA
+/// (no la original) para evitar TOCTOU entre validación y read.
+fn validate_frontend_path(
+    raw: &str,
+    allowed_exts: &[&str],
+    max_size_bytes: u64,
+    trusted_roots: &[std::path::PathBuf],
+) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(raw);
+    if !p.is_absolute() {
+        tracing::warn!(target: "validate", path = %raw, "rechazado: no absoluto");
+        return Err("path debe ser absoluto".to_string());
+    }
+    // `symlink_metadata` no sigue links → detecta el ataque
+    // "sub.srt → /etc/passwd".
+    let meta = std::fs::symlink_metadata(p).map_err(|e| {
+        tracing::warn!(target: "validate", path = %raw, error = %e, "no accesible");
+        format!("no accesible: {e}")
+    })?;
+    if meta.file_type().is_symlink() {
+        tracing::warn!(target: "validate", path = %raw, "rechazado: symlink");
+        return Err("symlinks no permitidos".to_string());
+    }
+    if !meta.is_file() {
+        tracing::warn!(target: "validate", path = %raw, "rechazado: no fichero regular");
+        return Err("no es fichero regular".to_string());
+    }
+    if meta.len() > max_size_bytes {
+        tracing::warn!(target: "validate", path = %raw, size = meta.len(), max = max_size_bytes, "rechazado: tamaño");
+        return Err(format!(
+            "fichero demasiado grande ({} bytes, máx {max_size_bytes})",
+            meta.len()
+        ));
+    }
+    // Canonicalize AHORA (después de rechazar symlinks). Si algún
+    // componente intermedio es un symlink hacia un dir sensible, se
+    // resuelve y el filtro de abajo lo pilla.
+    let canonical = std::fs::canonicalize(p).map_err(|e| {
+        tracing::warn!(target: "validate", path = %raw, error = %e, "canonicalize fail");
+        format!("canonicalize: {e}")
+    })?;
+
+    // Fast-path por trusted root: si el path canónico cae bajo un dir
+    // que la app escribe, saltamos extensión + blocklist. Los ficheros
+    // ahí son nuestros (subs de OpenSubtitles, tempdirs propios), y
+    // atarles las manos por extensión rompe casos legítimos (subs con
+    // extensión `.txt`, `.ttml`, `.zip` que ya sirvió OS).
+    let mut in_trusted_root = false;
+    for root in trusted_roots {
+        // Canonicalize del root también, para comparar apples-to-apples
+        // (ambos con `/private/var/...` o ambos sin, según macOS).
+        let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        if canonical.starts_with(&root_canon) {
+            in_trusted_root = true;
+            break;
+        }
+    }
+    if in_trusted_root {
+        tracing::info!(
+            target: "validate",
+            path = %canonical.display(),
+            size = meta.len(),
+            "aceptado (trusted root)"
+        );
+        return Ok(canonical);
+    }
+
+    // Path externo (drag-drop desde Finder / Explorer). Aplicamos
+    // extensión whitelist + blocklist de dirs sensibles.
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !allowed_exts.iter().any(|a| a.eq_ignore_ascii_case(&ext)) {
+        tracing::warn!(
+            target: "validate",
+            path = %raw,
+            ext = %ext,
+            allowed = ?allowed_exts,
+            "rechazado: extensión (path externo)"
+        );
+        return Err(format!(
+            "extensión no permitida: '{ext}' (esperadas: {})",
+            allowed_exts.join(", ")
+        ));
+    }
+    let canon_str = canonical.to_string_lossy().to_ascii_lowercase();
+    // Blocklist de dirs sensibles universales. NO es exhaustiva —
+    // la extensión whitelist ya bloqueó la mayoría. Esto es
+    // cinturón extra para casos raros ("tengo un `notes.srt` en
+    // `~/.ssh/` con recovery codes").
+    const BANNED_SUBSTRINGS: &[&str] = &[
+        "/.ssh/",
+        "\\.ssh\\",
+        "/.gnupg/",
+        "\\.gnupg\\",
+        "/.aws/",
+        "\\.aws\\",
+        "/.config/videodrome/credentials",
+        "\\videodrome\\credentials",
+        "/library/keychains/",
+        "\\microsoft\\credentials\\",
+        "\\microsoft\\vault\\",
+    ];
+    for banned in BANNED_SUBSTRINGS {
+        if canon_str.contains(banned) {
+            tracing::warn!(
+                target: "validate",
+                path = %canonical.display(),
+                banned,
+                "rechazado: directorio sensible"
+            );
+            return Err("path en directorio sensible".to_string());
+        }
+    }
+    tracing::info!(
+        target: "validate",
+        path = %canonical.display(),
+        ext = %ext,
+        size = meta.len(),
+        "aceptado (path externo)"
+    );
+    Ok(canonical)
+}
+
 /// Descarga un subtítulo y devuelve la ruta local. El frontend le pasa
 /// esta ruta a `start_stream_with_sub` para arrancar el stream con el
 /// `.srt` ya cargado en VLC.
@@ -2218,9 +2523,38 @@ async fn download_subtitle(sub: Subtitle, state: State<'_, AppState>) -> Result<
 /// user verá los cues raros pero no crashea.
 #[tauri::command]
 async fn subtitle_to_vtt(path: String) -> Result<String, String> {
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| format!("No se pudo leer {path}: {e}"))?;
+    // H3 audit: el frontend puede pasar CUALQUIER path. Sin
+    // validación esto era un LFR primitive (`/etc/passwd`,
+    // `~/.ssh/id_rsa`, `credentials.json`). Validador acepta subs
+    // dentro de nuestros trusted roots (subs_cache_dir, tempdir) sin
+    // restricciones extra, y para paths externos (drag-drop) exige
+    // extensión + no symlink + tamaño + dirs sensibles blocklisted.
+    //
+    // 10 MB es un cap generoso; un `.srt` real rara vez pasa de
+    // 200 KB. Sirve para bloquear `/dev/zero`, ficheros gigantes
+    // por accidente y ataques de RAM-exhaust.
+    const MAX_SUB_BYTES: u64 = 10 * 1024 * 1024;
+    const ALLOWED_SUB_EXTS: &[&str] = &["srt", "vtt", "ass", "ssa", "sub", "txt"];
+    let trusted_roots: Vec<std::path::PathBuf> = {
+        let mut v = Vec::new();
+        if let Ok(p) = subs_cache_dir() {
+            v.push(p);
+        }
+        v.push(std::env::temp_dir());
+        v
+    };
+    tracing::info!(target: "subs", path = %path, "subtitle_to_vtt entry");
+    let canonical = validate_frontend_path(&path, ALLOWED_SUB_EXTS, MAX_SUB_BYTES, &trusted_roots)?;
+    let bytes = tokio::fs::read(&canonical).await.map_err(|e| {
+        tracing::warn!(target: "subs", path = %canonical.display(), error = %e, "read failed");
+        format!("No se pudo leer {}: {e}", canonical.display())
+    })?;
+    tracing::info!(
+        target: "subs",
+        path = %canonical.display(),
+        bytes = bytes.len(),
+        "subtitle_to_vtt read ok"
+    );
     // Detección WEBVTT: skip BOM UTF-8 (`EF BB BF`) si existe, y
     // comprueba el header. Case-sensitive: la spec obliga a
     // mayúsculas.

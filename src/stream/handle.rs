@@ -170,6 +170,120 @@ pub async fn compute_moviehash(
     }
 }
 
+/// Genera el session token (H2 audit): 32 bytes CSPRNG codificados
+/// en hex → 64 chars (256 bits de entropía). El middleware
+/// `require_session_token` lo compara contra el `?t=<hex>` de la
+/// URL o el `Authorization: Bearer <hex>` del header.
+///
+/// Se usa `rand::thread_rng` (OsRng con reseed) — el crate ya está
+/// en el dep tree via librqbit. 256 bits es imposible de brutefortar
+/// desde una pestaña vecina del navegador (2^256 intentos), y aunque
+/// hubiera side-channels, la loopback local no expone timing útil
+/// para diferenciar comparaciones tempranas.
+fn generate_session_token() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    let mut hex = String::with_capacity(64);
+    for b in buf {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    hex
+}
+
+/// Middleware axum (H2 audit): rechaza cualquier request que NO
+/// presente el session token correcto O cuyo header `Host` NO
+/// apunte a `127.0.0.1:<port>` / `localhost:<port>`.
+///
+/// El check de `Host` es defensa contra DNS rebinding: un atacante
+/// registra `evil.com` → `127.0.0.1` (via `dns-rebind.example`) y
+/// desde una pestaña del navegador víctima abre `http://evil.com:<port>/video`
+/// — same-origin a ojos del browser, así que las Same-Origin Policy
+/// no ayudan. El servidor rebindeado recibiría un request cuyo `Host`
+/// es `evil.com:<port>` en lugar del canónico. Rechazamos esos.
+///
+/// El check de token es el gate real de acceso. Aceptamos dos vías:
+///   * `?t=<hex>` en el query string — obligatorio para `<video src>`,
+///     `<img>`, `<track>` y cualquier contexto donde el WebView carga
+///     el URL sin poder poner headers.
+///   * `Authorization: Bearer <hex>` — para `fetch()` desde JS. Más
+///     limpio (el token no aparece en logs de acceso HTTP).
+///
+/// Compare CON `eq_ignore_ascii_case` es case-insensitive para el
+/// scheme del header (`Bearer` vs `bearer`) pero exact para el hex
+/// del token. Sin constant-time-compare — para un atacante remoto
+/// sobre HTTP loopback la ventana de timing side-channel es
+/// prácticamente nula (nanosegundos de scheduling dominan sobre
+/// microsegundos de comparación de 64 bytes).
+async fn require_session_token(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    // OPTIONS preflight: pasa sin auth. El WebView no adjunta
+    // credenciales en preflight y rechazarlo rompería el CORS de
+    // TODO el server. `add_cors_headers` ya devuelve 204 para OPTIONS
+    // ANTES de que este middleware corra, así que en teoría esta rama
+    // no se ejecuta — la dejamos por defensa en profundidad si algún
+    // día el orden de middlewares cambia.
+    if req.method() == axum::http::Method::OPTIONS {
+        return Ok(next.run(req).await);
+    }
+
+    // Host allowlist. `SocketAddr::to_string()` produce `127.0.0.1:PORT`
+    // — comparamos contra eso y contra `localhost:PORT` (algunos
+    // clientes resuelven `localhost` en vez del literal). Cualquier
+    // otro Host (evil.com:PORT via rebind, 0.0.0.0:PORT, …) es
+    // rechazado con 421 Misdirected Request.
+    let port = state.local_addr.port();
+    let expected_v4 = format!("127.0.0.1:{port}");
+    let expected_localhost = format!("localhost:{port}");
+    let host_ok = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h == expected_v4 || h == expected_localhost)
+        .unwrap_or(false);
+    if !host_ok {
+        tracing::warn!(
+            target: "http-auth",
+            host = ?req.headers().get(axum::http::header::HOST),
+            "rechazado por Host no allowlisted (posible DNS rebinding)"
+        );
+        return Err(axum::http::StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    // Token: query `?t=<hex>` o header `Authorization: Bearer <hex>`.
+    let expected_tok = state.session_token.as_str();
+    let query = req.uri().query().unwrap_or("");
+    let query_ok = query
+        .split('&')
+        .any(|p| p.strip_prefix("t=") == Some(expected_tok));
+    let header_ok = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            // "Bearer <tok>" — case-insensitive en el scheme.
+            let (scheme, rest) = s.split_once(' ')?;
+            if !scheme.eq_ignore_ascii_case("bearer") {
+                return None;
+            }
+            Some(rest.trim() == expected_tok)
+        })
+        .unwrap_or(false);
+    if !query_ok && !header_ok {
+        tracing::warn!(
+            target: "http-auth",
+            path = %req.uri().path(),
+            "rechazado por token ausente/inválido"
+        );
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    Ok(next.run(req).await)
+}
+
 impl Drop for StreamHandle {
     fn drop(&mut self) {
         // Persistir resume ANTES de cancelar la sesión — la escritura es
@@ -664,10 +778,19 @@ pub async fn start_with_target(
         .context("No se pudo abrir puerto local")?;
     let addr = listener.local_addr()?;
 
+    // Session token (H2 audit): 32 bytes CSPRNG en hex → 64 chars.
+    // Requerido por el middleware `require_session_token` en TODAS
+    // las rutas menos OPTIONS (preflight CORS). Se expone al
+    // frontend a través de la URL (`?t=<hex>`) — el `<video>` del
+    // WebView no puede añadir headers, así que la vía query es
+    // obligatoria para él.
+    let session_token = Arc::new(generate_session_token());
+
     let state = AppState {
         handle: handle.clone(),
         file_id,
         file_len,
+        session_token: session_token.clone(),
         active_request: Arc::new(tokio::sync::Mutex::new(None)),
         request_counter: Arc::new(AtomicU64::new(0)),
         max_seek: Arc::new(AtomicU64::new(0)),
@@ -696,11 +819,24 @@ pub async fn start_with_target(
         .route("/subs/embedded/{idx}", get(serve_embedded_subtitle))
         .layer(axum::middleware::from_fn(log_hls_requests))
         .layer(axum::middleware::from_fn(add_cors_headers))
+        // Middleware de auth + Host allowlist. Va DESPUÉS de CORS
+        // (más abajo = se aplica ANTES del handler) para que el
+        // preflight OPTIONS no requiera token — el WebView no manda
+        // token en preflights y los rechazaría todos. `add_cors_headers`
+        // ya devuelve 204 en OPTIONS sin llegar aquí.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_session_token,
+        ))
         .with_state(state);
     #[cfg(not(feature = "gui"))]
     let app = Router::new()
         .route("/video", get(serve_video))
         .layer(axum::middleware::from_fn(add_cors_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_session_token,
+        ))
         .with_state(state);
 
     let cancel_task = cancel.clone();
@@ -774,7 +910,7 @@ pub async fn start_with_target(
         }
     });
 
-    let url = format!("http://{addr}/video");
+    let url = format!("http://{addr}/video?t={session_token}");
 
     Ok(StreamHandle {
         url,

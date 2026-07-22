@@ -180,10 +180,19 @@ fn has_display() -> bool {
 /// razonable evita cuelgues indefinidos si un endpoint no responde —
 /// especialmente relevante en la TUI, donde una request colgada bloquea
 /// el spinner sin feedback al usuario.
+///
+/// `redirect(limited(10))` es explícito (mismo comportamiento que el
+/// default de reqwest hoy). Sirve como marker de intención — si algún
+/// día reqwest cambia su default, aquí sigue capado.  reqwest ya
+/// stripea `Authorization` en cross-host redirects; el `Api-Key` de
+/// OpenSubtitles NO se stripea (header custom), pero el endpoint de
+/// search no redirige en la práctica y el /download solo redirige al
+/// signed link, que se pide con `http.get(&link)` SIN Api-Key.
 fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(concat!("videodrome/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .context("No se pudo construir el cliente HTTP")
 }

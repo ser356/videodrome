@@ -171,10 +171,17 @@ pub(super) async fn serve_hls_playlist(
     playlist.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
     playlist.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
     playlist.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
+    // H2 audit: cada URL de segmento lleva el session token en query
+    // string. Sin esto los `.ts` que hls.js pide (resolviendo el
+    // nombre relativo del playlist) llegarían al middleware sin token
+    // y responderían 401 — reproducción rota. Con el token en cada
+    // línea, tanto hls.js como AVFoundation nativo lo propagan sin
+    // configuración adicional en el cliente.
+    let token = state.session_token.as_str();
     for (i, (_start, dur)) in segments.iter().enumerate() {
         // EXTINF con precisión al ms — Safari/hls.js son estrictos
         // con truncados que superen la duración real.
-        playlist.push_str(&format!("#EXTINF:{dur:.5},\nseg-{i:05}.ts\n"));
+        playlist.push_str(&format!("#EXTINF:{dur:.5},\nseg-{i:05}.ts?t={token}\n"));
     }
     playlist.push_str("#EXT-X-ENDLIST\n");
     tracing::debug!(
@@ -235,7 +242,10 @@ pub(super) async fn ensure_hls_dir(state: &AppState) -> Result<PathBuf, (StatusC
     }
     let prefs = crate::preferences::load();
     let caps = current_client_capabilities();
-    let url = format!("http://{}/video", state.local_addr);
+    let url = format!(
+        "http://{}/video?t={}",
+        state.local_addr, state.session_token
+    );
 
     let (mode, segments) = decide_mode_and_segments(&info, &caps, prefs.quality_mode, &url).await;
 

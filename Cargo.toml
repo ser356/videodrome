@@ -1,6 +1,6 @@
 [package]
 name = "videodrome"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ser356"]
@@ -52,6 +52,11 @@ bytes = "1"
 # heurística casera Latin-1-fallback en `subtitles.rs`.
 chardetng = "0.1"
 encoding_rs = "0.8"
+# CSPRNG para el session token del servidor HTTP local (H2 audit).
+# 32 bytes / 256 bits — imposible de brutefortar desde XSS local,
+# y `OsRng` (readable via `thread_rng`) ya está en el dep tree via
+# librqbit. Sin `default-features` para no arrastrar `simd_support`.
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 tauri = { version = "2", features = [], optional = true }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }

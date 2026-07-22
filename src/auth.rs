@@ -81,7 +81,24 @@ fn save_token(token: &str, expires_in: u64) -> Result<()> {
     };
     let path = cache_path()?;
     let json = serde_json::to_string(&cached)?;
-    std::fs::write(path, json).context("No se puede guardar el token en caché")?;
+
+    // Escritura atómica: write en `.tmp` + rename. Sin esto un crash a
+    // mitad de write deja el fichero corrupto y `serde_json::from_str`
+    // falla al arrancar la siguiente sesión → login zombie.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).context("No se puede escribir el token temporal")?;
+
+    // 0o600 antes del rename para que la ventana de "fichero legible por
+    // otros users del sistema" no exista nunca. `set_permissions` es
+    // best-effort — si falla continuamos y el rename sigue adelante
+    // (peor caso: se lee con 644 durante microsegundos).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+
+    std::fs::rename(&tmp, &path).context("No se puede renombrar el token en caché")?;
     Ok(())
 }
 

@@ -22,10 +22,39 @@ mod imp {
 
     const ACCOUNT: &str = "videodrome";
 
-    /// Lee una credencial del Keychain. `None` si no existe o si el Keychain
-    /// no está accesible (por ejemplo, sesión sin desbloquear).
+    /// Lee una credencial del Keychain. `None` si no existe **o si el
+    /// Keychain no está accesible** (sesión bloqueada, user denegó el
+    /// prompt, daemon caído). Ambos casos colapsan al mismo return
+    /// value para el caller (fallback a env / credentials.json), pero
+    /// el segundo se loguea a `warn` para que quede rastro en el
+    /// debug.log — sin esto era imposible diagnosticar por qué el
+    /// user "está deslogueado" cuando en realidad denegó el prompt
+    /// del keychain.
     pub fn get(service: &str) -> Option<String> {
-        Entry::new(service, ACCOUNT).ok()?.get_password().ok()
+        match Entry::new(service, ACCOUNT) {
+            Ok(entry) => match entry.get_password() {
+                Ok(pw) => Some(pw),
+                Err(KeyringError::NoEntry) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "keychain",
+                        service,
+                        error = %e,
+                        "get_password failed (acceso denegado / keychain locked)"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    target: "keychain",
+                    service,
+                    error = %e,
+                    "Entry::new failed"
+                );
+                None
+            }
+        }
     }
 
     pub fn set(service: &str, value: &str) -> Result<()> {

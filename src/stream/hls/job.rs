@@ -418,7 +418,10 @@ async fn spawn_hls(
     })?;
     let seg_pattern = dir.join("seg-%05d.ts");
     let live_playlist = dir.join("live.m3u8");
-    let input_url = format!("http://{}/video", state.local_addr);
+    let input_url = format!(
+        "http://{}/video?t={}",
+        state.local_addr, state.session_token
+    );
 
     let mut cmd = tokio::process::Command::new(bin);
     // Windows: sin `CREATE_NO_WINDOW`, cada spawn de ffmpeg abriría

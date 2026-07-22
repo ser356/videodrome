@@ -117,6 +117,12 @@ export function VolumeControl({
 }) {
   const t = useT()
   const Icon = muted || volume === 0 ? SpeakerX : volume < 0.5 ? SpeakerNone : SpeakerHigh
+  // Slider 0..=200% (VLC/Stremio). `useMediaControls` enruta valores
+  // > 1.0 a través de un GainNode Web Audio; visualmente pintamos
+  // un badge con el porcentaje cuando estamos amplificando (>100%)
+  // para que el user sepa que está fuera del rango nativo.
+  const pct = Math.round(volume * 100)
+  const boosting = !muted && volume > 1.01
   return (
     <div className="group flex items-center gap-2">
       <button
@@ -129,16 +135,24 @@ export function VolumeControl({
       <input
         type="range"
         min={0}
-        max={1}
-        step={0.01}
+        max={2}
+        step={0.02}
         value={muted ? 0 : volume}
         onChange={(e) => {
           const v = parseFloat(e.target.value)
           onVolume(v)
           if (v > 0 && muted) onToggleMute()
         }}
-        className="h-1 w-20 cursor-pointer appearance-none rounded-full bg-white/15 accent-accent opacity-0 transition-opacity group-hover:opacity-100"
+        className="h-1 w-24 cursor-pointer appearance-none rounded-full bg-white/15 accent-accent opacity-0 transition-opacity group-hover:opacity-100"
       />
+      {boosting && (
+        <span
+          className="rounded-full bg-white/10 px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-ink/80 opacity-0 transition-opacity group-hover:opacity-100"
+          title={t('player.volumeBoostTitle', { defaultValue: 'Audio amplificado' })}
+        >
+          {pct}%
+        </span>
+      )}
     </div>
   )
 }

@@ -76,6 +76,12 @@ export interface UseMediaControlsResult {
   currentTimeRef: RefObject<number>
   isFullscreenRef: RefObject<boolean>
 
+  // HUD de volumen (feedback visual estilo VLC/Stremio cuando el
+  // user toca ArrowUp/Down o `m` mute). `null` cuando no está
+  // visible. `bumpVolumeHud` lo activa por 1.2s con auto-clear.
+  volumeHud: VolumeHudValue | null
+  bumpVolumeHud: () => void
+
   // Callbacks.
   seekTo: (absoluteSeconds: number) => void
   seekBy: (delta: number) => void
@@ -83,6 +89,12 @@ export interface UseMediaControlsResult {
   toggleFullscreen: () => Promise<void>
   onTimeUpdate: () => void
   bumpControls: () => void
+}
+
+/** Payload del HUD flotante de volumen. */
+export interface VolumeHudValue {
+  volume: number
+  muted: boolean
 }
 
 export function useMediaControls(
@@ -135,12 +147,130 @@ export function useMediaControls(
   }, [isFullscreen])
 
   // Sync volume/muted con el `<video>`.
+  //
+  // Rango del slider extendido a 0..=2.0 (VLC / Stremio permiten
+  // "amplificar" el audio hasta 200% para pelis con mezcla muy baja).
+  // El `HTMLMediaElement.volume` está capado por spec a [0, 1]; para
+  // valores >1 enrutamos el audio del `<video>` a través de un
+  // `AudioContext` con un `GainNode`:
+  //
+  //   * volume ≤ 1.0 → path nativo (`v.volume = volume`, gain = 1).
+  //   * volume > 1.0 → `v.volume = 1`, `gain.gain = volume`.
+  //
+  // El grafo Web Audio se cablea perezosamente la PRIMERA vez que el
+  // user sube de 1.0 — así los streams que se conforman con 0-100%
+  // no pagan overhead ni riesgo de CORS-taint. `MediaElementSource`
+  // solo puede crearse una vez por element; guardamos el nodo en un
+  // ref idempotente. AudioContext arranca "suspended" hasta un user
+  // gesture (autoplay policy); mover el slider ES un gesture, así
+  // que el `.resume()` posterior funciona.
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const gainNodeRef = useRef<GainNode | null>(null)
+  const audioGraphFailedRef = useRef(false)
+
+  const ensureAudioGraph = useCallback(() => {
+    if (audioCtxRef.current || audioGraphFailedRef.current) return
+    const v = videoRef.current
+    if (!v) return
+    try {
+      const Ctx =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext
+      if (!Ctx) {
+        audioGraphFailedRef.current = true
+        return
+      }
+      // El swap nativo → Web Audio es transparente EN LOUDNESS si
+      // inicializamos el gain al mismo nivel que tenía `v.volume`
+      // justo antes del swap: `createMediaElementSource` desconecta
+      // la salida nativa del element, así que a partir de aquí todo
+      // el audio pasa por gain·v.volume. Fijamos `v.volume = 1` y
+      // dejamos que el gain haga todo el control — así el punto de
+      // partida audible coincide con el estado previo (sin click ni
+      // silencio de arranque).
+      //
+      // Intentos previos con `gain = 0` + ramp fallaban: si el ctx
+      // nace suspended (autoplay policy), el clock no avanza y el
+      // ramp no se aplica hasta que `resume()` resuelve async → el
+      // user oía silencio en la primera pulsación de ArrowUp.
+      const prevVolume = v.volume
+      const ctx: AudioContext = new Ctx()
+      const src = ctx.createMediaElementSource(v)
+      const gain = ctx.createGain()
+      gain.gain.setValueAtTime(prevVolume, ctx.currentTime)
+      src.connect(gain).connect(ctx.destination)
+      audioCtxRef.current = ctx
+      gainNodeRef.current = gain
+      v.volume = 1
+    } catch (err) {
+      // `createMediaElementSource` tira `InvalidStateError` si ya se
+      // llamó antes sobre este mismo elemento (p.ej. hot-reload en
+      // dev). Marcamos como fallido para no reintentar en cada
+      // slider tick — el boost queda desactivado esta sesión, resto
+      // del player intacto.
+      console.warn('[audio] boost graph init failed:', err)
+      audioGraphFailedRef.current = true
+    }
+  }, [videoRef])
+
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
-    v.volume = volume
+    // Cuando el grafo Web Audio está activo, `HTMLMediaElement.muted`
+    // NO garantiza silencio en WKWebView (el audio va por el
+    // MediaElementSource → GainNode → destination; muted del element
+    // no siempre se propaga). Cortamos también con el gain para
+    // silencio inmediato — sin esto el mute se sentía "con delay"
+    // porque el audio seguía saliendo por el pipeline de Web Audio.
+    //
+    // Path activo: gain controla TODO el nivel (0..2.0). Path nativo:
+    // `v.volume` controla nivel (0..1.0), sin amplificación posible.
+    const effectiveGain = muted ? 0 : volume
+    if (volume > 1.0 && !muted) {
+      ensureAudioGraph()
+    }
+    const gain = gainNodeRef.current
+    const ctx = audioCtxRef.current
+    if (gain && ctx) {
+      // El element queda como pass-through — gain hace el control.
+      v.volume = 1
+      // Ramp suave (30 ms) al nivel objetivo. Evita saltos bruscos
+      // al mover el slider rápido o al togglear mute. El gain
+      // arranca al nivel previo tras el swap (ver ensureAudioGraph),
+      // así que el primer ramp es de prevVolume → volume, sin
+      // silencio ni click.
+      const now = ctx.currentTime
+      gain.gain.cancelScheduledValues(now)
+      gain.gain.setValueAtTime(gain.gain.value, now)
+      gain.gain.linearRampToValueAtTime(effectiveGain, now + 0.03)
+    } else {
+      // Sin grafo Web Audio (todavía no cableado o falló): path
+      // nativo. Cap a 1.0 si el user pidió más — no podemos amplificar.
+      v.volume = Math.min(volume, 1.0)
+    }
+    // `v.muted` también para consistencia con el UI nativo del
+    // sistema (indicador OS X en el menu bar, etc.).
     v.muted = muted
-  }, [volume, muted, videoRef])
+    // Resume del AudioContext si arrancó suspended (autoplay policy).
+    if (ctx && ctx.state === 'suspended') {
+      void ctx.resume().catch(() => {})
+    }
+  }, [volume, muted, videoRef, ensureAudioGraph])
+
+  // Cleanup del AudioContext al desmontar. Sin esto el ctx queda vivo
+  // referenciando el `<video>` viejo → leak de recursos de audio y
+  // (en algunos WebViews) sonido zombi al reabrir el player.
+  useEffect(() => {
+    return () => {
+      const ctx = audioCtxRef.current
+      if (ctx) {
+        void ctx.close().catch(() => {})
+        audioCtxRef.current = null
+        gainNodeRef.current = null
+      }
+    }
+  }, [])
 
   // Autohide de controles.
   const hideTimerRef = useRef<number | null>(null)
@@ -171,6 +301,47 @@ export function useMediaControls(
     check()
     const id = window.setInterval(check, 1000)
     return () => window.clearInterval(id)
+  }, [])
+
+  // HUD de volumen — se activa al pulsar ArrowUp/Down/`m` o al usar
+  // el botón de mute del UI, y refleja el estado NUEVO tras la
+  // actualización de React. Auto-clear tras 1.2 s.
+  //
+  // Design: en vez de leer `volume`/`muted` cuando `bumpVolumeHud`
+  // se llama (que llegaría STALE porque los setters de React son
+  // asíncronos y el effect que actualiza refs corre DESPUÉS del
+  // render), el callback solo levanta un flag `pendingHudRef`. Un
+  // `useEffect` que depende de `[volume, muted]` — y por tanto
+  // corre TRAS el commit — resuelve la bandera y snapshotea el
+  // valor fresco. Así el HUD siempre coincide con el estado real.
+  //
+  // Nota: el slider (drag) NO llama a `bumpVolumeHud` — sólo los
+  // hotkeys y el botón de mute UI. Si lo llamase el slider, el HUD
+  // flashearía en cada tick de mouse durante el drag, ruidoso.
+  const [volumeHud, setVolumeHud] = useState<VolumeHudValue | null>(null)
+  const volumeHudTimerRef = useRef<number | null>(null)
+  const pendingHudRef = useRef(false)
+  const bumpVolumeHud = useCallback(() => {
+    pendingHudRef.current = true
+  }, [])
+  useEffect(() => {
+    if (!pendingHudRef.current) return
+    pendingHudRef.current = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Flash del HUD tras cambio de volumen/mute vía hotkey/botón.
+    setVolumeHud({ volume, muted })
+    if (volumeHudTimerRef.current) window.clearTimeout(volumeHudTimerRef.current)
+    volumeHudTimerRef.current = window.setTimeout(() => {
+      setVolumeHud(null)
+      volumeHudTimerRef.current = null
+    }, 1200)
+  }, [volume, muted])
+  // Cleanup del timer al desmontar.
+  useEffect(() => {
+    return () => {
+      if (volumeHudTimerRef.current) {
+        window.clearTimeout(volumeHudTimerRef.current)
+      }
+    }
   }, [])
 
   const seekTo = useCallback(
@@ -247,6 +418,8 @@ export function useMediaControls(
     stalledLong,
     currentTimeRef,
     isFullscreenRef,
+    volumeHud,
+    bumpVolumeHud,
     seekTo,
     seekBy,
     togglePlay,

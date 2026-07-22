@@ -778,6 +778,14 @@ fn language_multiplier(hint: AudioHint) -> f64 {
 
 /// Devuelve los providers habilitados por defecto. Torznab se activa si están
 /// definidas `TORZNAB_URL` y `TORZNAB_APIKEY` en el entorno.
+///
+/// La URL de Torznab pasa por `validate_torznab_url` — anti-SSRF
+/// defensivo: rechaza scheme distinto de http/https, IPs link-local
+/// (169.254.0.0/16, `fe80::/10` → AWS/GCP/Alibaba IMDS lookalike),
+/// `0.0.0.0` y `::`. LAN (`192.168.x`, `10.x`, `172.16-31.x`) y
+/// localhost SÍ se permiten porque Jackett self-hosted en la red del
+/// user es un caso legítimo (docstring literal de torznab.rs cita
+/// `http://localhost:9117/...`).
 pub fn default_providers() -> Vec<Arc<dyn TorrentProvider>> {
     let mut providers: Vec<Arc<dyn TorrentProvider>> = vec![
         // Torrentio primero: es meta-agregador (RARBG-legacy, 1337x,
@@ -796,10 +804,81 @@ pub fn default_providers() -> Vec<Arc<dyn TorrentProvider>> {
         std::env::var("TORZNAB_URL"),
         std::env::var("TORZNAB_APIKEY"),
     ) {
-        providers.push(Arc::new(torznab::Torznab::new(url, key)));
+        match validate_torznab_url(&url) {
+            Ok(()) => providers.push(Arc::new(torznab::Torznab::new(url, key))),
+            Err(reason) => {
+                tracing::warn!(
+                    target: "torznab",
+                    url = %url,
+                    reason,
+                    "TORZNAB_URL rechazada por política anti-SSRF"
+                );
+            }
+        }
     }
 
     providers
+}
+
+/// Valida `TORZNAB_URL` contra una política anti-SSRF mínima. El
+/// atacante-tipo es alguien que consigue poisonear el entorno (`.env`
+/// robado, variable inyectada via LaunchAgent) y quiere que la app
+/// pegue a un endpoint interno con las creds del proceso.
+///
+/// Reglas:
+///   * Scheme debe ser `http` o `https`. (No `file:`, no `gopher:`.)
+///   * IPs prohibidas: `0.0.0.0`, `169.254.0.0/16` (link-local /
+///     AWS-GCP-Alibaba IMDS), `::` y `fe80::/10` (IPv6 link-local),
+///     `100.64.0.0/10` (CGNAT). El resto (RFC1918, ULA, localhost,
+///     IPs públicas) se acepta — self-hosting Jackett en LAN es UX
+///     legítimo.
+///   * Hostname en clear (no IP): se acepta sin resolver — hacer
+///     resolve aquí no defiende (TOCTOU: podría cambiar entre
+///     validación y request real). Es una capa de defensa, no un
+///     cortafuegos completo.
+fn validate_torznab_url(raw: &str) -> Result<(), &'static str> {
+    let parsed = reqwest::Url::parse(raw).map_err(|_| "URL malformada")?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return Err("scheme no permitido (usa http/https)"),
+    }
+    let host = parsed.host_str().ok_or("URL sin host")?;
+    // `Url::host_str` devuelve IPv6 CON corchetes (`[::1]`) — hay que
+    // strippearlos antes de intentar `parse::<IpAddr>`, que espera la
+    // forma raw sin brackets.
+    let host_no_brackets = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = host_no_brackets.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                if v4.is_unspecified() {
+                    return Err("0.0.0.0 no permitido");
+                }
+                if v4.is_link_local() {
+                    // 169.254.0.0/16 — cubre AWS/GCP/Alibaba IMDS.
+                    return Err("IP link-local (169.254/16) no permitida");
+                }
+                let octets = v4.octets();
+                // CGNAT 100.64.0.0/10.
+                if octets[0] == 100 && (octets[1] & 0xC0) == 0x40 {
+                    return Err("CGNAT (100.64/10) no permitida");
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_unspecified() {
+                    return Err(":: no permitido");
+                }
+                // fe80::/10 link-local IPv6.
+                let segs = v6.segments();
+                if (segs[0] & 0xFFC0) == 0xFE80 {
+                    return Err("IPv6 link-local (fe80::/10) no permitida");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── Helpers públicos para los providers ─────────────────────────────────────
@@ -1274,6 +1353,62 @@ pub fn is_absurd_size(bytes: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn torznab_url_rejects_bad_scheme() {
+        assert!(validate_torznab_url("file:///etc/passwd").is_err());
+        assert!(validate_torznab_url("gopher://foo").is_err());
+        assert!(validate_torznab_url("ftp://x/api").is_err());
+    }
+
+    #[test]
+    fn torznab_url_rejects_link_local() {
+        // AWS/GCP/Alibaba IMDS lookalike — el ataque directo.
+        assert!(validate_torznab_url("http://169.254.169.254/latest/").is_err());
+        assert!(validate_torznab_url("http://169.254.0.1/").is_err());
+    }
+
+    #[test]
+    fn torznab_url_rejects_zero_ip() {
+        assert!(validate_torznab_url("http://0.0.0.0/api").is_err());
+        assert!(validate_torznab_url("http://[::]/api").is_err());
+    }
+
+    #[test]
+    fn torznab_url_rejects_ipv6_link_local() {
+        assert!(validate_torznab_url("http://[fe80::1]/api").is_err());
+    }
+
+    #[test]
+    fn torznab_url_rejects_cgnat() {
+        // 100.64.0.0/10 — CGNAT, indistinguible de red pública para
+        // usos de host residencial pero puede llegar a IMDS de
+        // algunos proveedores cloud (AWS Nitro carrier NAT).
+        assert!(validate_torznab_url("http://100.64.0.1/api").is_err());
+        assert!(validate_torznab_url("http://100.127.255.254/api").is_err());
+    }
+
+    #[test]
+    fn torznab_url_accepts_localhost() {
+        assert!(validate_torznab_url("http://localhost:9117/api").is_ok());
+        assert!(validate_torznab_url("http://127.0.0.1:9117/api").is_ok());
+        assert!(validate_torznab_url("http://[::1]:9117/api").is_ok());
+    }
+
+    #[test]
+    fn torznab_url_accepts_lan_rfc1918() {
+        // Jackett self-hosted en LAN — caso legítimo. La política es
+        // "solo prohibimos IMDS/link-local", RFC1918 y ULA se aceptan.
+        assert!(validate_torznab_url("http://192.168.1.10:9117/api").is_ok());
+        assert!(validate_torznab_url("http://10.0.0.5/api").is_ok());
+        assert!(validate_torznab_url("http://172.16.0.1/api").is_ok());
+    }
+
+    #[test]
+    fn torznab_url_accepts_public_https() {
+        // Prowlarr / Jackett aggregate público (raro pero válido).
+        assert!(validate_torznab_url("https://indexer.example.com/api").is_ok());
+    }
 
     #[test]
     fn parse_infohash_accepts_hex40() {

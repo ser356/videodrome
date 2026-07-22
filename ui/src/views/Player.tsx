@@ -16,6 +16,7 @@ import {
   SubDragFlash,
   SubDragOverlay,
   SyncHud,
+  VolumeHud,
 } from './player/overlays'
 import { PlayerControlBar, PlayerTopBar } from './player/bars'
 import { useAudioSwitch, useHlsAttach } from './player/useHlsAttach'
@@ -174,6 +175,8 @@ export function Player() {
     stalledLong,
     currentTimeRef,
     isFullscreenRef,
+    volumeHud,
+    bumpVolumeHud,
     seekTo,
     seekBy,
     togglePlay,
@@ -339,6 +342,7 @@ export function Player() {
     activeSub,
     subSpeed,
     showSyncHud,
+    bumpVolumeHud,
     setVolume,
     setMuted,
     setSubsPanelOpen,
@@ -592,6 +596,7 @@ export function Player() {
       />
 
       <SyncHud text={syncHud} />
+      <VolumeHud value={volumeHud} />
 
       <ErrorOverlay error={error} onBack={handleBack} />
 
@@ -638,7 +643,10 @@ export function Player() {
         onSeek={seekTo}
         onTogglePlay={togglePlay}
         onSetVolume={setVolume}
-        onToggleMute={() => setMuted((m) => !m)}
+        onToggleMute={() => {
+          setMuted((m) => !m)
+          bumpVolumeHud()
+        }}
         onToggleFullscreen={toggleFullscreen}
         statsPanelOpen={statsPanelOpen}
         setStatsPanelOpen={setStatsPanelOpen}

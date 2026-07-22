@@ -46,16 +46,28 @@ pub fn load() -> Credentials {
 
 /// Guarda las credenciales al fichero con permisos 0600 (Unix). Solo el
 /// usuario actual puede leerlo.
+///
+/// Escritura atómica: write en `.tmp` + rename. Sin esto un crash a
+/// mitad de write deja el fichero corrupto y `serde_json::from_str`
+/// del siguiente arranque falla → user perdido de sesión.
+///
+/// 0o600 se aplica al `.tmp` ANTES del rename para que la ventana de
+/// "fichero legible por otros users" no exista nunca (con `write` +
+/// `set_permissions` a posteriori sí existe unos microsegundos).
 pub fn save(creds: &Credentials) -> Result<()> {
     let p = path()?;
     let json = serde_json::to_string_pretty(creds)?;
-    std::fs::write(&p, json).with_context(|| format!("No se pudo escribir {}", p.display()))?;
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, json).with_context(|| format!("No se pudo escribir {}", tmp.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
+
+    std::fs::rename(&tmp, &p)
+        .with_context(|| format!("No se pudo renombrar credentials a {}", p.display()))?;
 
     Ok(())
 }

@@ -1,6 +1,7 @@
-import { DownloadSimple } from '@phosphor-icons/react'
+import { DownloadSimple, SpeakerHigh, SpeakerNone, SpeakerX } from '@phosphor-icons/react'
 import { useT } from '../../lib/i18n'
 import type { StreamStats } from '../../lib/api'
+import type { VolumeHudValue } from './useMediaControls'
 import { StremioLoader } from './StremioLoader'
 
 /**
@@ -95,6 +96,56 @@ export function SyncHud({ text }: { text: string | null }) {
   return (
     <div className="pointer-events-none absolute left-1/2 top-16 -translate-x-1/2 rounded-md bg-black/80 px-4 py-2 text-[13px] text-ink">
       {text}
+    </div>
+  )
+}
+
+/**
+ * HUD del volumen — se activa ~1.2s tras pulsar ArrowUp/Down/`m`.
+ * Estilo pill glassy con icono Phosphor + porcentaje tabular +
+ * barra de progreso. La zona por encima del 100% (boost, hasta
+ * 200%) se pinta con el color accent para señalar que estamos
+ * amplificando fuera del rango nativo del `<video>`.
+ *
+ *   [🔊]  130%    ▬▬▬▬▬│▬▬
+ *                  100%  ↑ zona accent
+ *
+ * Reglas de estilo (design.md del proyecto, anti-slop):
+ *   * Sin emojis en el texto (icono Phosphor sí).
+ *   * Sin em-dashes.
+ *   * Un solo accent para el boost.
+ *   * Backdrop-blur para integrarse con la vista del vídeo detrás.
+ */
+export function VolumeHud({ value }: { value: VolumeHudValue | null }) {
+  if (!value) return null
+  const { volume, muted } = value
+  const pct = Math.round(volume * 100)
+  const boosting = !muted && volume > 1.01
+  const Icon = muted || volume === 0 ? SpeakerX : volume < 0.5 ? SpeakerNone : SpeakerHigh
+  // Bar: 0-200%, 100% cae al centro. Neutro < 100%, accent >= 100%.
+  const barPct = Math.min(100, pct / 2) // 0-200 → 0-100 (ancho relativo)
+  return (
+    <div
+      className="pointer-events-none absolute right-6 top-6 flex items-center gap-3 rounded-full border border-white/10 bg-black/55 px-3.5 py-2 backdrop-blur-md shadow-[0_4px_20px_rgba(0,0,0,0.35)] transition-opacity"
+      role="status"
+      aria-live="polite"
+    >
+      <Icon size={16} weight="fill" className="text-ink/90" />
+      <span className="min-w-[3ch] text-right font-mono text-[12px] tabular-nums leading-none text-ink">
+        {pct}%
+      </span>
+      <div className="relative h-[3px] w-24 overflow-hidden rounded-full bg-white/12">
+        <div
+          className={`absolute inset-y-0 left-0 rounded-full transition-[width] duration-150 ${
+            boosting ? 'bg-accent' : muted ? 'bg-white/30' : 'bg-white/80'
+          }`}
+          style={{ width: `${barPct}%` }}
+        />
+        {/* Marca del 100% (centro del rango 0-200%). Solo visible
+         *  cuando estamos cerca o pasando el umbral, para no
+         *  ensuciar la barra en uso normal. */}
+        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-white/25" />
+      </div>
     </div>
   )
 }

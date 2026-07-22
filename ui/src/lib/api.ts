@@ -568,8 +568,8 @@ export class ProbeStalledError extends Error {
 }
 
 export async function probeStream(streamUrl: string): Promise<MediaInfo> {
-  const base = streamUrl.replace(/\/video$/, '')
-  const r = await fetch(`${base}/probe.json`)
+  const { base, token } = splitStreamUrl(streamUrl)
+  const r = await fetch(`${base}/probe.json${token ? `?t=${token}` : ''}`)
   if (r.status === 504) {
     // Rama estructurada `probe_stalled` del backend. El body es JSON
     // con motivo (`stall_reason`) + stats reales de librqbit
@@ -614,14 +614,15 @@ export async function probeStream(streamUrl: string): Promise<MediaInfo> {
  * arranque con `#EXT-X-ENDLIST`). El backend materializa los `.ts`
  * bajo demanda cuando el `<video>` los pide.
  *
- * Sin query params: la URL es estable durante toda la vida del
- * stream, así que WKWebView puede cachear libremente. El seek al
- * offset inicial de resume se hace en el frontend con
- * `v.currentTime = t` tras `loadedmetadata`, no en la URL.
+ * El session token (H2 audit) se propaga en el query string
+ * (`?t=<hex>`). El middleware `require_session_token` del backend
+ * lo requiere en cada request; sin él responde 401. El playlist
+ * incluye el token también en cada URL de segmento — así hls.js
+ * y AVFoundation lo llevan sin cambios en el cliente.
  */
 export function hlsUrl(streamUrl: string): string {
-  const base = streamUrl.replace(/\/video$/, '')
-  return `${base}/hls/playlist.m3u8`
+  const { base, token } = splitStreamUrl(streamUrl)
+  return `${base}/hls/playlist.m3u8${token ? `?t=${token}` : ''}`
 }
 
 /** POST al backend para cambiar la pista de audio activa. El backend
@@ -631,10 +632,16 @@ export function hlsUrl(streamUrl: string): string {
  * el ÍNDICE dentro del sub-array de audio de `MediaInfo.streams`
  * (0-based, orden ffprobe).
  *
+ * El session token va vía `Authorization: Bearer` — más limpio para
+ * un POST desde JS (no aparece en logs de acceso HTTP como sí
+ * pasaría con el query param).
+ *
  * Devuelve 204 sin body; error como excepción del fetch. */
 export async function setAudioTrack(streamUrl: string, idx: number): Promise<void> {
-  const base = streamUrl.replace(/\/video$/, '')
-  const r = await fetch(`${base}/hls/audio?idx=${idx}`, { method: 'POST' })
+  const { base, token } = splitStreamUrl(streamUrl)
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const r = await fetch(`${base}/hls/audio?idx=${idx}`, { method: 'POST', headers })
   if (!r.ok) throw new Error(`set audio track ${idx}: HTTP ${r.status}`)
 }
 
@@ -647,11 +654,39 @@ export async function fetchEmbeddedSubtitle(
   streamUrl: string,
   idx: number,
 ): Promise<string> {
-  const base = streamUrl.replace(/\/video$/, '')
-  const r = await fetch(`${base}/subs/embedded/${idx}`)
+  const { base, token } = splitStreamUrl(streamUrl)
+  const r = await fetch(`${base}/subs/embedded/${idx}${token ? `?t=${token}` : ''}`)
   if (r.status === 415) throw new Error('unsupported')
   if (!r.ok) throw new Error(`fetch embedded sub ${idx}: HTTP ${r.status}`)
   return r.text()
+}
+
+/** Descompone la URL del stream (`http://127.0.0.1:PORT/video?t=<hex>`)
+ * en `base` (`http://127.0.0.1:PORT`) + `token` (hex del session
+ * token). Se usa para reconstruir URLs de sub-endpoints (`/probe.json`,
+ * `/hls/playlist.m3u8`, `/hls/audio`, `/subs/embedded/<idx>`)
+ * conservando el token en cada uno.
+ *
+ * Tolerante a URLs viejas sin query (`token` sale como `""`) por si
+ * el usuario abre el player desde un `startStreamHtml` antiguo que
+ * quedó en memoria — sin token la request será rechazada por el
+ * middleware con 401, mensaje claro al usuario, sin data loss. */
+function splitStreamUrl(streamUrl: string): { base: string; token: string } {
+  try {
+    const u = new URL(streamUrl)
+    const token = u.searchParams.get('t') ?? ''
+    // El `pathname` termina en `/video`; lo strippeamos para
+    // reutilizar `base` como raíz para los otros endpoints.
+    const path = u.pathname.replace(/\/video$/, '')
+    return {
+      base: `${u.protocol}//${u.host}${path}`,
+      token,
+    }
+  } catch {
+    // URL malformada — devolvemos algo funcional para no crashear
+    // el player; el fetch acabará fallando con el error de red.
+    return { base: streamUrl.replace(/\/video(\?.*)?$/, ''), token: '' }
+  }
 }
 
 export const streamStats = (id: number) =>

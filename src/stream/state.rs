@@ -74,6 +74,24 @@ pub(super) struct AppState {
     pub(super) handle: Arc<ManagedTorrent>,
     pub(super) file_id: usize,
     pub(super) file_len: u64,
+    /// Token de sesión (H2 audit): 256 bits random generados al
+    /// crear el `StreamHandle`, requerido para acceder a CUALQUIER
+    /// ruta del servidor HTTP local (`/video`, `/hls/*`, `/probe.json`,
+    /// `/subs/embedded/<idx>`).
+    ///
+    /// El middleware `require_session_token` en `handle.rs` acepta el
+    /// token vía dos vías (necesitamos ambas):
+    ///   * **Query param `?t=<hex>`** — obligatorio para `<video src>`
+    ///     y otros contextos donde el WebView carga la URL desde el
+    ///     HTML, sin poder poner headers.
+    ///   * **Header `Authorization: Bearer <hex>`** — para `fetch()`
+    ///     desde JavaScript (p.ej. `POST /hls/audio`).
+    ///
+    /// Antes NO había auth: cualquier página web abierta en el
+    /// navegador del user o cualquier vecino DNS-rebindeado podía
+    /// hacer `fetch('http://127.0.0.1:<port>/hls/audio?idx=99')` y
+    /// causar DoS / exfil del stream. El token cierra ese hueco.
+    pub(super) session_token: Arc<String>,
     /// Token de la petición HTTP en curso para este stream + `Instant`
     /// en que arrancó. Cuando llega una nueva Range request (típicamente
     /// porque VLC ha hecho seek), cancelamos la anterior aquí antes de

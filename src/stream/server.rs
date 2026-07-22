@@ -689,7 +689,10 @@ pub(in crate::stream) async fn ensure_probe(state: &AppState) -> Result<crate::f
     if let Some(info) = guard.as_ref() {
         return Ok(info.clone());
     }
-    let url = format!("http://{}/video", state.local_addr);
+    let url = format!(
+        "http://{}/video?t={}",
+        state.local_addr, state.session_token
+    );
     let handle = state.handle.clone();
     let info = tokio::select! {
         biased;
@@ -868,13 +871,27 @@ pub(super) async fn set_hls_audio(
     // Purgar los `.ts` producidos con la pista anterior. Si no lo
     // hacemos, hls.js pediría un segmento que existe en disco (con
     // audio viejo) → mezcla de audios entre segmentos consecutivos.
+    //
+    // Errores de `remove_file` sí se loguean a `warn` (antes se
+    // tragaban): un remove_file fallido AQUÍ significa que el
+    // fichero de audio viejo va a persistir y causar el bug
+    // exacto que este purge trata de evitar. Sin señal era
+    // invisible.
     if changed {
         if let Ok(iter) = std::fs::read_dir(&dir) {
             for entry in iter.flatten() {
                 let name = entry.file_name();
                 let s = name.to_string_lossy();
                 if s.starts_with("seg-") && (s.ends_with(".ts") || s.ends_with(".ts.tmp")) {
-                    let _ = std::fs::remove_file(entry.path());
+                    let path = entry.path();
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!(
+                            target: "hls",
+                            path = %path.display(),
+                            error = %e,
+                            "audio_switch: no se pudo purgar segmento viejo"
+                        );
+                    }
                 }
             }
         }
@@ -957,7 +974,10 @@ pub(super) async fn serve_embedded_subtitle(
         StatusCode::SERVICE_UNAVAILABLE,
         "ffmpeg no encontrado".to_string(),
     ))?;
-    let input_url = format!("http://{}/video_internal", state.local_addr);
+    let input_url = format!(
+        "http://{}/video_internal?t={}",
+        state.local_addr, state.session_token
+    );
     let extraction_started = std::time::Instant::now();
 
     let output = {
