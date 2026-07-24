@@ -20,6 +20,27 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
 import { useT } from '../lib/i18n'
 
 /**
+ * Caché in-memory del pool cargado + puntero `hasMore` y la posición
+ * seleccionada. Vive fuera del componente para sobrevivir al unmount
+ * cuando el user navega a Torrents/Player/Settings y vuelve. Sin
+ * este caché, remount = re-fetch desde página 0 → el grid arranca
+ * vacío y `ScrollRestore` no encuentra altura suficiente que
+ * restaurar → el user acaba en el top.
+ *
+ * Se invalida sólo si cambia `minRating` (Ajustes) o si el user
+ * pulsa Recargar (`refresh` con `force=true`). Al cerrar la app la
+ * caché muere con el proceso — es intencional: la primera visita
+ * tras arrancar siempre da un pool fresco.
+ */
+interface RecsCache {
+  minRating: number
+  items: Recommendation[]
+  hasMore: boolean
+  sel: number
+}
+let recsCache: RecsCache | null = null
+
+/**
  * Vista `View::Recs` de la TUI adaptada al look "cabina de proyección".
  *
  * Antes había un dropdown de filtros (rating mínimo + top N) que el user
@@ -37,13 +58,17 @@ import { useT } from '../lib/i18n'
 export function Recommendations() {
   const nav = useNavigate()
   const t = useT()
-  const [minRating, setMinRating] = useState<number | null>(null)
-  const [items, setItems] = useState<Recommendation[] | null>(null)
-  const [hasMore, setHasMore] = useState(true)
+  const [minRating, setMinRating] = useState<number | null>(
+    recsCache?.minRating ?? null,
+  )
+  const [items, setItems] = useState<Recommendation[] | null>(
+    recsCache?.items ?? null,
+  )
+  const [hasMore, setHasMore] = useState(recsCache?.hasMore ?? true)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
-  const [sel, setSel] = useState(0)
+  const [sel, setSel] = useState(recsCache?.sel ?? 0)
   const [dismissingId, setDismissingId] = useState<number | null>(null)
   const [menu, setMenu] = useState<{
     x: number
@@ -100,6 +125,11 @@ export function Recommendations() {
       setError(t('series.tauriRequired'))
       return
     }
+    // Si tenemos caché in-memory de una visita anterior, no refetch:
+    // el estado ya está hidratado desde `useState(recsCache?...)` y
+    // el grid renderiza con la misma altura → `ScrollRestore` puede
+    // devolver al user a la posición exacta que dejó.
+    if (recsCache && items !== null) return
     let cancelled = false
     ;(async () => {
       let r = 4.0
@@ -119,8 +149,19 @@ export function Recommendations() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Sync de la caché in-memory con el estado actual. Corre siempre
+  // que cambien `items`, `hasMore`, `minRating` o `sel` — así al
+  // desmontar (nav a Torrents/Player) la caché ya tiene la foto más
+  // reciente para el siguiente mount.
+  useEffect(() => {
+    if (items && minRating != null) {
+      recsCache = { minRating, items, hasMore, sel }
+    }
+  }, [items, hasMore, minRating, sel])
+
   const refresh = () => {
     if (minRating == null) return
+    recsCache = null
     void fetchPage(0, minRating, true)
   }
 

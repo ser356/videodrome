@@ -1,6 +1,6 @@
 [package]
 name = "videodrome"
-version = "1.9.1"
+version = "1.9.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ser356"]

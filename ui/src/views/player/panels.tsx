@@ -117,10 +117,13 @@ export function SubsPanel({
    * vienen filtrados por el caller para excluir bitmap (PGS/DVBSUB).
    * Si está vacío, la sección "Del fichero" no se pinta. */
   embeddedSubs: MediaStream[]
-  /** Índice activo dentro de `embeddedSubs` (0-based), o `null` si
-   * el sub activo no es embedded. */
+  /** Índice GLOBAL de la pista activa (`MediaStream.index`, tal
+   * como lo reporta ffprobe entre TODOS los streams del contenedor),
+   * o `null` si el sub activo no es embedded. Se compara contra
+   * `sub.index` — no contra la posición de `sub` dentro del array
+   * filtrado, porque el filtro de bitmap puede haber saltado índices. */
   activeEmbeddedIdx: number | null
-  onPickEmbedded: (stream: MediaStream, subIdx: number) => void
+  onPickEmbedded: (stream: MediaStream, streamIndex: number) => void
 }) {
   const tr = useT()
   // Idiomas presentes en la lista + conteo. Se ordenan por count
@@ -205,12 +208,12 @@ export function SubsPanel({
           </p>
           <ul className="min-h-0 flex-1 divide-y divide-hairline-soft overflow-y-auto">
             {embeddedSubs.map((sub, idx) => {
-              const isActive = idx === activeEmbeddedIdx
+              const isActive = sub.index === activeEmbeddedIdx
               const label = sub.title || tr('player.trackN', { n: idx + 1 })
               return (
-                <li key={`emb-${idx}`}>
+                <li key={`emb-${sub.index}`}>
                   <button
-                    onClick={() => onPickEmbedded(sub, idx)}
+                    onClick={() => onPickEmbedded(sub, sub.index)}
                     className={`flex w-full items-start justify-between gap-3 px-5 py-3 text-left transition-colors ${
                       isActive ? 'bg-accent/10' : 'hover:bg-surface'
                     }`}

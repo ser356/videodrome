@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import './index.css'
 import { GlobalContextMenu } from './components/GlobalContextMenu'
+import { ScrollRestore } from './components/ScrollRestore'
 import { TorrentDropOverlay } from './components/TorrentDropOverlay'
 import {
   detectClientCapabilities,
@@ -53,6 +54,7 @@ async function bootstrap() {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <BrowserRouter>
+        <ScrollRestore />
         <TorrentDropOverlay />
         <GlobalContextMenu />
         <Routes>

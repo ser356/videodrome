@@ -988,18 +988,37 @@ pub(super) async fn serve_embedded_subtitle(
             .arg("-nostdin")
             // OPCIONES DE INPUT (deben ir ANTES de `-i` — si van
             // después ffmpeg las trata como output y se ignoran).
-            // MKVs con sub-tracks declarados en el header pero con
-            // packets dispersos por el fichero necesitan una ventana
-            // de análisis holgada para que ffmpeg no descarte el
-            // stream.
+            //
+            // `probesize` / `analyzeduration` reducidos: antes usábamos
+            // 50M/60M para MKVs "difíciles", pero eso obliga a ffmpeg
+            // a bajar hasta 50 MB del torrent SOLO para identificar
+            // los streams. Con librqbit sirviendo bajo demanda y el
+            // player consumiendo simultáneamente, la extracción se
+            // colgaba indefinidamente sin devolver output → el fetch
+            // del frontend expiraba en silencio y el sub "seleccionado"
+            // nunca renderizaba. 10M/10s cubre el 99% de los headers
+            // MKV/MP4 reales; si un container muy raro necesita más
+            // lo veremos claro por el timeout de abajo en vez de un
+            // hang mudo.
             .arg("-analyzeduration")
-            .arg("60M")
+            .arg("10M")
             .arg("-probesize")
-            .arg("50M")
+            .arg("10M")
             .arg("-i")
             .arg(&input_url)
+            // `idx` es el índice GLOBAL del stream tal como lo
+            // reporta ffprobe (0-based entre TODOS los streams del
+            // contenedor: video, audio, subs). Usamos `-map 0:{idx}`
+            // en vez del selector subtítulo-solo `0:s:N` para evitar
+            // el bug de descoordinación con el frontend, que filtra
+            // subs bitmap (PGS/DVBSUB) del panel: si el usuario ve
+            // solo el SRT como "Track #1" pero el fichero tiene un
+            // PGS antes, la N post-filter no coincide con la N
+            // subtítulo-solo de ffmpeg → antes salía 415 y el sub
+            // "seleccionado" no renderizaba nada. Con `0:{idx}` el
+            // stream escogido es exacto.
             .arg("-map")
-            .arg(format!("0:s:{idx}"))
+            .arg(format!("0:{idx}"))
             .arg("-c:s")
             .arg("webvtt")
             .arg("-f")
@@ -1013,12 +1032,39 @@ pub(super) async fn serve_embedded_subtitle(
         // parpadearía una consola cada vez que el user selecciona un
         // sub embebido. No-op fuera de Windows.
         cmd.hide_console();
-        cmd.output().await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("spawn ffmpeg: {e}"),
-            )
-        })?
+        tracing::info!(
+            target: "subs",
+            event = "embedded_ffmpeg_spawn",
+            idx,
+            "spawn ffmpeg (probesize=10M, timeout=45s)"
+        );
+        // Timeout duro: si ffmpeg no termina en 45s (torrent lento,
+        // MKV con packets al final del fichero, moov roto…), matamos
+        // el proceso y devolvemos 504. Sin esto, el request quedaba
+        // pending indefinidamente y el player mostraba el sub
+        // seleccionado sin nunca pintar cues.
+        match tokio::time::timeout(std::time::Duration::from_secs(45), cmd.output()).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("spawn ffmpeg: {e}"),
+                ))
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "subs",
+                    event = "embedded_timeout",
+                    idx,
+                    elapsed_ms = extraction_started.elapsed().as_millis() as u64,
+                    "ffmpeg colgado extrayendo sub — probable torrent sin piezas suficientes o container irregular"
+                );
+                return Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "ffmpeg subtitle extraction timed out (torrent incompleto o container irregular)".to_string(),
+                ));
+            }
+        }
     };
 
     if !output.status.success() {
