@@ -50,6 +50,17 @@
 
 @layer base {
   html, body, #root { height: 100%; }
+  /* Anti-overscroll: WKWebView aplica rubber-band elástico incluso
+   * cuando la página no tiene contenido scrollable — se siente como
+   * un "arrastre" del contenido dentro de la ventana. Las apps
+   * nativas macOS no hacen esto salvo en scroll views reales.
+   * `overscroll-behavior: none` corta el bounce sin romper el
+   * scroll normal de las vistas largas (Recomendaciones,
+   * SearchResults) — cuando SÍ hay contenido que scrollear, funciona
+   * como siempre; sólo bloquea el bounce al llegar al borde. */
+  html, body, #root {
+    overscroll-behavior: none;
+  }
   body {
     font-family: var(--font-sans);
     color: var(--color-body);

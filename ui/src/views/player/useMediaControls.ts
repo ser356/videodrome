@@ -82,6 +82,14 @@ export interface UseMediaControlsResult {
   volumeHud: VolumeHudValue | null
   bumpVolumeHud: () => void
 
+  // Pre-cablea el grafo Web Audio (MediaElementSource → GainNode
+  // → destination) sobre el `<video>` actual. Idempotente. Debe
+  // llamarse ANTES de que el decoder de audio arranque de verdad
+  // (típicamente desde `onLoadedMetadata`) para evitar el stall
+  // de pipeline que WKWebView produce si `createMediaElementSource`
+  // se llama sobre un element ya decodificando audio.
+  primeAudio: () => void
+
   // Callbacks.
   seekTo: (absoluteSeconds: number) => void
   seekBy: (delta: number) => void
@@ -327,7 +335,6 @@ export function useMediaControls(
   useEffect(() => {
     if (!pendingHudRef.current) return
     pendingHudRef.current = false
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Flash del HUD tras cambio de volumen/mute vía hotkey/botón.
     setVolumeHud({ volume, muted })
     if (volumeHudTimerRef.current) window.clearTimeout(volumeHudTimerRef.current)
     volumeHudTimerRef.current = window.setTimeout(() => {
@@ -372,9 +379,24 @@ export function useMediaControls(
   const togglePlay = useCallback(() => {
     const v = videoRef.current
     if (!v) return
-    if (v.paused) void v.play()
-    else v.pause()
-  }, [videoRef])
+    if (v.paused) {
+      // Pre-cablear el grafo Web Audio ANTES del primer `play()`.
+      // `createMediaElementSource` sobre un `<video>` que ya está
+      // decodificando audio provoca un stall del pipeline en
+      // WKWebView (~1 s de silencio + micro-pause de vídeo). Si lo
+      // hacemos aquí, el swap ocurre sobre un element parado — el
+      // decoder arranca DESPUÉS con el grafo ya en su sitio y no
+      // hay interrupción visible al primer ArrowUp.
+      //
+      // `togglePlay` es un handler de click/keydown → user gesture
+      // válido para que el AudioContext arranque en estado
+      // `running` (no `suspended`), evitando el path de resume async.
+      ensureAudioGraph()
+      void v.play()
+    } else {
+      v.pause()
+    }
+  }, [videoRef, ensureAudioGraph])
 
   const toggleFullscreen = useCallback(async () => {
     // Fullscreen a nivel de ventana Tauri (macOS: Split View / Space
@@ -420,6 +442,7 @@ export function useMediaControls(
     isFullscreenRef,
     volumeHud,
     bumpVolumeHud,
+    primeAudio: ensureAudioGraph,
     seekTo,
     seekBy,
     togglePlay,

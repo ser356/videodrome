@@ -177,6 +177,7 @@ export function Player() {
     isFullscreenRef,
     volumeHud,
     bumpVolumeHud,
+    primeAudio,
     seekTo,
     seekBy,
     togglePlay,
@@ -523,6 +524,13 @@ export function Player() {
           }}
           onLoadedMetadata={(e) => {
             const v = e.currentTarget
+            // Pre-cablear el grafo Web Audio ANTES de que el
+            // decoder de audio arranque. Si lo hacemos más tarde
+            // (p.ej. al primer ArrowUp), WKWebView resetea el
+            // pipeline en caliente → ~1s de silencio + micro-pause.
+            // Aquí el element ya tiene metadata pero aún no ha
+            // decodificado audio, así que el swap es transparente.
+            primeAudio()
             // Prioridad: seek pendiente tras cambio de audio.
             const pending = postAudioSwitchSeekRef.current
             if (pending) {

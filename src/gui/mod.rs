@@ -639,7 +639,7 @@ async fn shuffle_pick(
         .discover_movies(&filters, 1)
         .await
         .map_err(|e| e.to_string())?;
-    let cap = first.total_pages.min(500).max(1);
+    let cap = first.total_pages.clamp(1, 500);
 
     tracing::info!(
         target: "shuffle",
